@@ -140,6 +140,16 @@ export const SETUP_CHECK_SECONDS = 3;
  */
 export const ESCALATION_CONSECUTIVE_READS = 2;
 
+/**
+ * Minimum gap between enforced pauses.
+ *
+ * "Two consecutive high reads" meant two minutes of evidence at the old
+ * one-a-minute cadence and means thirty seconds at a 15-second stride. Without
+ * a floor, a bad afternoon would lock the timer every half-minute, which is no
+ * longer a protective interruption — it is the app refusing to let you work.
+ */
+export const ENFORCED_COOLDOWN_SECONDS = 8 * 60;
+
 /** Adaptive Pomodoro bounds, in minutes. */
 export const POMODORO = {
   DEFAULT_MINUTES: 25,

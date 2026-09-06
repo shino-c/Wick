@@ -29,6 +29,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ENFORCED_COOLDOWN_SECONDS,
   ESCALATION_CONSECUTIVE_READS,
   FACE,
   POMODORO,
@@ -234,6 +235,17 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
   const consecutiveHigh = useRef<number>(0);
   const enforcedAtIndex = useRef<number | null>(null);
   const enforcedLeft = useRef<number>(0);
+  /**
+   * Earliest time another enforced pause may fire.
+   *
+   * At the old one-a-minute cadence, "two consecutive High reads" was two
+   * minutes of evidence. At a 15-second stride it is thirty seconds, so a
+   * genuinely bad session could lock the timer every half-minute — which stops
+   * being a protective interruption and starts being the app refusing to let
+   * you work. Rate-limiting the lock keeps the rule's meaning intact whatever
+   * the sensing cadence.
+   */
+  const enforcedCooldownUntil = useRef<number>(0);
   const facesRef = useRef<FaceBox[]>([]);
   const discarded = useRef<number>(0);
   /** Whole-session movement tally, one entry per second of focus. */
@@ -330,8 +342,13 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
       });
 
       // Enforced pause. Deliberately not a dismissible notification.
-      if (consecutiveHigh.current >= ESCALATION_CONSECUTIVE_READS && phaseRef.current === 'focus') {
+      if (
+        consecutiveHigh.current >= ESCALATION_CONSECUTIVE_READS &&
+        phaseRef.current === 'focus' &&
+        Date.now() >= enforcedCooldownUntil.current
+      ) {
         consecutiveHigh.current = 0;
+        enforcedCooldownUntil.current = Date.now() + ENFORCED_COOLDOWN_SECONDS * 1000;
         enforcedLeft.current = POMODORO.ENFORCED_BREAK_SECONDS;
         setState((s) => {
           enforcedAtIndex.current = s.readings.length - 1;
@@ -638,6 +655,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     setupStart.current = Date.now();
     burstIndex.current = 0;
     consecutiveHigh.current = 0;
+    enforcedCooldownUntil.current = 0;
     enforcedAtIndex.current = null;
     discarded.current = 0;
     movementTally.current = { moving: 0, total: 0 };

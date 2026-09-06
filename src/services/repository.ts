@@ -229,8 +229,15 @@ export async function hasQuestionnaireAnswers(): Promise<boolean> {
  * rather than a placeholder value that would fake agreement.
  */
 export async function recomputeFusedScore(loadScore?: number): Promise<FusionResult> {
-  const [scans, self] = await Promise.all([listScans(5), latestSelfReport()]);
-  const bio = scans.find((s) => s.signalQuality === 'good' && s.deviationPct !== null);
+  const [scans, self] = await Promise.all([listScans(20), latestSelfReport()]);
+  const usable = scans.filter((s) => s.signalQuality === 'good' && s.deviationPct !== null);
+  // A 45-second finger scan under torch light and a 40-second face reading in
+  // room light are not equally trustworthy, and taking whichever happened to be
+  // most recent treated them as if they were. A recent spot check wins; a face
+  // reading is the fallback, and the recency decay in fusionService still
+  // discounts a stale one.
+  const bio =
+    usable.find((s) => s.source === 'finger' && ageHours(s.createdAt) < 12) ?? usable[0];
 
   const fusion = fuseStressScore({
     biometric:
