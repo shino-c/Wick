@@ -95,7 +95,6 @@ Navigation is expo-router; the file tree under `src/app/` *is* the route table. 
 | `/session`, `/summary` | Active session, post-session summary | Pillar 2 |
 | `/social` | Circles | Pillar 6 |
 | `/add-friend` | Invite-code friend flow | Pillar 6 |
-| `/recovery` | Recovery tab — breathing check, soundscape, circle recovery | Pillar 3/6 |
 | `/calibrate` | Calibration hub. Not a tab: reached from Desk Mode, because it configures Desk Mode | Pillar 3 |
 | `/my-challenges` | What you joined, finished and missed | Pillar 6 |
 | `/questionnaire`, `/spot-check`, `/breathing` | Baseline, finger-PPG, breathing | Pillar 3 |

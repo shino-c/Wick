@@ -4,6 +4,25 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 type TabName = 'Home' | 'Desk' | 'Recovery' | 'Social';
 
+/*
+ * RECOVERY TAB — reserved for Shino.
+ *
+ * The entry is removed rather than left in place, because a tab that goes
+ * nowhere is worse than a tab that is not there: this one already shipped once
+ * pointing at '/recovery' when no such route existed, and tapping it silently
+ * did nothing. TabName still lists 'Recovery' so nothing else needs touching
+ * when it comes back.
+ *
+ * To restore, add this to `tabs` between Desk and Social and create the route:
+ *
+ *   {
+ *     name: 'Recovery',
+ *     route: '/recovery',
+ *     activeIcon: 'heart-pulse',
+ *     inactiveIcon: 'heart-pulse',
+ *   },
+ */
+
 interface BottomNavigationProps {
   activeTab?: TabName;
   router?: any; // Expo Router instance
@@ -25,12 +44,6 @@ export default function BottomNavigation({
       route: '/desk',
       activeIcon: 'table-furniture',
       inactiveIcon: 'table-furniture',
-    },
-    {
-      name: 'Recovery',
-      route: '/recovery',
-      activeIcon: 'heart-pulse',
-      inactiveIcon: 'heart-pulse',
     },
     {
       name: 'Social',

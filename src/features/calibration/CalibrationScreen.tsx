@@ -214,19 +214,33 @@ export default function CalibrationScreen() {
       <Card>
         <Row style={{ justifyContent: 'space-between' }}>
           <View style={{ flex: 1, paddingRight: spacing(3) }}>
-            <Txt v="heading">1-Minute Breathing</Txt>
+            <Txt v="heading">Paced breathing</Txt>
             <Spacer h={1} />
             <Txt v="small" color={colors.inkSoft}>
-              Paced at 5.5 breaths per minute — the rate that most reliably lifts vagal tone.
+              5.5 breaths per minute — the rate that most reliably lifts vagal tone.
             </Txt>
           </View>
-          <Button
-            label="Start"
-            variant="soft"
-            style={{ height: 40, paddingHorizontal: spacing(5) }}
-            onPress={() => router.push('/breathing')}
-          />
         </Row>
+        <Spacer h={4} />
+        <Button label="Breathing check · 2 min" onPress={() => router.push('/breathing')} />
+        <Spacer h={2} />
+        <Txt v="small" color={colors.inkFaint}>
+          Finger on the camera throughout. Wick reads your pulse before, during and after, and shows
+          you what changed.
+        </Txt>
+        <Spacer h={3} />
+        {/* The unmeasured version stays available on purpose: "let me measure
+            that" is not always a welcome answer to feeling awful, and an app
+            that insists on instrumenting every calm moment stops being restful. */}
+        <Button
+          label="Just the pacer · 1 min"
+          variant="ghost"
+          onPress={() => router.push({ pathname: '/breathing', params: { pacerOnly: '1' } })}
+        />
+        <Spacer h={2} />
+        <Txt v="small" color={colors.inkFaint}>
+          Nothing measured, nothing saved, camera never opened.
+        </Txt>
       </Card>
 
       <Spacer h={3} />
