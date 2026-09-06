@@ -15,8 +15,19 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ESCALATION_CONSECUTIVE_READS, FACE, POMODORO, SETUP_CHECK_SECONDS } from './config';
-import { checkFaceFraming, type FrameSample, type FramingIssue } from './frameSampling';
-import { cameraAvailable, requestCameraPermission, type FaceBox } from './CaptureCamera';
+import {
+  checkFaceFraming,
+  facePresent,
+  SKIN_PRESENCE_THRESHOLD,
+  type FrameSample,
+  type FramingIssue,
+} from './frameSampling';
+import {
+  cameraAvailable,
+  faceDetectionAvailable,
+  requestCameraPermission,
+  type FaceBox,
+} from './CaptureCamera';
 import { rampedProfile, simulateBurst } from './simulator';
 import { PPGService, type StressLevel } from '@/services/ppgService';
 import { getBaseline } from '@/services/repository';
@@ -57,8 +68,10 @@ export interface DeskSessionState {
   blockSeconds: number;
   setupIssue: FramingIssue;
   setupSecondsLeft: number;
-  /** Live face boxes, for the cropped preview and the framing indicator. */
+  /** Live face boxes. Populated on iOS only; empty elsewhere. */
   faces: FaceBox[];
+  /** Whether a person appears to be in front of the camera right now. */
+  present: boolean;
   /** Why the last burst was thrown away, if it was. */
   lastDiscardReason: string | null;
   /** True while a burst is running: camera on, indicator lit. */
@@ -114,6 +127,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     setupIssue: null,
     setupSecondsLeft: SETUP_CHECK_SECONDS,
     faces: [],
+    present: false,
     lastDiscardReason: null,
     sampling: false,
     readings: [],
@@ -261,11 +275,18 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
 
       if (phase === 'setup') {
         setupSamples.current.push(sample);
+        const nowPresent = faceDetectionAvailable
+          ? facesRef.current.length === 1
+          : facePresent(setupSamples.current);
+        setState((s) => (s.present === nowPresent ? s : { ...s, present: nowPresent }));
         const elapsed = (Date.now() - setupStart.current) / 1000;
         // Lighting alone is not framing. A wall at a reasonable brightness used
         // to pass this check; now the face detector has to see exactly one
         // person before the countdown is allowed to run down.
-        const issue = checkFaceFraming(setupSamples.current.slice(-45), facesRef.current.length);
+        const issue = checkFaceFraming(
+          setupSamples.current.slice(-45),
+          faceDetectionAvailable ? facesRef.current.length : null
+        );
         setState((s) => ({
           ...s,
           setupIssue: issue,
@@ -283,7 +304,16 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
       if (!burstStart.current) return;
       burstSamples.current.push(sample.mean);
       burstTotalFrames.current += 1;
-      if (facesRef.current.length === 1) burstFaceFrames.current += 1;
+      // Presence per frame. Where a real detector exists it is authoritative;
+      // otherwise skin coverage of the sampled region stands in for it.
+      const present = faceDetectionAvailable
+        ? facesRef.current.length === 1
+        : sample.skinFraction >= SKIN_PRESENCE_THRESHOLD;
+      if (present) burstFaceFrames.current += 1;
+
+      if (!faceDetectionAvailable) {
+        setState((s) => (s.present === present ? s : { ...s, present }));
+      }
 
       const elapsed = (Date.now() - burstStart.current) / 1000;
       if (elapsed >= burstLength) {

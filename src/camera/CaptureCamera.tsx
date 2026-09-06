@@ -6,19 +6,16 @@
  * there, this module resolves them at runtime and reports `cameraAvailable`.
  * When it's false the whole app falls back to src/camera/simulator.ts.
  *
- * Two outputs are attached:
- *   • a frame output, which reduces each frame to one number (frameSampling.ts)
- *   • an object output with type 'face', which gives a bounding box per face
- *
- * The face output is what makes the readings trustworthy. It supplies the
- * sampling ROI, it proves a person is actually in frame, and it detects a
- * second face so a burst can be dropped when someone walks in behind you.
+ * A frame output reduces each frame to one number (frameSampling.ts). On iOS an
+ * object output is attached alongside it for real face detection; on Android
+ * that API throws, so presence falls back to the skin-coverage heuristic that
+ * frameSampling computes from the same pixels.
  *
  * Power behaviour: the session is torn down (`isActive={false}`) the instant a
  * burst ends, so between Desk Mode bursts the camera hardware is genuinely off.
  */
 import React from 'react';
-import { AppState, View } from 'react-native';
+import { AppState, Platform, View } from 'react-native';
 import { sampleFrame, type Channel, type FrameSample, type Roi } from './frameSampling';
 import { PREVIEW_SIZE } from './config';
 
@@ -43,6 +40,19 @@ try {
 } catch {
   // Same.
 }
+
+/**
+ * VisionCamera 5's object output — and therefore its face detector — is iOS
+ * only. On Android `createObjectOutput` throws outright:
+ *
+ *   throw Error("CameraObjectOutput is not available on Android!")
+ *
+ * So face detection is treated as an enhancement, never a dependency. Presence
+ * is derived from skin coverage in the sampled pixels (frameSampling.ts), which
+ * works on both platforms; where the detector exists it additionally sharpens
+ * the ROI and catches a second person in frame.
+ */
+export const faceDetectionAvailable: boolean = Platform.OS === 'ios';
 
 export const cameraAvailable: boolean =
   Boolean(
@@ -97,7 +107,40 @@ export interface CaptureCameraProps {
 
 export function CaptureCamera(props: CaptureCameraProps) {
   if (!cameraAvailable) return null;
+  // Platform.OS is constant for the life of the process, so picking a component
+  // here keeps hook order stable inside each one.
+  if (props.trackFaces && faceDetectionAvailable) {
+    return <CaptureWithFaceDetector {...props} />;
+  }
   return <RealCaptureCamera {...props} />;
+}
+
+/** iOS only. Adds the native face detector on top of the base capture. */
+function CaptureWithFaceDetector(props: CaptureCameraProps) {
+  const { useObjectOutput } = VisionCameraLib;
+  const { onFaces, trackFaces } = props;
+
+  const faceSink = React.useRef(onFaces);
+  faceSink.current = onFaces;
+  const boxRef = React.useRef<Roi | null>(null);
+
+  const onObjectsScanned = React.useCallback((objects: any[]) => {
+    const boxes: FaceBox[] = (objects ?? [])
+      .filter((o) => o?.boundingBox)
+      .map((o) => ({
+        x: o.boundingBox.x,
+        y: o.boundingBox.y,
+        width: o.boundingBox.width,
+        height: o.boundingBox.height,
+      }));
+    const primary = boxes.slice().sort((a, b) => b.width * b.height - a.width * a.height)[0];
+    boxRef.current = primary ? insetBox(primary) : null;
+    faceSink.current?.(boxes);
+  }, []);
+
+  const objectOutput = useObjectOutput({ types: ['face'], onObjectsScanned });
+
+  return <RealCaptureCamera {...props} extraOutput={objectOutput} dynamicRoi={boxRef} trackFaces={trackFaces} />;
 }
 
 /**
@@ -112,13 +155,18 @@ function RealCaptureCamera({
   roi,
   stride,
   onSample,
-  trackFaces = false,
-  onFaces,
   preview = 'none',
   faceBox,
   size = PREVIEW_SIZE,
-}: CaptureCameraProps) {
-  const { Camera, useFrameOutput, useObjectOutput } = VisionCameraLib;
+  extraOutput,
+  dynamicRoi,
+}: CaptureCameraProps & {
+  /** iOS face-detector output, when the wrapper supplied one. */
+  extraOutput?: any;
+  /** Live ROI from the detector. Falls back to the static `roi` when absent. */
+  dynamicRoi?: React.RefObject<Roi | null>;
+}) {
+  const { Camera, useFrameOutput } = VisionCameraLib;
   const { scheduleOnRN } = Worklets;
 
   // Camera must also stop when the app is backgrounded — on iOS the OS
@@ -135,52 +183,18 @@ function RealCaptureCamera({
   sink.current = onSample;
   const deliver = React.useCallback((s: FrameSample) => sink.current(s), []);
 
-  // The sampling ROI follows the face. Held in a ref so the frame processor
-  // reads the newest box without being recreated each time the face moves.
-  const roiRef = React.useRef<Roi>(roi);
-  React.useEffect(() => {
-    if (!trackFaces) roiRef.current = roi;
-  }, [roi, trackFaces]);
-
-  const faceSink = React.useRef(onFaces);
-  faceSink.current = onFaces;
-
-  const onObjectsScanned = React.useCallback(
-    (objects: any[]) => {
-      const boxes: FaceBox[] = (objects ?? [])
-        .filter((o) => o?.boundingBox)
-        .map((o) => ({
-          x: o.boundingBox.x,
-          y: o.boundingBox.y,
-          width: o.boundingBox.width,
-          height: o.boundingBox.height,
-        }));
-
-      if (trackFaces) {
-        // Sample the middle of the largest face — the edges of the box slide on
-        // and off skin as the head moves, which reads as noise.
-        const primary = boxes.slice().sort((a, b) => b.width * b.height - a.width * a.height)[0];
-        roiRef.current = primary ? insetBox(primary) : { x: 0, y: 0, w: 0, h: 0 };
-      }
-      faceSink.current?.(boxes);
-    },
-    [trackFaces]
-  );
-
-  const objectOutput = useObjectOutput({
-    types: trackFaces ? ['face'] : [],
-    onObjectsScanned: trackFaces ? onObjectsScanned : undefined,
-  });
+  // Sampling region. On iOS this tracks the detected face; elsewhere it is the
+  // static centre box, and presence is judged from skin coverage instead.
+  const staticRoi = React.useRef<Roi>(roi);
+  staticRoi.current = roi;
+  const liveRoi = dynamicRoi;
 
   const onFrame = React.useCallback(
     (frame: any) => {
       'worklet';
       try {
-        const box = roiRef.current;
-        // Zero-area ROI means no face is in frame: emit nothing, so the burst
-        // ends up short of frames and is discarded rather than filled with
-        // readings taken off a wall.
-        if (box.w > 0 && box.h > 0) {
+        const box = liveRoi?.current ?? staticRoi.current;
+        if (box && box.w > 0 && box.h > 0) {
           const sample = sampleFrame(frame, channel, box, stride);
           if (sample) scheduleOnRN(deliver, sample);
         }
@@ -190,7 +204,7 @@ function RealCaptureCamera({
         frame.dispose();
       }
     },
-    [channel, stride, deliver, scheduleOnRN]
+    [channel, stride, deliver, scheduleOnRN, liveRoi]
   );
 
   const frameOutput = useFrameOutput({
@@ -204,11 +218,16 @@ function RealCaptureCamera({
   });
 
   const outputs = React.useMemo(
-    () => (trackFaces ? [frameOutput, objectOutput] : [frameOutput]),
-    [frameOutput, objectOutput, trackFaces]
+    () => (extraOutput ? [frameOutput, extraOutput] : [frameOutput]),
+    [frameOutput, extraOutput]
   );
 
   const isActive = active && foreground;
+
+  // Front cameras have no flash unit, and CameraX throws IllegalStateException
+  // if torchMode is set on one at all — even to 'off'. So the prop is omitted
+  // entirely unless we're on a lens that can actually have a torch.
+  const torchProps = facing === 'back' ? { torchMode: torch ? 'on' : 'off' } : {};
 
   return (
     <View style={containerStyle(preview, size)} pointerEvents="none">
@@ -221,7 +240,7 @@ function RealCaptureCamera({
           constraints={[{ fps: 30 }]}
           // VisionCamera 5 renamed this from `torch`. The old name is silently
           // ignored, which is exactly how the flashlight ended up never firing.
-          torchMode={torch ? 'on' : 'off'}
+          {...torchProps}
         />
       </View>
     </View>

@@ -118,7 +118,7 @@ export default function SessionScreen() {
       onSample={session.onSample}
       trackFaces
       onFaces={session.onFaces}
-      preview={session.cameraActive ? PREVIEW_MODE : 'none'}
+      preview={session.cameraActive ? (session.primaryFace ? PREVIEW_MODE : 'full') : 'none'}
       faceBox={session.primaryFace}
       size={PREVIEW_SIZE}
     />
@@ -188,7 +188,7 @@ function SetupCheck({
           {/* The live face crop sits inside the ring, so you can see your own
               framing while the countdown runs. */}
           <View style={{ alignItems: 'center', justifyContent: 'center' }}>
-            {session.primaryFace ? camera : <View style={{ opacity: 0 }}>{camera}</View>}
+            {camera}
             <Spacer h={2} />
             <Txt v="title" color={colors.onNight}>
               {session.setupSecondsLeft}
@@ -291,17 +291,17 @@ function ActiveSession({
               style={{
                 borderWidth: 2,
                 borderRadius: (PREVIEW_SIZE + 8) / 2,
-                borderColor: session.primaryFace ? colors.calm : colors.warn,
+                borderColor: session.present ? colors.calm : colors.warn,
                 padding: 2,
               }}
             >
               {camera}
             </View>
             <View style={{ flex: 1 }}>
-              <Txt v="heading" color={session.primaryFace ? colors.calm : colors.warn}>
+              <Txt v="heading" color={session.present ? colors.calm : colors.warn}>
                 {session.faces.length > 1
                   ? 'Two people in frame'
-                  : session.primaryFace
+                  : session.present
                     ? 'Reading your pulse'
                     : 'Looking for your face'}
               </Txt>
@@ -309,7 +309,7 @@ function ActiveSession({
               <Txt v="small" color={colors.onNightSoft}>
                 {session.faces.length > 1
                   ? 'Wick reads only you — this burst will be dropped.'
-                  : session.primaryFace
+                  : session.present
                     ? 'Stay roughly still for a few seconds.'
                     : 'Sit back in view of the camera.'}
               </Txt>

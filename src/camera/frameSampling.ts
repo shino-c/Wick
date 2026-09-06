@@ -28,6 +28,17 @@ export interface FrameSample {
   brightness: number;
   /** Spatial variance inside the ROI. High variance = not a flat skin surface. */
   variance: number;
+  /**
+   * Fraction of sampled pixels whose colour looks like skin, 0–1.
+   *
+   * This is how Desk Mode knows somebody is actually in front of the camera.
+   * VisionCamera 5's real face detector is iOS-only (`createObjectOutput`
+   * throws on Android), so presence has to be derived from the pixels we are
+   * already reading. It is a heuristic, not face recognition — it answers
+   * "is a skin-coloured surface filling the sampling region", which is exactly
+   * the precondition rPPG needs, and nothing more.
+   */
+  skinFraction: number;
 }
 
 /**
@@ -68,6 +79,7 @@ export function sampleFrame(frame: any, channel: Channel, roi: Roi, stride: numb
   let sum = 0;
   let sumSq = 0;
   let sumAll = 0;
+  let skin = 0;
   let count = 0;
 
   for (let y = y0; y < y1; y += stride) {
@@ -75,10 +87,26 @@ export function sampleFrame(frame: any, channel: Channel, roi: Roi, stride: numb
     for (let x = x0; x < x1; x += stride) {
       const i = rowStart + x * bpp;
       if (i + 2 >= data.length) continue;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
       const v = data[i + offset];
       sum += v;
       sumSq += v * v;
-      sumAll += data[i] + data[i + 1] + data[i + 2];
+      sumAll += r + g + b;
+
+      // Normalised rg-chromaticity skin test. Dividing out total intensity
+      // makes it far less sensitive to lighting and to skin tone than a raw
+      // RGB threshold — the ratios cluster similarly across complexions, while
+      // absolute brightness does not.
+      const total = r + g + b;
+      if (total > 90) {
+        const rn = r / total;
+        const gn = g / total;
+        if (rn > 0.33 && rn < 0.5 && gn > 0.26 && gn < 0.363 && r > g && g > b) {
+          skin++;
+        }
+      }
       count++;
     }
   }
@@ -89,6 +117,7 @@ export function sampleFrame(frame: any, channel: Channel, roi: Roi, stride: numb
     mean,
     brightness: sumAll / (count * 3),
     variance: Math.max(0, sumSq / count - mean * mean),
+    skinFraction: skin / count,
   };
 }
 
@@ -104,16 +133,39 @@ export type FramingIssue =
   | null;
 
 /**
+ * Minimum skin coverage of the sampling region for a person to count as present.
+ * A face filling the centre box clears this comfortably; a wall, a ceiling or an
+ * empty chair does not.
+ */
+export const SKIN_PRESENCE_THRESHOLD = 0.3;
+
+/** True when the recent samples look like a person, not a room. */
+export function facePresent(samples: FrameSample[]): boolean {
+  if (samples.length === 0) return false;
+  const recent = samples.slice(-15);
+  const avg = recent.reduce((s, x) => s + x.skinFraction, 0) / recent.length;
+  return avg >= SKIN_PRESENCE_THRESHOLD;
+}
+
+/**
  * Setup check for face rPPG.
  *
- * Face presence is checked FIRST and is not negotiable. An earlier version
- * tested only brightness and drift, which meant a well-lit wall passed the
- * check and the session went on to report a heart rate for it. Light is a
- * quality condition; a face is a correctness one.
+ * Presence is checked FIRST and is not negotiable. An earlier version tested
+ * only brightness and drift, which meant a well-lit wall passed and the session
+ * went on to report a heart rate for it. Light is a quality condition; a person
+ * being there is a correctness one.
+ *
+ * @param faceCount from the real face detector where one exists (iOS). Pass
+ *                  null on platforms without it — presence then rests on the
+ *                  skin heuristic alone, and multi-person detection is skipped.
  */
-export function checkFaceFraming(samples: FrameSample[], faceCount: number): FramingIssue {
-  if (faceCount === 0) return 'no_face';
-  if (faceCount > 1) return 'multiple_faces';
+export function checkFaceFraming(samples: FrameSample[], faceCount: number | null): FramingIssue {
+  if (faceCount !== null) {
+    if (faceCount === 0) return 'no_face';
+    if (faceCount > 1) return 'multiple_faces';
+  } else if (!facePresent(samples)) {
+    return 'no_face';
+  }
   if (samples.length === 0) return 'unstable';
 
   const brightness = mean(samples.map((s) => s.brightness));
