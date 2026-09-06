@@ -3,7 +3,7 @@ import { Pressable, View } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { useFocusEffect, useRouter } from 'expo-router';
 
-import { Badge, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
+import { Emoji, Badge, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
 import BottomNavigation from '@/components/bottombar';
 import { colors, radius, spacing } from '@/theme';
 import { SEGMENTS } from '@/camera/useBreathingScan';
@@ -85,9 +85,7 @@ export default function RecoveryScreen() {
       <Card style={{ backgroundColor: colors.yellowWash, borderColor: colors.yellowDeep }}>
         <Row style={{ justifyContent: 'space-between' }}>
           <Row gap={2}>
-            <Txt v="body" style={{ fontSize: 20 }}>
-              🫁
-            </Txt>
+            <Emoji size={20}>🫁</Emoji>
             <Txt v="heading">Breathing check</Txt>
           </Row>
           <Badge label="measured" fg={colors.brownSoft} bg={colors.surface} />

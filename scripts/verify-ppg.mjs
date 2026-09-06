@@ -85,5 +85,61 @@ const bandOk = residual < 0.2;
 if (!bandOk) failures++;
 console.log(`\n  ${bandOk ? 'ok  ' : 'FAIL'} 0.1 Hz drift attenuated to ${residual.toFixed(4)} (< 0.2)`);
 
+// ── The regularity gate ─────────────────────────────────────────────────────
+// Anything pushed through a 0.7-3.5 Hz bandpass comes out oscillating, and peak
+// detection will turn those oscillations into "beats". That is how a bright
+// flat surface under the torch, or a well-lit wall, used to produce a confident
+// BPM with nobody attached to it. What noise cannot fake is REGULARITY: a
+// resting heart spaces its beats within a few percent; filtered noise does not.
+// MAX_IBI_CV in ppgService.ts is the gate — this checks it still bites, and
+// that it does not bite a real pulse.
+const MAX_IBI_CV = 0.2;
+
+function ibiCv(signal) {
+  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
+  const filtered = filtfilt(butterBandpass(4, 0.7, 3.5, FPS), signal.map((v) => v - mean));
+  const peaks = findPeaks(filtered, Math.floor(FPS * 0.4), 0.01);
+  if (peaks.length < 5) return null;
+  const ibi = [];
+  for (let i = 1; i < peaks.length; i++) ibi.push(((peaks[i] - peaks[i - 1]) / FPS) * 1000);
+  const valid = ibi.filter((v) => v > 300 && v < 2000);
+  if (valid.length < 3) return null;
+  const m = valid.reduce((a, b) => a + b, 0) / valid.length;
+  const sd = Math.sqrt(valid.reduce((acc, v) => acc + (v - m) ** 2, 0) / valid.length);
+  return sd / m;
+}
+
+let seed = 987654321;
+const flatNoise = () => {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return (seed / 0x7fffffff) * 2 - 1;
+};
+
+console.log('');
+for (const level of [1, 3, 8]) {
+  // A flat, bright, pulseless surface — what the lens sees resting on a desk
+  // with the torch on and no finger anywhere near it.
+  const flat = Array.from({ length: 45 * FPS }, () => 180 + flatNoise() * level);
+  const cv = ibiCv(flat);
+  const rejected = cv === null || cv > MAX_IBI_CV;
+  if (!rejected) failures++;
+  console.log(
+    `  ${rejected ? 'ok  ' : 'FAIL'} flat surface +/-${level}: ${
+      cv === null ? 'no usable peaks' : `IBI variation ${(cv * 100).toFixed(0)}%`
+    } -> ${rejected ? 'rejected' : 'ACCEPTED AS A PULSE'}`
+  );
+}
+
+for (const bpm of [55, 72, 95]) {
+  const cv = ibiCv(synth(bpm, 45, { noise: 0.4 }));
+  const ok = cv !== null && cv <= MAX_IBI_CV;
+  if (!ok) failures++;
+  console.log(
+    `  ${ok ? 'ok  ' : 'FAIL'} real pulse ${bpm} bpm: IBI variation ${
+      cv === null ? 'n/a' : (cv * 100).toFixed(0) + '%'
+    } -> ${ok ? 'accepted' : 'WRONGLY REJECTED'}`
+  );
+}
+
 console.log(failures === 0 ? '\nAll PPG checks passed.' : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

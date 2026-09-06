@@ -2,7 +2,7 @@ import React from 'react';
 import { View } from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
-import { Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
+import { Emoji, Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing } from '@/theme';
 import {
   cancelChallenge,
@@ -114,9 +114,7 @@ export default function ChallengeDetailScreen() {
             justifyContent: 'center',
           }}
         >
-          <Txt v="body" style={{ fontSize: 24 }}>
-            {meta.icon}
-          </Txt>
+          <Emoji size={24}>{meta.icon}</Emoji>
         </View>
         <View style={{ flex: 1 }}>
           <Row gap={2}>

@@ -2,7 +2,7 @@ import React from 'react';
 import { Pressable, ScrollView, TextInput, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
+import { Emoji, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing, type as typeTokens } from '@/theme';
 import { createChallenge, getChallenge, updateChallenge } from '@/services/repository';
 import type { ChallengeCategory, ChallengeKind, ChallengeVerification } from '@/data/types';
@@ -299,9 +299,7 @@ export default function CreateChallengeScreen() {
                   borderColor: selected ? colors.yellowDeep : colors.line,
                 }}
               >
-                <Txt v="body" style={{ fontSize: 20 }}>
-                  {c.icon}
-                </Txt>
+                <Emoji size={20}>{c.icon}</Emoji>
                 <Txt v="small" color={selected ? colors.brown : colors.inkSoft}>
                   {c.label}
                 </Txt>

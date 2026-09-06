@@ -1,8 +1,8 @@
 import React from 'react';
-import { View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { Badge, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
+import { Badge, Button, Card, Emoji, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Ring, Sparkline } from '@/components/charts';
 import { colors, radius, spacing, stressColor } from '@/theme';
 import { CaptureCamera } from '@/camera/CaptureCamera';
@@ -106,6 +106,15 @@ export default function SpotCheckScreen() {
 
 /* ── capture ──────────────────────────────────────────────────────── */
 
+/**
+ * The lens circle is derived from the ring rather than guessed. Inner diameter
+ * is size - 2*stroke; the extra inset keeps a hairline of background between
+ * the two so the preview does not appear to bleed into the progress arc.
+ */
+const RING_SIZE = 220;
+const RING_STROKE = 10;
+const LENS = RING_SIZE - RING_STROKE * 2 - 6;
+
 function CaptureView({
   scan,
   scansLeft,
@@ -122,7 +131,7 @@ function CaptureView({
       : scan.framingIssue
         ? FRAMING_MESSAGE[scan.framingIssue]
         : capturing
-          ? 'Hold steady. Reading your pulse…'
+          ? 'Hold steady, light pressure. A number that keeps jumping means the contact is off.'
           : 'Looking for your fingertip…';
 
   const live = scan.phase === 'framing' || capturing;
@@ -132,54 +141,87 @@ function CaptureView({
       <Spacer h={4} />
       <Ring
         progress={scan.progress}
-        size={220}
-        stroke={10}
+        size={RING_SIZE}
+        stroke={RING_STROKE}
         color={scan.framingIssue ? colors.warn : colors.yellowDeep}
         track={colors.line}
       >
-        {/* The camera preview sits inside the ring. On this screen a preview is
-            genuinely useful and carries no bystander risk: the lens is pressed
-            against a fingertip, so the only thing it can show is the finger. */}
-        {live && (
-          <View style={{ position: 'absolute' }}>
-            <CaptureCamera
-              facing="back"
-              active
-              torch
-              channel={FINGER.CHANNEL}
-              roi={FINGER.ROI}
-              stride={FINGER.PIXEL_STRIDE}
-              onSample={scan.onSample}
-              preview="full"
-              size={170}
-            />
-          </View>
-        )}
+        {/* One circular lens, sized to sit just inside the ring's stroke.
+            Previously the preview was a rounded SQUARE of 170 inside a ring
+            whose inner diameter is 200, which left a dark rectangle showing at
+            the corners and an obvious gap all the way round. Everything here is
+            now the same circle: the camera, the scrim over it, and the content. */}
         <View
           style={{
+            width: LENS,
+            height: LENS,
+            borderRadius: LENS / 2,
+            overflow: 'hidden',
             alignItems: 'center',
             justifyContent: 'center',
-            backgroundColor: live ? 'rgba(61,58,52,0.45)' : 'transparent',
-            width: 170,
-            height: 170,
-            borderRadius: 85,
+            backgroundColor: live ? colors.night : colors.cream,
           }}
         >
+          {/* A preview here carries no bystander risk: the lens is pressed
+              against a fingertip, so the only thing it can show is the finger. */}
+          {live && (
+            <View style={StyleSheet.absoluteFill}>
+              <CaptureCamera
+                facing="back"
+                active
+                torch
+                channel={FINGER.CHANNEL}
+                roi={FINGER.ROI}
+                stride={FINGER.PIXEL_STRIDE}
+                onSample={scan.onSample}
+                preview="full"
+                size={LENS}
+              />
+            </View>
+          )}
+          {live && (
+            <View
+              style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(61,58,52,0.45)' }]}
+            />
+          )}
+
           {capturing ? (
             <>
-              <Txt v="display" color="#FFFFFF">
-                {scan.secondsLeft}
-              </Txt>
-              <Eyebrow color="#FFFFFF">seconds left</Eyebrow>
+              {/* The live BPM is the reassuring part: a number that settles
+                  means the contact is good, and one that jumps around means it
+                  is not — while there is still time to fix it. */}
+              {scan.liveHeartRate !== null ? (
+                <>
+                  <Row gap={2} style={{ alignItems: 'flex-end' }}>
+                    <Txt v="display" color="#FFFFFF" style={{ fontSize: 46 }}>
+                      {Math.round(scan.liveHeartRate)}
+                    </Txt>
+                    <Txt v="heading" color="#FFFFFF" style={{ paddingBottom: 8 }}>
+                      bpm
+                    </Txt>
+                  </Row>
+                  <Eyebrow color="rgba(255,255,255,0.75)">{scan.secondsLeft}s left</Eyebrow>
+                </>
+              ) : (
+                <>
+                  <Txt v="display" color="#FFFFFF">
+                    {scan.secondsLeft}
+                  </Txt>
+                  {/* Saying "reading your pulse" while no pulse is being found
+                      is the small lie that leads to the big one. If the
+                      regularity gate has rejected everything so far, say so. */}
+                  <Eyebrow color="rgba(255,255,255,0.75)">
+                    {scan.progress > 0.35 ? 'no clear pulse yet' : 'looking for a pulse'}
+                  </Eyebrow>
+                </>
+              )}
             </>
           ) : scan.phase === 'processing' ? (
             <Eyebrow>Analysing</Eyebrow>
           ) : scan.phase === 'framing' ? (
             <Eyebrow color="#FFFFFF">Looking…</Eyebrow>
           ) : (
-            <Txt v="body" style={{ fontSize: 40 }}>
-              ☝️
-            </Txt>
+            <Emoji size={44}>☝️</Emoji>
           )}
         </View>
       </Ring>

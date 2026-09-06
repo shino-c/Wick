@@ -48,6 +48,31 @@ export const MIN_HRV_SECONDS = 30;
 /** RMSSD also needs enough intervals, not just enough seconds. */
 const MIN_IBIS_FOR_HRV = 20;
 
+/**
+ * Maximum coefficient of variation of the inter-beat intervals.
+ *
+ * This is the gate that separates a pulse from noise that merely survived a
+ * bandpass filter. Any signal pushed through 0.7–3.5 Hz comes out oscillating,
+ * and peak detection will happily turn those oscillations into "beats" — so a
+ * bright flat surface under the torch, or a well-lit wall, could produce a
+ * confident-looking BPM with nobody attached to it.
+ *
+ * What noise cannot fake is REGULARITY. Measured on synthetic signals (see
+ * scripts/verify-ppg.mjs, which asserts both directions):
+ *
+ *     real pulse, 55-95 bpm with noise ......... 2-3%
+ *     paced breathing at 5.5/min, worst case ... ~13%   (RSA is large but ordered)
+ *     flat bright surface, filtered noise ...... 28-32%
+ *
+ * 0.2 sits in the gap with margin on both sides. An earlier 0.3 was measured to
+ * be too loose — it let two of the three noise cases through.
+ *
+ * The known cost: a genuine arrhythmia can exceed this and would be rejected as
+ * noise. Wick is not a diagnostic device and says so; refusing to report is the
+ * right failure for it, where inventing a heart rate for an empty desk is not.
+ */
+const MAX_IBI_CV = 0.2;
+
 export type SignalQuality = 'good' | 'poor';
 export type StressLevel = 'Normal' | 'Elevated Stress' | 'High Stress' | 'Unknown';
 
@@ -119,6 +144,19 @@ export class PPGService {
     }
 
     const meanIbi = ibiMs.reduce((a, b) => a + b, 0) / ibiMs.length;
+
+    // Regularity gate — see MAX_IBI_CV. This is what stops the app reporting a
+    // pulse for a surface rather than a person.
+    const sd = Math.sqrt(
+      ibiMs.reduce((acc, v) => acc + (v - meanIbi) ** 2, 0) / ibiMs.length
+    );
+    const cv = meanIbi > 0 ? sd / meanIbi : Infinity;
+    if (cv > MAX_IBI_CV) {
+      return poor(
+        `Beat spacing too irregular to be a pulse (${Math.round(cv * 100)}% variation) — check the sensor is covered`
+      );
+    }
+
     const heartRate = round(60_000 / meanIbi, 1);
 
     const diffs = ibiMs.slice(1).map((v, i) => v - ibiMs[i]);

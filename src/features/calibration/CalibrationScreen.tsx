@@ -2,7 +2,7 @@ import React from 'react';
 import { Pressable, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
-import { Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
+import { Emoji, Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Sparkline } from '@/components/charts';
 import { colors, radius, spacing, stressColor } from '@/theme';
 import { QUICK_FLAGS } from './questionnaire';
@@ -115,9 +115,7 @@ export default function CalibrationScreen() {
                   backgroundColor: selected ? colors.yellow : 'transparent',
                 }}
               >
-                <Txt v="body" style={{ fontSize: 26 }}>
-                  {flag.emoji}
-                </Txt>
+                <Emoji size={26}>{flag.emoji}</Emoji>
                 <Txt v="small" color={selected ? colors.brown : colors.inkFaint}>
                   {flag.label}
                 </Txt>

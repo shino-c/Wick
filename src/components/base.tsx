@@ -9,6 +9,7 @@ import {
   View,
   ViewProps,
   ViewStyle,
+  type TextStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, radius, shadow, spacing, type } from '@/theme';
@@ -28,9 +29,15 @@ export function Txt({ v = 'body', color = colors.ink, center, style, ...rest }: 
 }
 
 export function Eyebrow({ children, color = colors.inkFaint }: { children: React.ReactNode; color?: string }) {
+  // textTransform, not String(children).toUpperCase().
+  //
+  // JSX with any interpolation gives an ARRAY of children, and String() on an
+  // array joins with commas — so `<Eyebrow>{n}s left</Eyebrow>` rendered as
+  // "28,S LEFT". It also flattened nested elements to "[object Object]".
+  // Uppercasing is presentation, so it belongs in the style.
   return (
-    <Txt v="eyebrow" color={color}>
-      {String(children).toUpperCase()}
+    <Txt v="eyebrow" color={color} style={{ textTransform: 'uppercase' }}>
+      {children}
     </Txt>
   );
 }
@@ -210,6 +217,46 @@ export function Bar({ pct, color = colors.brown, track = colors.line, height = 6
  * follow the treatment on the baseline screen, so every stack screen in the app
  * has the same chrome rather than two competing header styles.
  */
+/**
+ * An emoji at an arbitrary size.
+ *
+ * `<Txt v="body" style={{ fontSize: 40 }}>` looked like it worked and did not:
+ * the `body` token carries `lineHeight: 20`, so a 40px glyph was drawn into a
+ * 20px line box and had its top and bottom sliced off. Every oversized icon in
+ * the app was quietly cropped.
+ *
+ * Line height has to scale with the glyph. Emoji also sit lower in the em box
+ * than Latin text, so 1.35 rather than the ~1.2 that would do for a letter, and
+ * `includeFontPadding: false` on Android removes the extra ascent/descent that
+ * would otherwise push it off-centre inside a circle.
+ */
+export function Emoji({
+  children,
+  size = 20,
+  style,
+}: {
+  children: React.ReactNode;
+  size?: number;
+  style?: TextStyle;
+}) {
+  return (
+    <Text
+      allowFontScaling={false}
+      style={[
+        {
+          fontSize: size,
+          lineHeight: Math.round(size * 1.35),
+          textAlign: 'center',
+          includeFontPadding: false,
+        },
+        style,
+      ]}
+    >
+      {children}
+    </Text>
+  );
+}
+
 export function NavBar({ title, onBack, right }: { title: string; onBack?: () => void; right?: React.ReactNode }) {
   return (
     <View style={styles.navBar}>

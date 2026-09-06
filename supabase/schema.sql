@@ -393,6 +393,7 @@ alter table challenge_participants enable row level security;
 -- meetup without knowing who else is coming. The rules that stay anonymous are
 -- the ones that reveal distress — get_circle_summary and send_circle_support.
 drop policy if exists "own participation" on challenge_participants;
+drop policy if exists "participation readable by circle" on challenge_participants;
 create policy "participation readable by circle" on challenge_participants for select
   using (
     auth.uid() = user_id
@@ -401,9 +402,24 @@ create policy "participation readable by circle" on challenge_participants for s
       where f.user_id = auth.uid() and f.friend_id = challenge_participants.user_id
     )
   );
+drop policy if exists "own participation write" on challenge_participants;
 create policy "own participation write" on challenge_participants for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+
+-- ── Function signature changes ──────────────────────────────────────────────
+-- `create or replace function` cannot change a return type, and adding an
+-- argument creates an OVERLOAD rather than replacing the original — which then
+-- leaves PostgREST with two candidates and no way to choose. Both cases apply
+-- to the functions below, so the previous signatures are dropped explicitly.
+-- Dropping a function does not touch any data.
+drop function if exists public.list_challenges(uuid);
+drop function if exists public.create_challenge(text, text, text, text, text, text, int, text);
+drop function if exists public.create_challenge(text, text, text, text, text, text, int, text, text);
+drop function if exists public.update_challenge(text, text, text, text, text, text, text, int, text);
+drop function if exists public.update_challenge(text, text, text, text, text, text, text, int, text, text);
+drop function if exists public.complete_challenge(text, boolean);
+drop function if exists public.complete_challenge(text, boolean, boolean);
 
 create or replace function public.list_challenges(target_user_id uuid)
 returns table (

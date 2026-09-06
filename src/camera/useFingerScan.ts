@@ -24,6 +24,22 @@ const FRAMING_SECONDS = 1.5;
 /** How much of the live waveform to keep for the on-screen trace. */
 const TRACE_LENGTH = 160;
 
+/**
+ * Live heart-rate readout.
+ *
+ * A 45-second countdown with nothing on it but a number going down gives the
+ * user no way to tell a good reading from a bad one until it is over. A
+ * trailing window re-analysed every couple of seconds shows a BPM settling —
+ * and, more usefully, shows it NOT settling when the finger is pressed too hard
+ * or resting off-centre, while there is still time to fix it.
+ *
+ * Twelve seconds is plenty for heart rate (it is a mean of intervals) and
+ * nowhere near enough for HRV, which is why only BPM is shown live. The
+ * reported RMSSD still comes from the full 45-second window.
+ */
+const LIVE_WINDOW_SECONDS = 12;
+const LIVE_STRIDE_SECONDS = 2;
+
 export interface FingerScanState {
   phase: ScanPhase;
   /** 0–1 through the capture window. */
@@ -34,6 +50,8 @@ export interface FingerScanState {
   error: string | null;
   /** Recent raw samples, for the live pulse trace. Never leaves the device. */
   trace: number[];
+  /** Heart rate from the trailing window, so the user can see it settle. */
+  liveHeartRate: number | null;
   simulated: boolean;
 }
 
@@ -46,10 +64,12 @@ export function useFingerScan(simProfile: SimProfileName = 'neutral') {
     result: null,
     error: null,
     trace: [],
+    liveHeartRate: null,
     simulated: !cameraAvailable,
   });
 
   const samples = useRef<number[]>([]);
+  const lastLiveAt = useRef<number>(0);
   const captureStart = useRef<number>(0);
   const goodFramesSince = useRef<number | null>(null);
   const phaseRef = useRef<ScanPhase>('idle');
@@ -112,7 +132,23 @@ export function useFingerScan(simProfile: SimProfileName = 'neutral') {
       }
 
       samples.current.push(sample.mean);
-      const elapsed = (Date.now() - captureStart.current) / 1000;
+      const now = Date.now();
+      const elapsed = (now - captureStart.current) / 1000;
+
+      // Live BPM from the trailing window. Cheap enough to run every couple of
+      // seconds: one filtfilt over ~360 samples.
+      if (
+        elapsed >= LIVE_WINDOW_SECONDS &&
+        now - lastLiveAt.current >= LIVE_STRIDE_SECONDS * 1000
+      ) {
+        lastLiveAt.current = now;
+        const fps = samples.current.length / elapsed;
+        const window = samples.current.slice(-Math.round(LIVE_WINDOW_SECONDS * fps));
+        const snapshot = PPGService.process(window, fps);
+        if (snapshot.heartRate !== null) {
+          setState((st) => ({ ...st, liveHeartRate: snapshot.heartRate }));
+        }
+      }
 
       if (elapsed >= FINGER.BURST_SECONDS) {
         // Use the *measured* frame rate. Trusting the requested 30fps would
@@ -161,6 +197,7 @@ export function useFingerScan(simProfile: SimProfileName = 'neutral') {
   const start = useCallback(async () => {
     samples.current = [];
     goodFramesSince.current = null;
+    lastLiveAt.current = 0;
     setState({
       phase: 'idle',
       progress: 0,
@@ -169,6 +206,7 @@ export function useFingerScan(simProfile: SimProfileName = 'neutral') {
       result: null,
       error: null,
       trace: [],
+      liveHeartRate: null,
       simulated: !cameraAvailable,
     });
 
@@ -195,7 +233,8 @@ export function useFingerScan(simProfile: SimProfileName = 'neutral') {
     samples.current = [];
     goodFramesSince.current = null;
     phaseRef.current = 'idle';
-    setState((s) => ({ ...s, phase: 'idle', progress: 0, trace: [] }));
+    lastLiveAt.current = 0;
+    setState((s) => ({ ...s, phase: 'idle', progress: 0, trace: [], liveHeartRate: null }));
   }, []);
 
   const cameraActive = state.phase === 'framing' || state.phase === 'capturing';
