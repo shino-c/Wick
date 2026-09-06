@@ -13,6 +13,7 @@ import type {
   ChallengeRow,
   CircleSummary,
   NewChallenge,
+  Participant,
   FocusSessionRow,
   FriendSummary,
   IncomingRequest,
@@ -476,12 +477,18 @@ export async function listChallenges(): Promise<ChallengeRow[]> {
       subtitle: r.subtitle,
       scheduledFor: r.scheduled_for,
       category: r.category,
+      kind: r.kind ?? 'solo',
+      location: r.location ?? null,
+      capacity: r.capacity ?? null,
       joinedCount: r.joined_count,
+      completedCount: r.completed_count ?? 0,
       circleSize: r.circle_size,
       joined: r.joined,
+      completedByMe: r.completed_by_me ?? false,
       createdBy: r.created_by ?? null,
       createdByMe: r.created_by_me ?? false,
       notes: r.notes ?? null,
+      participants: (r.participants ?? []) as Participant[],
     }));
   }
   // Demo store: join counts scale with the real circle rather than showing a
@@ -514,6 +521,9 @@ export async function createChallenge(input: NewChallenge): Promise<string> {
       p_subtitle: input.subtitle,
       p_scheduled_for: input.scheduledFor,
       p_category: input.category,
+      p_kind: input.kind,
+      p_location: input.location,
+      p_capacity: input.capacity,
       p_notes: input.notes,
     });
     if (error) throw error;
@@ -527,15 +537,80 @@ export async function createChallenge(input: NewChallenge): Promise<string> {
       subtitle: input.subtitle,
       scheduledFor: input.scheduledFor,
       category: input.category,
+      kind: input.kind,
+      location: input.location,
+      capacity: input.capacity,
       joinedCount: 1,
+      completedCount: 0,
       circleSize: db.friends.length + 1,
       joined: true,
+      completedByMe: false,
       createdBy: 'me',
       createdByMe: true,
       notes: input.notes,
+      participants: [{ userId: 'me', username: 'You', completed: false, isMe: true }],
     });
   });
   return id;
+}
+
+/** Creator-only edit. Everything except the id can change. */
+export async function updateChallenge(id: string, input: NewChallenge): Promise<void> {
+  if (hasSupabase) {
+    const { error } = await supabase.rpc('update_challenge', {
+      challenge_id: id,
+      p_title: input.title,
+      p_subtitle: input.subtitle,
+      p_scheduled_for: input.scheduledFor,
+      p_category: input.category,
+      p_kind: input.kind,
+      p_location: input.location,
+      p_capacity: input.capacity,
+      p_notes: input.notes,
+    });
+    if (error) throw error;
+    return;
+  }
+  await writeDb((db) => {
+    const ch = db.challenges.find((c) => c.id === id);
+    if (!ch || !ch.createdByMe) return;
+    Object.assign(ch, {
+      title: input.title,
+      subtitle: input.subtitle,
+      scheduledFor: input.scheduledFor,
+      category: input.category,
+      kind: input.kind,
+      location: input.location,
+      capacity: input.capacity,
+      notes: input.notes,
+    });
+  });
+}
+
+/**
+ * Marks your own participation complete.
+ *
+ * Self-reported on purpose. Wick can verify a recovery *break* through the
+ * biometric loop, but it cannot verify that four friends walked round a lake,
+ * and pretending otherwise would be a worse lie than trusting them.
+ */
+export async function completeChallenge(id: string, done: boolean): Promise<void> {
+  if (hasSupabase) {
+    const { error } = await supabase.rpc('complete_challenge', {
+      challenge_id: id,
+      p_done: done,
+    });
+    if (error) throw error;
+    return;
+  }
+  await writeDb((db) => {
+    const ch = db.challenges.find((c) => c.id === id);
+    if (!ch) return;
+    const me = ch.participants.find((p) => p.isMe);
+    if (me) me.completed = done;
+    ch.completedByMe = done;
+    ch.completedCount = ch.participants.filter((p) => p.completed).length;
+  });
 }
 
 export async function deleteChallenge(id: string): Promise<void> {
@@ -558,8 +633,18 @@ export async function toggleChallenge(id: string): Promise<void> {
   await writeDb((db) => {
     const ch = db.challenges.find((x) => x.id === id);
     if (!ch) return;
+    if (!ch.joined && ch.capacity !== null && ch.joinedCount >= ch.capacity) {
+      throw new Error('This challenge is full');
+    }
     ch.joined = !ch.joined;
-    ch.joinedCount += ch.joined ? 1 : -1;
+    if (ch.joined) {
+      ch.participants.push({ userId: 'me', username: 'You', completed: false, isMe: true });
+    } else {
+      ch.participants = ch.participants.filter((p) => !p.isMe);
+      ch.completedByMe = false;
+    }
+    ch.joinedCount = ch.participants.length;
+    ch.completedCount = ch.participants.filter((p) => p.completed).length;
   });
 }
 

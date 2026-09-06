@@ -4,25 +4,18 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing } from '@/theme';
-import { deleteChallenge, getChallenge, toggleChallenge } from '@/services/repository';
+import {
+  completeChallenge,
+  deleteChallenge,
+  getChallenge,
+  toggleChallenge,
+} from '@/services/repository';
 import type { ChallengeRow } from '@/data/types';
 
-const CATEGORY: Record<ChallengeRow['category'], { icon: string; label: string; blurb: string }> = {
-  physical: {
-    icon: '🚶',
-    label: 'Active recovery',
-    blurb: 'Moving your body, somewhere that is not your desk.',
-  },
-  social: {
-    icon: '💬',
-    label: 'Social recovery',
-    blurb: 'Contact with someone, on purpose rather than by accident.',
-  },
-  mental: {
-    icon: '🍵',
-    label: 'Mental downtime',
-    blurb: 'Deliberately unstimulated time. No screens, no input.',
-  },
+const CATEGORY: Record<ChallengeRow['category'], { icon: string; label: string }> = {
+  physical: { icon: '🚶', label: 'Active recovery' },
+  social: { icon: '💬', label: 'Social recovery' },
+  mental: { icon: '🍵', label: 'Mental downtime' },
 };
 
 export default function ChallengeDetailScreen() {
@@ -31,6 +24,7 @@ export default function ChallengeDetailScreen() {
   const [challenge, setChallenge] = React.useState<ChallengeRow | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     if (!id) return;
@@ -44,20 +38,17 @@ export default function ChallengeDetailScreen() {
     }, [load])
   );
 
-  const join = async () => {
-    if (!challenge) return;
+  const run = async (fn: () => Promise<void>) => {
     setBusy(true);
-    await toggleChallenge(challenge.id);
-    await load();
-    setBusy(false);
-  };
-
-  const remove = async () => {
-    if (!challenge) return;
-    setBusy(true);
-    await deleteChallenge(challenge.id);
-    setBusy(false);
-    router.back();
+    setError(null);
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (loading) {
@@ -85,7 +76,10 @@ export default function ChallengeDetailScreen() {
   }
 
   const meta = CATEGORY[challenge.category];
-  const others = Math.max(0, challenge.joinedCount - (challenge.joined ? 1 : 0));
+  const isMeetup = challenge.kind === 'meetup';
+  const spotsLeft =
+    challenge.capacity === null ? null : Math.max(0, challenge.capacity - challenge.joinedCount);
+  const full = spotsLeft === 0 && !challenge.joined;
 
   return (
     <Screen>
@@ -107,7 +101,14 @@ export default function ChallengeDetailScreen() {
           </Txt>
         </View>
         <View style={{ flex: 1 }}>
-          <Eyebrow>{meta.label}</Eyebrow>
+          <Row gap={2}>
+            <Eyebrow>{meta.label}</Eyebrow>
+            <Badge
+              label={isMeetup ? 'Meet up' : 'Together, apart'}
+              fg={colors.brownSoft}
+              bg={colors.yellowWash}
+            />
+          </Row>
           <Spacer h={1} />
           <Txt v="title">{challenge.title}</Txt>
         </View>
@@ -117,68 +118,205 @@ export default function ChallengeDetailScreen() {
 
       <Card>
         <Row style={{ justifyContent: 'space-between' }}>
-          <View>
+          <View style={{ flex: 1 }}>
             <Eyebrow>When</Eyebrow>
             <Spacer h={1} />
             <Txt v="heading">{challenge.scheduledFor ?? 'Any time'}</Txt>
           </View>
-          {challenge.joined && <Badge label="Joined" fg={colors.calm} bg={colors.calmWash} />}
+          {challenge.joined && (
+            <Badge
+              label={challenge.completedByMe ? 'Done' : 'Joined'}
+              fg={colors.calm}
+              bg={colors.calmWash}
+            />
+          )}
         </Row>
+
+        {isMeetup && challenge.location && (
+          <>
+            <Spacer h={4} />
+            <Eyebrow>Where</Eyebrow>
+            <Spacer h={1} />
+            <Txt v="heading">📍 {challenge.location}</Txt>
+          </>
+        )}
+
         <Spacer h={4} />
         <Txt v="body" color={colors.inkSoft}>
           {challenge.notes ?? challenge.subtitle}
         </Txt>
-        <Spacer h={3} />
+        {!isMeetup && (
+          <>
+            <Spacer h={3} />
+            <Txt v="small" color={colors.inkFaint}>
+              Nobody gathers for this one — everyone does it in their own space, in the same window.
+            </Txt>
+          </>
+        )}
+      </Card>
+
+      <Spacer h={3} />
+
+      {/* ── Who is in ─────────────────────────────────────────────── */}
+      <Card>
+        <Row style={{ justifyContent: 'space-between' }}>
+          <Txt v="heading">Who is in</Txt>
+          <Txt v="heading" color={colors.brown}>
+            {challenge.joinedCount}
+            {challenge.capacity !== null ? ` / ${challenge.capacity}` : ''}
+          </Txt>
+        </Row>
+
+        {challenge.capacity !== null && (
+          <>
+            <Spacer h={3} />
+            <Bar
+              pct={(challenge.joinedCount / challenge.capacity) * 100}
+              color={full ? colors.warn : colors.yellowDeep}
+            />
+            <Spacer h={2} />
+            <Txt v="small" color={full ? colors.warn : colors.inkFaint}>
+              {full
+                ? 'This challenge is full.'
+                : `${spotsLeft} ${spotsLeft === 1 ? 'spot' : 'spots'} left`}
+            </Txt>
+          </>
+        )}
+
+        <Spacer h={4} />
+
+        {challenge.participants.length === 0 ? (
+          <Txt v="small" color={colors.inkFaint}>
+            Nobody has joined yet. Be first.
+          </Txt>
+        ) : (
+          challenge.participants.map((p, i) => (
+            <View key={p.userId}>
+              <Row style={{ justifyContent: 'space-between' }}>
+                <Row gap={3}>
+                  <View
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: 16,
+                      backgroundColor: p.isMe ? colors.brown : colors.yellow,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Txt v="small" color={p.isMe ? '#FFFDF5' : colors.brown}>
+                      {p.username.slice(0, 2).toUpperCase()}
+                    </Txt>
+                  </View>
+                  <Txt v="body">{p.isMe ? 'You' : p.username}</Txt>
+                </Row>
+                {p.completed && (
+                  <Txt v="small" color={colors.calm}>
+                    ✓ done
+                  </Txt>
+                )}
+              </Row>
+              {i < challenge.participants.length - 1 && (
+                <View
+                  style={{ height: 1, backgroundColor: colors.line, marginVertical: spacing(3) }}
+                />
+              )}
+            </View>
+          ))
+        )}
+
+        <Spacer h={4} />
+        {/* Names are shown here on purpose. Joining a challenge is a voluntary
+            social act between people already in your circle — it is not a
+            stress signal. The anonymity rule applies to the red-zone count and
+            the support nudge, which reveal that someone is struggling. */}
         <Txt v="small" color={colors.inkFaint}>
-          {meta.blurb}
+          {isMeetup
+            ? 'You can see who is coming, so you know who you are meeting.'
+            : 'Your circle can see you joined — never why Wick might have suggested it.'}
         </Txt>
       </Card>
 
       <Spacer h={3} />
 
-      <Card>
-        <Row style={{ justifyContent: 'space-between' }}>
-          <Txt v="heading">Who is in</Txt>
-          <Txt v="heading" color={colors.brown}>
-            {challenge.joinedCount} of {challenge.circleSize}
-          </Txt>
-        </Row>
-        <Spacer h={3} />
-        <Bar
-          pct={challenge.circleSize ? (challenge.joinedCount / challenge.circleSize) * 100 : 0}
-          color={colors.yellowDeep}
-        />
-        <Spacer h={3} />
-        {/* A count, never names. Knowing exactly who signed up for a recovery
-            activity is a short step from knowing who needs one. */}
-        <Txt v="small" color={colors.inkSoft}>
-          {challenge.joined
-            ? others === 0
-              ? 'You are in. Nobody else has joined yet.'
-              : `You and ${others} ${others === 1 ? 'other' : 'others'} are in.`
-            : others === 0
-              ? 'Nobody has joined yet. Be first.'
-              : `${others} ${others === 1 ? 'person' : 'people'} in your circle ${others === 1 ? 'has' : 'have'} joined.`}
-        </Txt>
-        <Spacer h={2} />
-        <Txt v="small" color={colors.inkFaint}>
-          🔒 Wick shows how many, never who.
-        </Txt>
-      </Card>
+      {/* ── Completion ────────────────────────────────────────────── */}
+      {challenge.joined && (
+        <>
+          <Card>
+            <Row style={{ justifyContent: 'space-between' }}>
+              <Txt v="heading">Completed</Txt>
+              <Txt v="heading" color={colors.calm}>
+                {challenge.completedCount} of {challenge.joinedCount}
+              </Txt>
+            </Row>
+            <Spacer h={3} />
+            <Bar
+              pct={
+                challenge.joinedCount
+                  ? (challenge.completedCount / challenge.joinedCount) * 100
+                  : 0
+              }
+              color={colors.calm}
+            />
+            <Spacer h={4} />
+            <Button
+              label={challenge.completedByMe ? '✓ You did it' : 'Mark as done'}
+              variant={challenge.completedByMe ? 'soft' : 'primary'}
+              onPress={() => run(() => completeChallenge(challenge.id, !challenge.completedByMe))}
+              disabled={busy}
+            />
+            <Spacer h={3} />
+            <Txt v="small" color={colors.inkFaint}>
+              Wick takes your word for this. It can verify a breathing break from your own vitals,
+              but it cannot verify a walk with friends — and pretending otherwise would be worse
+              than trusting you.
+            </Txt>
+          </Card>
+          <Spacer h={3} />
+        </>
+      )}
 
-      <Spacer h={5} />
+      {error && (
+        <>
+          <View
+            style={{ backgroundColor: colors.alertWash, borderRadius: radius.sm, padding: spacing(3) }}
+          >
+            <Txt v="small" color={colors.alert}>
+              {error}
+            </Txt>
+          </View>
+          <Spacer h={3} />
+        </>
+      )}
 
       <Button
-        label={challenge.joined ? 'Leave challenge' : 'Join challenge'}
+        label={challenge.joined ? 'Leave challenge' : full ? 'Challenge is full' : 'Join challenge'}
         variant={challenge.joined ? 'ghost' : 'primary'}
-        onPress={join}
-        loading={busy}
+        onPress={() => run(() => toggleChallenge(challenge.id))}
+        disabled={busy || full}
       />
 
       {challenge.createdByMe && (
         <>
           <Spacer h={3} />
-          <Button label="Delete challenge" variant="danger" onPress={remove} disabled={busy} />
+          <Button
+            label="Edit challenge"
+            variant="ghost"
+            onPress={() => router.push({ pathname: '/new-challenge', params: { id: challenge.id } })}
+            disabled={busy}
+          />
+          <Spacer h={3} />
+          <Button
+            label="Delete challenge"
+            variant="danger"
+            onPress={() =>
+              run(async () => {
+                await deleteChallenge(challenge.id);
+                router.back();
+              })
+            }
+            disabled={busy}
+          />
           <Spacer h={2} />
           <Txt v="small" color={colors.inkFaint} center>
             You created this. Deleting removes it for everyone in your circle.

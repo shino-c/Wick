@@ -223,7 +223,7 @@ export default function CirclesScreen() {
                   </Row>
                   <Spacer h={1} />
                   <Txt v="small" color={colors.inkFaint}>
-                    {ch.subtitle}
+                    {ch.kind === 'meetup' ? '📍 Meet up' : '🏠 Together, apart'}
                     {ch.scheduledFor ? ` · ${ch.scheduledFor}` : ''}
                   </Txt>
                 </View>
@@ -236,13 +236,20 @@ export default function CirclesScreen() {
               </Row>
               <Spacer h={3} />
               <Bar
-                pct={ch.circleSize ? (ch.joinedCount / ch.circleSize) * 100 : 0}
+                pct={
+                  ch.capacity
+                    ? (ch.joinedCount / ch.capacity) * 100
+                    : ch.circleSize
+                      ? (ch.joinedCount / ch.circleSize) * 100
+                      : 0
+                }
                 color={colors.yellowDeep}
               />
               <Spacer h={2} />
               <Row style={{ justifyContent: 'space-between' }}>
                 <Txt v="small" color={colors.inkFaint}>
-                  {ch.joinedCount} of {ch.circleSize} joined
+                  {ch.joinedCount} joined
+                  {ch.capacity !== null ? ` · ${Math.max(0, ch.capacity - ch.joinedCount)} spots left` : ''}
                 </Txt>
                 <Txt v="small" color={colors.inkFaint}>
                   Details ›

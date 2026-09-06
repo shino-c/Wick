@@ -79,19 +79,46 @@ export interface CircleSummary {
 
 export type ChallengeCategory = 'physical' | 'social' | 'mental';
 
+/**
+ * 'meetup' — same place, same time. You need to know who is coming, and
+ *            "completed" means you actually turned up.
+ * 'solo'   — same window, your own space ("screen-free tea at 4"). Nobody
+ *            gathers; each person completes it independently.
+ *
+ * These were conflated at first, which is why a lakeside walk and a tea break
+ * shared one model that suited neither.
+ */
+export type ChallengeKind = 'meetup' | 'solo';
+
+/** A circle member who joined. Names are shown — joining is a social act, not a stress signal. */
+export interface Participant {
+  userId: string;
+  username: string;
+  completed: boolean;
+  isMe: boolean;
+}
+
 export interface ChallengeRow {
   id: string;
   title: string;
   subtitle: string;
   scheduledFor: string | null;
   category: ChallengeCategory;
+  kind: ChallengeKind;
+  /** Where to meet. Meetups only. */
+  location: string | null;
+  /** Max people, null for unlimited. */
+  capacity: number | null;
   joinedCount: number;
+  completedCount: number;
   circleSize: number;
   joined: boolean;
+  completedByMe: boolean;
   /** Null for the seeded challenges; set for anything a member created. */
   createdBy: string | null;
   createdByMe: boolean;
   notes: string | null;
+  participants: Participant[];
 }
 
 export interface NewChallenge {
@@ -99,5 +126,8 @@ export interface NewChallenge {
   subtitle: string;
   scheduledFor: string | null;
   category: ChallengeCategory;
+  kind: ChallengeKind;
+  location: string | null;
+  capacity: number | null;
   notes: string | null;
 }

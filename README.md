@@ -141,14 +141,30 @@ refreshing `/summary` shows an empty state rather than a stale session.
 | Post-session calibration prompt | ✅ Spot on / Slightly off / Way off → rolling Personal Accuracy |
 | Frames processed on-device and discarded | ✅ Each frame becomes one number inside the frame-output worklet, then is disposed |
 | 3-second setup check | ✅ Requires a detected face, then three *consecutive* clean seconds |
-| Face detection | ✅ VisionCamera's built-in `'face'` object output — gates readings, supplies the ROI, drops a burst if a second person appears |
+| Person present | ✅ Skin-coverage heuristic on both platforms; VisionCamera's native face detector additionally on iOS (see below) |
 | Secondary CV cues | ⚠️ **Movement/fidget index only** (see below) |
 
-**Readings are gated on a detected face.** This is not cosmetic. Sensor noise off any surface, once
-it has been through a 0.7–3.5 Hz bandpass, contains oscillations that peak detection will turn into a
-plausible BPM — an earlier version happily reported a heart rate for an empty chair, because the
-setup check tested only brightness. Now: no face, no reading; face present for under 70% of a burst,
-burst discarded; a second face in frame, burst discarded. The user is told which of those happened.
+**Readings are gated on a person actually being there.** This is not cosmetic. Sensor noise off any
+surface, once it has been through a 0.7–3.5 Hz bandpass, contains oscillations that peak detection
+will turn into a plausible BPM — an earlier version happily reported a heart rate for an empty chair,
+because the setup check tested only brightness. Now: nobody in frame, no reading; presence under 70%
+of a burst, burst discarded. The user is told which happened.
+
+**How presence is detected, and the platform split.** VisionCamera 5 exposes a face detector, but it
+is **iOS only** — the Android implementation is literally
+`throw Error("CameraObjectOutput is not available on Android!")`. So face detection is an
+enhancement, never a dependency:
+
+- **Both platforms:** skin coverage of the sampled region, using normalised rg-chromaticity. Dividing
+  out total intensity makes it far less sensitive to lighting and to skin tone than an RGB threshold,
+  and it runs inside the frame processor we already have. It answers "is a skin-coloured surface
+  filling the sampling region" — a heuristic, not face recognition, and exactly the precondition
+  rPPG needs.
+- **iOS only:** the native detector additionally sharpens the ROI to the real face box and catches a
+  second person in frame.
+
+Multi-person detection is therefore **iOS-only today**. On Android the bystander protections are the
+ROI restriction and the cropped preview, not detection.
 
 **The one honest gap:** posture angle, face-touching and jaw tension need a real pose/landmark model.
 Rather than fake them, Desk Mode ships a genuine *movement index* derived from the same ROI signal —
@@ -174,9 +190,33 @@ tension are a stretch goal, not a claim.
 - Invite-code friend flow (share sheet or typed code) → request → accept. No contact sync, ever.
 - Friendship rows are written **only** by `accept_friend_request()`, a `SECURITY DEFINER` function.
   There is no insert policy on `friendships`, so a malicious client cannot forge a one-way link.
-- Circle Pulse: counts and averages only.
-- Shared challenges with join counts.
-- Anonymous support nudges.
+- Circle Pulse: counts and averages only, suppressed below 3 friends.
+- Anonymous support nudges — `sendCircleSupport()` takes no recipient.
+- Shared challenges: create, edit, join, per-person completion.
+
+**Where anonymity applies, and where it deliberately doesn't.** The rule is
+about *distress*, not about people. The red-zone count and the support nudge are
+nameless, because they reveal that someone is struggling. A challenge is the
+opposite: a voluntary invitation between people already in your circle. So
+participants are shown by name — you cannot safely turn up to a lakeside walk
+without knowing who you are meeting, and hiding it drained the social value out
+of the one social feature. Treating those two cases identically was a mistake in
+the first cut.
+
+**Two kinds of challenge**, because "Group Walk: Lakeside" and "Screen-Free Tea
+Break" are not the same thing:
+
+| Kind | Meaning | Shows |
+| --- | --- | --- |
+| `meetup` | Same place, same time | Location, who is coming, spots left |
+| `solo` | Same window, your own space | No location; nobody gathers |
+
+Capacity is optional and enforced server-side in `toggle_challenge`, so a client
+that ignores the full state still can't squeeze in. Completion is **self-marked**
+per person, showing "3 of 4 completed". That is honest about what it is: Wick can
+verify a breathing break from your own vitals, but it cannot verify that four
+friends walked round a lake, and inventing a proof would be worse than trusting
+them. Pillar 5's geofence confirmation is the natural upgrade for meetups.
 
 ---
 
@@ -240,8 +280,8 @@ Three layers, all structural rather than policy:
 2. **Sampling confined to the face box.** Pixels are read only from inside the detected face, inset
    18% to stay on skin. The doorway behind you is never sampled, so a passer-by cannot influence the
    signal even in principle.
-3. **A second face voids the burst.** If the detector sees more than one person, the reading is
-   dropped and the user is told why — rather than quietly averaging two people's skin tones.
+3. **A second face voids the burst** (iOS, where the detector exists). The reading is dropped and the
+   user told why, rather than quietly averaging two people's skin tones.
 4. **The preview only exists while a burst runs.** For the other 48 seconds of each minute there is
    no camera and no image on screen at all.
 

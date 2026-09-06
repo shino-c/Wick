@@ -313,10 +313,15 @@ create table if not exists challenges (
   created_at timestamptz default now()
 );
 
--- Idempotent upgrade for anyone who ran the earlier version of this file.
+-- Idempotent upgrade for anyone who ran an earlier version of this file.
 alter table challenges add column if not exists notes text;
 alter table challenges add column if not exists created_by uuid references auth.users on delete cascade;
 alter table challenges add column if not exists created_at timestamptz default now();
+-- 'meetup' = same place and time; 'solo' = same window, own space.
+alter table challenges add column if not exists kind text not null default 'solo'
+  check (kind in ('meetup', 'solo'));
+alter table challenges add column if not exists location text;
+alter table challenges add column if not exists capacity int check (capacity is null or capacity > 0);
 
 alter table challenges enable row level security;
 -- Readable if it is a seeded challenge, yours, or created by someone in your
@@ -332,10 +337,14 @@ create policy "challenges readable" on challenges for select
     )
   );
 
-insert into challenges (id, title, subtitle, scheduled_for, category) values
-  ('walk-lakeside', 'Group Walk: Lakeside', 'Active recovery · 30 min', 'Tomorrow, 6:00 PM', 'physical'),
-  ('tea-break', 'Screen-Free Tea Break', 'Mental downtime · 15 min', 'Today, 4:00 PM', 'mental'),
-  ('reach-out', 'Reach Out to Someone', 'Social recovery · one message', null, 'social')
+insert into challenges (id, title, subtitle, scheduled_for, category, kind, location, capacity, notes) values
+  ('walk-lakeside', 'Group Walk: Lakeside', 'Active recovery · 30 min', 'Tomorrow, 6:00 PM', 'physical',
+   'meetup', 'Lakeside path, main entrance', 6,
+   'Gentle loop of the lake. No pace, no tracking — just moving somewhere that is not your desk.'),
+  ('tea-break', 'Screen-Free Tea Break', 'Mental downtime · 15 min', 'Today, 4:00 PM', 'mental',
+   'solo', null, null, 'Fifteen minutes, no screens, wherever you are. Phones face-down.'),
+  ('reach-out', 'Reach Out to Someone', 'Social recovery · one message', null, 'social',
+   'solo', null, null, 'Message one person you have not spoken to this week. That is the whole challenge.')
 on conflict (id) do nothing;
 
 
@@ -343,15 +352,28 @@ create table if not exists challenge_participants (
   challenge_id text not null references challenges on delete cascade,
   user_id uuid not null references auth.users on delete cascade,
   joined_at timestamptz default now(),
+  completed_at timestamptz,
   primary key (challenge_id, user_id)
 );
 
+alter table challenge_participants add column if not exists completed_at timestamptz;
+
 alter table challenge_participants enable row level security;
 
--- A participant row is only visible to the person themselves; the join *counts*
--- other people see come from list_challenges(), which aggregates.
+-- Participation is visible to your circle by design: joining a challenge is a
+-- voluntary social act, not a stress signal, and you cannot safely turn up to a
+-- meetup without knowing who else is coming. The rules that stay anonymous are
+-- the ones that reveal distress — get_circle_summary and send_circle_support.
 drop policy if exists "own participation" on challenge_participants;
-create policy "own participation" on challenge_participants for all
+create policy "participation readable by circle" on challenge_participants for select
+  using (
+    auth.uid() = user_id
+    or exists (
+      select 1 from friendships f
+      where f.user_id = auth.uid() and f.friend_id = challenge_participants.user_id
+    )
+  );
+create policy "own participation write" on challenge_participants for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 
@@ -362,12 +384,18 @@ returns table (
   subtitle text,
   scheduled_for text,
   category text,
+  kind text,
+  location text,
+  capacity int,
   joined_count int,
+  completed_count int,
   circle_size int,
   joined boolean,
+  completed_by_me boolean,
   created_by uuid,
   created_by_me boolean,
-  notes text
+  notes text,
+  participants jsonb
 )
 language plpgsql
 security definer
@@ -382,33 +410,60 @@ begin
 
   select count(*) into n from friendships f where f.user_id = target_user_id;
 
+  -- Participants the caller may see: themselves plus their own friends. A
+  -- friend-of-the-author who is a stranger to the caller stays invisible, so
+  -- the participant list never introduces people outside your circle.
   return query
+  with visible_participants as (
+    select p.*
+    from challenge_participants p
+    where p.user_id = target_user_id
+       or exists (
+         select 1 from friendships f
+         where f.user_id = target_user_id and f.friend_id = p.user_id
+       )
+  )
   select
     c.id,
     c.title,
     c.subtitle,
     c.scheduled_for,
     c.category,
-    (
-      select count(*)::int
-      from challenge_participants p
-      where p.challenge_id = c.id
-        and (
-          p.user_id = target_user_id
-          or exists (
-            select 1 from friendships f
-            where f.user_id = target_user_id and f.friend_id = p.user_id
-          )
-        )
-    ),
+    c.kind,
+    c.location,
+    c.capacity,
+    (select count(*)::int from visible_participants vp where vp.challenge_id = c.id),
+    (select count(*)::int from visible_participants vp
+      where vp.challenge_id = c.id and vp.completed_at is not null),
     (n + 1),
     exists (
       select 1 from challenge_participants p
       where p.challenge_id = c.id and p.user_id = target_user_id
     ),
+    exists (
+      select 1 from challenge_participants p
+      where p.challenge_id = c.id and p.user_id = target_user_id and p.completed_at is not null
+    ),
     c.created_by,
     (c.created_by = target_user_id),
-    c.notes
+    c.notes,
+    coalesce(
+      (
+        select jsonb_agg(
+          jsonb_build_object(
+            'userId', vp.user_id,
+            'username', pr.username,
+            'completed', vp.completed_at is not null,
+            'isMe', vp.user_id = target_user_id
+          )
+          order by (vp.user_id = target_user_id) desc, vp.joined_at
+        )
+        from visible_participants vp
+        join profiles pr on pr.id = vp.user_id
+        where vp.challenge_id = c.id
+      ),
+      '[]'::jsonb
+    )
   from challenges c
   where c.created_by is null
      or c.created_by = target_user_id
@@ -435,6 +490,18 @@ begin
     delete from challenge_participants p
     where p.challenge_id = toggle_challenge.challenge_id and p.user_id = auth.uid();
   else
+    -- Capacity is enforced server-side; a client that ignores the full state
+    -- still cannot squeeze in.
+    if exists (
+      select 1 from challenges c
+      where c.id = toggle_challenge.challenge_id
+        and c.capacity is not null
+        and (select count(*) from challenge_participants p
+             where p.challenge_id = c.id) >= c.capacity
+    ) then
+      raise exception 'This challenge is full';
+    end if;
+
     insert into challenge_participants (challenge_id, user_id)
     values (toggle_challenge.challenge_id, auth.uid());
   end if;
@@ -447,6 +514,9 @@ create or replace function public.create_challenge(
   p_subtitle text,
   p_scheduled_for text,
   p_category text,
+  p_kind text,
+  p_location text,
+  p_capacity int,
   p_notes text
 )
 returns text
@@ -463,14 +533,73 @@ begin
 
   new_id := 'ch_' || substr(md5(random()::text || auth.uid()::text), 1, 12);
 
-  insert into challenges (id, title, subtitle, scheduled_for, category, notes, created_by)
-  values (new_id, trim(p_title), p_subtitle, p_scheduled_for, p_category, p_notes, auth.uid());
+  insert into challenges (id, title, subtitle, scheduled_for, category, kind, location, capacity, notes, created_by)
+  values (new_id, trim(p_title), p_subtitle, p_scheduled_for, p_category,
+          coalesce(p_kind, 'solo'), p_location, p_capacity, p_notes, auth.uid());
 
   -- The creator is in by definition.
   insert into challenge_participants (challenge_id, user_id)
   values (new_id, auth.uid()) on conflict do nothing;
 
   return new_id;
+end;
+$$;
+
+
+create or replace function public.update_challenge(
+  challenge_id text,
+  p_title text,
+  p_subtitle text,
+  p_scheduled_for text,
+  p_category text,
+  p_kind text,
+  p_location text,
+  p_capacity int,
+  p_notes text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update challenges c set
+    title = trim(p_title),
+    subtitle = p_subtitle,
+    scheduled_for = p_scheduled_for,
+    category = p_category,
+    kind = coalesce(p_kind, c.kind),
+    location = p_location,
+    capacity = p_capacity,
+    notes = p_notes
+  where c.id = update_challenge.challenge_id
+    and c.created_by = auth.uid();
+
+  if not found then
+    raise exception 'Only the creator can edit this challenge';
+  end if;
+end;
+$$;
+
+
+-- Self-reported. Wick can verify a breathing break from the user's own vitals;
+-- it cannot verify that four friends walked round a lake, and inventing a proof
+-- would be a worse lie than trusting them.
+create or replace function public.complete_challenge(challenge_id text, p_done boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update challenge_participants p
+  set completed_at = case when p_done then now() else null end
+  where p.challenge_id = complete_challenge.challenge_id
+    and p.user_id = auth.uid();
+
+  if not found then
+    raise exception 'Join the challenge before marking it done';
+  end if;
 end;
 $$;
 
@@ -547,6 +676,8 @@ grant execute on function public.accept_friend_request(uuid) to authenticated;
 grant execute on function public.get_circle_summary(uuid)  to authenticated;
 grant execute on function public.list_challenges(uuid)     to authenticated;
 grant execute on function public.toggle_challenge(text)    to authenticated;
-grant execute on function public.create_challenge(text, text, text, text, text) to authenticated;
+grant execute on function public.create_challenge(text, text, text, text, text, text, int, text) to authenticated;
+grant execute on function public.update_challenge(text, text, text, text, text, text, text, int, text) to authenticated;
+grant execute on function public.complete_challenge(text, boolean) to authenticated;
 grant execute on function public.delete_challenge(text)    to authenticated;
 grant execute on function public.send_circle_support(text) to authenticated;
