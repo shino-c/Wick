@@ -25,6 +25,7 @@ import type {
   SupportNudge,
 } from '@/data/types';
 import BottomNavigation from '@/components/bottombar';
+import TopNavigation from '@/components/topbar';
 import { formatSchedule, isPast } from './scheduling';
 
 export default function CirclesScreen() {
@@ -82,12 +83,12 @@ export default function CirclesScreen() {
   };
 
   return (
-    <Screen footer={<BottomNavigation activeTab="Social" router={router} />}>
-      <Row style={{ justifyContent: 'space-between' }}>
-        <Txt v="title">Wick ✳</Txt>
-        <Eyebrow>Circles</Eyebrow>
-      </Row>
-      <Spacer h={5} />
+    <Screen
+      header={<TopNavigation />}
+      footer={<BottomNavigation activeTab="Social" router={router} />}
+    >
+      <Eyebrow>Circles</Eyebrow>
+      <Spacer h={4} />
 
       {/* ── Incoming requests ─────────────────────────────────────── */}
       {requests.length > 0 && (

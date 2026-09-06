@@ -7,20 +7,13 @@ type TabName = 'Home' | 'Desk' | 'Recovery' | 'Social';
 /*
  * RECOVERY TAB — reserved for Shino.
  *
- * The entry is removed rather than left in place, because a tab that goes
- * nowhere is worse than a tab that is not there: this one already shipped once
- * pointing at '/recovery' when no such route existed, and tapping it silently
- * did nothing. TabName still lists 'Recovery' so nothing else needs touching
- * when it comes back.
+ * The icon stays so the bar keeps its intended shape, but `route` is null and
+ * the tab is dimmed and non-interactive. That is the important difference from
+ * how this shipped the first time: then it pointed at '/recovery' when no such
+ * route existed, so tapping it silently did nothing and looked broken. Now it
+ * reads as a place that is not ready yet.
  *
- * To restore, add this to `tabs` between Desk and Social and create the route:
- *
- *   {
- *     name: 'Recovery',
- *     route: '/recovery',
- *     activeIcon: 'heart-pulse',
- *     inactiveIcon: 'heart-pulse',
- *   },
+ * To wire it up: create src/app/recovery.tsx and set `route: '/recovery'`.
  */
 
 interface BottomNavigationProps {
@@ -32,7 +25,13 @@ export default function BottomNavigation({
   activeTab = 'Home',
   router,
 }: BottomNavigationProps) {
-  const tabs: { name: TabName; route: string; activeIcon: string; inactiveIcon: string }[] = [
+  const tabs: {
+    name: TabName;
+    /** null = reserved, rendered but not navigable. */
+    route: string | null;
+    activeIcon: string;
+    inactiveIcon: string;
+  }[] = [
     {
       name: 'Home',
       route: '/home',
@@ -44,6 +43,12 @@ export default function BottomNavigation({
       route: '/desk',
       activeIcon: 'table-furniture',
       inactiveIcon: 'table-furniture',
+    },
+    {
+      name: 'Recovery',
+      route: null,
+      activeIcon: 'heart-pulse',
+      inactiveIcon: 'heart-pulse',
     },
     {
       name: 'Social',
@@ -67,9 +72,9 @@ export default function BottomNavigation({
    * tab's own scroll position and its own nested history. That is a change to
    * the route tree rather than to this component, so it is left alone here.
    */
-  const handlePress = (route: string, isActive: boolean) => {
+  const handlePress = (route: string | null, isActive: boolean) => {
     // Re-tapping the tab you are on should do nothing, not remount the screen.
-    if (!router || isActive) return;
+    if (!router || isActive || !route) return;
     router.replace(route);
   };
 
@@ -77,17 +82,21 @@ export default function BottomNavigation({
     <View style={styles.nav}>
       {tabs.map((tab) => {
         const isActive = activeTab === tab.name;
+        const reserved = tab.route === null;
 
         return (
           <Pressable
             key={tab.name}
             onPress={() => handlePress(tab.route, isActive)}
+            disabled={reserved}
             accessibilityRole="tab"
-            accessibilityState={{ selected: isActive }}
+            accessibilityState={{ selected: isActive, disabled: reserved }}
+            accessibilityHint={reserved ? 'Coming soon' : undefined}
             style={({ pressed }) => [
               styles.tabItem,
               isActive && styles.activeTabItem,
-              pressed && styles.pressed,
+              reserved && styles.reserved,
+              pressed && !reserved && styles.pressed,
             ]}
           >
             <MaterialCommunityIcons
@@ -140,6 +149,10 @@ const styles = StyleSheet.create({
   pressed: {
     opacity: 0.8,
     transform: [{ scale: 0.95 }],
+  },
+  /** Reserved: present in the bar, visibly not ready, and not tappable. */
+  reserved: {
+    opacity: 0.35,
   },
   tabLabel: {
     fontSize: 11,

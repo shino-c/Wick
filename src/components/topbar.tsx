@@ -8,6 +8,26 @@ interface TopNavigationProps {
   hasUnreadNotifications?: boolean;
 }
 
+/**
+ * The Wick brand mark on its own.
+ *
+ * Desk and Social used to write their own header — `<Txt v="title">Wick ✳</Txt>`
+ * with a text asterisk — while Home rendered this SVG sparkle. Two different
+ * marks for the same brand, on tabs of the same app. Exported so there is one
+ * definition of what the logo looks like.
+ */
+export function WickMark({ size = 20 }: { size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M12 2L14.4 8.6L21 11L14.4 13.4L12 20L9.6 13.4L3 11L9.6 8.6L12 2Z"
+        fill="#C29569"
+      />
+      <Circle cx="19" cy="5" r="1.5" fill="#C29569" />
+    </Svg>
+  );
+}
+
 export default function TopNavigation({
   onNotificationPress,
   hasUnreadNotifications = true,
@@ -18,13 +38,9 @@ export default function TopNavigation({
         {/* Brand Logo: Wick + Sparkle */}
         <View style={styles.brandContainer}>
           <Text style={styles.brandText}>Wick</Text>
-          <Svg width={20} height={20} viewBox="0 0 24 24" style={styles.sparkleIcon}>
-            <Path
-              d="M12 2L14.4 8.6L21 11L14.4 13.4L12 20L9.6 13.4L3 11L9.6 8.6L12 2Z"
-              fill="#C29569"
-            />
-            <Circle cx="19" cy="5" r="1.5" fill="#C29569" />
-          </Svg>
+          <View style={styles.sparkleIcon}>
+            <WickMark />
+          </View>
         </View>
 
         {/* Trailing Notification Button */}

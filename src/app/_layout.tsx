@@ -60,6 +60,16 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: colors.cream },
         }}
       >
+        {/* Tabs must not animate.
+            These are siblings reached with router.replace, not a hierarchy, so
+            the default push transition slid one "page" over another and made
+            switching tabs feel like leaving the app you were in. With no
+            animation the pinned header and tab bar stay put and only the
+            content between them changes, which is what a tab bar promises. */}
+        <Stack.Screen name="home" options={{ animation: 'none' }} />
+        <Stack.Screen name="desk" options={{ animation: 'none' }} />
+        <Stack.Screen name="social" options={{ animation: 'none' }} />
+
         {/* A focus session must not be swipeable-away mid-reading, and the
             enforced pause depends on it. */}
         <Stack.Screen name="session" options={{ gestureEnabled: false, animation: 'fade' }} />

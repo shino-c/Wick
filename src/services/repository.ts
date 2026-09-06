@@ -64,19 +64,56 @@ function rollingBaseline(values: number[]): number | null {
 
 /* ── Pillar 3: baseline, scans, self-reports ──────────────────────── */
 
+/**
+ * The baseline, derived from the scans rather than read from a column.
+ *
+ * The stored `rmssd_baseline` / `calibration_scans` are still written on every
+ * spot check, because Pillar 4 reads them — but they are recomputed here from
+ * the last BASELINE_WINDOW finger scans, and the derived value wins.
+ *
+ * That is not belt-and-braces, it is the fix for a real failure: when the
+ * baseline moved from "every scan, cumulative" to "recent finger scans only",
+ * anyone with existing history saw their count reset to 0/3 and Desk Mode
+ * announce "baseline incomplete" after they had already done the scans. The
+ * scans were still there; only the counter had been left behind. A stored
+ * aggregate can disagree with the rows it summarises after any change to how it
+ * is computed — deriving it means it cannot.
+ */
 export async function getBaseline(): Promise<Baseline> {
   if (hasSupabase) {
     const userId = await currentUserId();
-    const { data } = await supabase.from('baselines').select('*').eq('user_id', userId).maybeSingle();
+    const [{ data }, { data: scans }] = await Promise.all([
+      supabase.from('baselines').select('*').eq('user_id', userId).maybeSingle(),
+      supabase
+        .from('ppg_scans')
+        .select('hrv_rmssd')
+        .eq('user_id', userId)
+        .eq('source', 'finger')
+        .eq('signal_quality', 'good')
+        .not('hrv_rmssd', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(BASELINE_WINDOW),
+    ]);
+    const values = (scans ?? []).map((r) => r.hrv_rmssd as number);
     return {
-      rmssdBaseline: data?.rmssd_baseline ?? null,
+      rmssdBaseline: rollingBaseline(values) ?? data?.rmssd_baseline ?? null,
       scanCount: data?.scan_count ?? 0,
-      calibrationScans: data?.calibration_scans ?? 0,
+      calibrationScans: values.length,
       perceivedStressBaseline: data?.perceived_stress_baseline ?? null,
       updatedAt: data?.updated_at ?? new Date().toISOString(),
     };
   }
-  return (await readDb()).baseline;
+
+  const db = await readDb();
+  const values = db.scans
+    .filter((sc) => sc.source === 'finger' && sc.signalQuality === 'good' && sc.hrvRmssd !== null)
+    .slice(0, BASELINE_WINDOW)
+    .map((sc) => sc.hrvRmssd as number);
+  return {
+    ...db.baseline,
+    rmssdBaseline: rollingBaseline(values) ?? db.baseline.rmssdBaseline,
+    calibrationScans: values.length,
+  };
 }
 
 /**

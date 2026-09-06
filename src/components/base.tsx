@@ -49,12 +49,21 @@ export function Screen({
   scroll = true,
   dark = false,
   padded = true,
+  header,
   footer,
 }: {
   children: React.ReactNode;
   scroll?: boolean;
   dark?: boolean;
   padded?: boolean;
+  /**
+   * Pinned above the scroll area — where the shared brand bar goes.
+   *
+   * It has to sit outside the ScrollView, like `footer` does. A header that
+   * scrolls away on one tab and not another is most of what made the tabs feel
+   * like separate pages rather than one app.
+   */
+  header?: React.ReactNode;
   /** Pinned below the scroll area — where the shared tab bar goes. */
   footer?: React.ReactNode;
 }) {
@@ -62,6 +71,7 @@ export function Screen({
   const inner = padded ? { padding: spacing(5), paddingBottom: spacing(12) } : undefined;
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: bg }} edges={['top']}>
+      {header}
       {scroll ? (
         <ScrollView
           contentContainerStyle={inner}

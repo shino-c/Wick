@@ -227,6 +227,17 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
   const lastEmit = useRef<number>(0);
   /** Saver mode only: seconds until the camera wakes again. */
   const secondsUntilWake = useRef<number>(0);
+  /**
+   * Mirror of state.sampling.
+   *
+   * The saver schedule used to read `s.sampling` inside a setState updater and
+   * call analyseWindow() from in there — which itself calls setState. Nesting
+   * an update inside an updater means the inner one is run during React's
+   * render phase and dropped, so in battery-saver mode the camera dutifully
+   * switched off after 45 seconds and no heart rate or HRV ever appeared. A
+   * ref keeps the scheduling decision out of the render path entirely.
+   */
+  const samplingRef = useRef<boolean>(false);
 
   const setupSamples = useRef<FrameSample[]>([]);
   const setupStart = useRef<number>(0);
@@ -266,6 +277,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     buffer.current = [];
     samplingSince.current = Date.now();
     lastEmit.current = Date.now();
+    samplingRef.current = true;
   };
 
   /* ── window handling ────────────────────────────────────────────── */
@@ -574,25 +586,24 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
         }
       } else {
         // Saver mode: on for windowSeconds, then off until the next interval.
-        setState((s) => {
-          if (s.sampling) {
-            const on = (now - samplingSince.current) / 1000;
-            if (on >= timing.windowSeconds) {
-              analyseWindow();
-              buffer.current = [];
-              samplingSince.current = 0;
-              secondsUntilWake.current = timing.dutyIntervalSeconds - timing.windowSeconds;
-              return { ...s, sampling: false };
-            }
-            return s;
+        // Deliberately plain imperative code — see samplingRef.
+        if (samplingRef.current) {
+          const on = (now - samplingSince.current) / 1000;
+          if (on >= timing.windowSeconds) {
+            analyseWindow();
+            buffer.current = [];
+            samplingSince.current = 0;
+            samplingRef.current = false;
+            secondsUntilWake.current = timing.dutyIntervalSeconds - timing.windowSeconds;
+            setState((s) => ({ ...s, sampling: false }));
           }
+        } else {
           secondsUntilWake.current -= 1;
           if (secondsUntilWake.current <= 0) {
             resetBuffer();
-            return { ...s, sampling: true };
+            setState((s) => ({ ...s, sampling: true }));
           }
-          return s;
-        });
+        }
       }
 
       /* ── movement, tracked every second the camera is on ── */
@@ -622,6 +633,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
           phaseRef.current = 'break';
           buffer.current = [];
           samplingSince.current = 0;
+          samplingRef.current = false;
           return {
             ...s,
             ...common,
@@ -661,6 +673,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     movementTally.current = { moving: 0, total: 0 };
     buffer.current = [];
     samplingSince.current = 0;
+    samplingRef.current = false;
     lastEmit.current = Date.now();
 
     setState((s) => ({
@@ -692,6 +705,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     phaseRef.current = 'ended';
     buffer.current = [];
     samplingSince.current = 0;
+    samplingRef.current = false;
     const readings = state.readings;
     const good = readings.filter((r) => r.deviationPct !== null);
     const delta = good.length >= 2 ? good[good.length - 1].deviationPct! - good[0].deviationPct! : null;
@@ -730,6 +744,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     phaseRef.current = 'break';
     buffer.current = [];
     samplingSince.current = 0;
+    samplingRef.current = false;
     setState((s) => ({ ...s, phase: 'break', sampling: false, secondsLeft: breakMinutes * 60 }));
   }, [breakMinutes]);
 

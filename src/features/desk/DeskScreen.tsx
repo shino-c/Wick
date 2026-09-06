@@ -12,6 +12,7 @@ import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import { getBaseline, listScans } from '@/services/repository';
 import type { PpgScan } from '@/data/types';
 import BottomNavigation from '@/components/bottombar';
+import TopNavigation from '@/components/topbar';
 
 const DURATIONS = [15, 25, 35, 45];
 
@@ -66,13 +67,15 @@ export default function DeskScreen() {
   const baselineReady = scanCount >= BASELINE_MIN_SCANS;
 
   return (
-    <Screen footer={<BottomNavigation activeTab="Desk" router={router} />}>
-      <Row style={{ justifyContent: 'space-between' }}>
-        <Txt v="title">Wick ✳</Txt>
-        <Eyebrow>Desk Mode</Eyebrow>
-      </Row>
-      <Spacer h={5} />
-
+    // Same pinned brand bar as Home, same pinned tab bar underneath. Only the
+    // content between them changes when you switch tabs, which is what makes a
+    // tab feel like a tab rather than a different page.
+    <Screen
+      header={<TopNavigation />}
+      footer={<BottomNavigation activeTab="Desk" router={router} />}
+    >
+      <Eyebrow>Desk Mode</Eyebrow>
+      <Spacer h={2} />
       <Txt v="display">Focus, watched over.</Txt>
       <Spacer h={2} />
       <Txt v="body" color={colors.inkSoft}>
