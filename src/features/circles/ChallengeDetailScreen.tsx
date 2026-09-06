@@ -11,6 +11,7 @@ import {
   toggleChallenge,
 } from '@/services/repository';
 import type { ChallengeRow } from '@/data/types';
+import { formatSchedule, isPast } from './scheduling';
 
 const CATEGORY: Record<ChallengeRow['category'], { icon: string; label: string }> = {
   physical: { icon: '🚶', label: 'Active recovery' },
@@ -80,6 +81,8 @@ export default function ChallengeDetailScreen() {
   const spotsLeft =
     challenge.capacity === null ? null : Math.max(0, challenge.capacity - challenge.joinedCount);
   const full = spotsLeft === 0 && !challenge.joined;
+  // A meetup whose time has been and gone should not still be recruiting.
+  const past = isPast(challenge.scheduledFor);
 
   return (
     <Screen>
@@ -121,8 +124,11 @@ export default function ChallengeDetailScreen() {
           <View style={{ flex: 1 }}>
             <Eyebrow>When</Eyebrow>
             <Spacer h={1} />
-            <Txt v="heading">{challenge.scheduledFor ?? 'Any time'}</Txt>
+            <Txt v="heading">{formatSchedule(challenge.scheduledFor)}</Txt>
           </View>
+          {past && (
+            <Badge label="Passed" fg={colors.inkSoft} bg={colors.line} />
+          )}
           {challenge.joined && (
             <Badge
               label={challenge.completedByMe ? 'Done' : 'Joined'}
@@ -290,10 +296,18 @@ export default function ChallengeDetailScreen() {
       )}
 
       <Button
-        label={challenge.joined ? 'Leave challenge' : full ? 'Challenge is full' : 'Join challenge'}
+        label={
+          challenge.joined
+            ? 'Leave challenge'
+            : past
+              ? 'This one has already happened'
+              : full
+                ? 'Challenge is full'
+                : 'Join challenge'
+        }
         variant={challenge.joined ? 'ghost' : 'primary'}
         onPress={() => run(() => toggleChallenge(challenge.id))}
-        disabled={busy || full}
+        disabled={busy || full || (past && !challenge.joined)}
       />
 
       {challenge.createdByMe && (

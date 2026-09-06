@@ -39,6 +39,7 @@ export async function getBaseline(): Promise<Baseline> {
     return {
       rmssdBaseline: data?.rmssd_baseline ?? null,
       scanCount: data?.scan_count ?? 0,
+      calibrationScans: data?.calibration_scans ?? 0,
       perceivedStressBaseline: data?.perceived_stress_baseline ?? null,
       updatedAt: data?.updated_at ?? new Date().toISOString(),
     };
@@ -47,11 +48,24 @@ export async function getBaseline(): Promise<Baseline> {
 }
 
 /**
- * Persists a scan and rolls the baseline forward.
+ * Persists a scan and, for finger spot checks only, rolls the baseline forward.
  *
  * Only scalars are written. filteredSignal and ibiList are deliberately dropped
  * here — they stay on the device for the life of the screen and are never
  * uploaded, in line with the on-device-only promise.
+ *
+ * ── Why face scans never touch the baseline ─────────────────────────
+ * The RMSSD baseline is a *resting* reference: what this person's autonomic
+ * balance looks like when nothing is demanding anything of them. Desk Mode
+ * readings are taken mid-task by definition. Feeding them into the same
+ * cumulative average meant a single 25-minute session added dozens of
+ * working-state samples on top of three resting ones, pulling the baseline down
+ * to roughly the stressed value. Deviation is measured *against* that baseline,
+ * so it collapsed toward zero and the classifier stopped reporting stress — the
+ * app got worse the more it was used, silently, with no error anywhere.
+ *
+ * Face readings are still stored: they are the trend, the session curve and the
+ * history. They are simply not evidence about rest.
  */
 export async function saveScan(
   result: PPGResult,
@@ -67,23 +81,28 @@ export async function saveScan(
     signal_quality: result.signalQuality,
   };
 
+  const feedsBaseline =
+    source === 'finger' && result.signalQuality === 'good' && result.hrvRmssd !== null;
+
   if (hasSupabase) {
     const userId = await currentUserId();
     await supabase.from('ppg_scans').insert({ ...row, user_id: userId });
-    if (result.signalQuality === 'good' && result.hrvRmssd !== null) {
-      const base = await getBaseline();
+    const base = await getBaseline();
+    const patch: Record<string, unknown> = {
+      user_id: userId,
+      scan_count: base.scanCount + 1,
+      updated_at: new Date().toISOString(),
+    };
+    if (feedsBaseline) {
       const [next, count] = PPGService.updateRmssdBaseline(
         base.rmssdBaseline,
-        base.scanCount,
-        result.hrvRmssd
+        base.calibrationScans,
+        result.hrvRmssd!
       );
-      await supabase.from('baselines').upsert({
-        user_id: userId,
-        rmssd_baseline: next,
-        scan_count: count,
-        updated_at: new Date().toISOString(),
-      });
+      patch.rmssd_baseline = next;
+      patch.calibration_scans = count;
     }
+    await supabase.from('baselines').upsert(patch);
     return;
   }
 
@@ -98,16 +117,17 @@ export async function saveScan(
       signalQuality: result.signalQuality,
       createdAt: new Date().toISOString(),
     });
-    if (result.signalQuality === 'good' && result.hrvRmssd !== null) {
+    db.baseline.scanCount += 1;
+    if (feedsBaseline) {
       const [next, count] = PPGService.updateRmssdBaseline(
         db.baseline.rmssdBaseline,
-        db.baseline.scanCount,
-        result.hrvRmssd
+        db.baseline.calibrationScans,
+        result.hrvRmssd!
       );
       db.baseline.rmssdBaseline = next;
-      db.baseline.scanCount = count;
-      db.baseline.updatedAt = new Date().toISOString();
+      db.baseline.calibrationScans = count;
     }
+    db.baseline.updatedAt = new Date().toISOString();
   });
 }
 
@@ -141,11 +161,18 @@ export async function saveSelfReport(
   if (hasSupabase) {
     const userId = await currentUserId();
     await supabase.from('self_reports').insert({ user_id: userId, score, raw_answers: rawAnswers });
-    await supabase.from('baselines').upsert({
-      user_id: userId,
-      perceived_stress_baseline: score,
-      updated_at: new Date().toISOString(),
-    });
+    // First report only. This is a *baseline*, not "the latest answer" — the
+    // Supabase path used to overwrite it every time, so it tracked the current
+    // mood and the local path did not. Two backends, two different meanings for
+    // the same column.
+    const base = await getBaseline();
+    if (base.perceivedStressBaseline === null) {
+      await supabase.from('baselines').upsert({
+        user_id: userId,
+        perceived_stress_baseline: score,
+        updated_at: new Date().toISOString(),
+      });
+    }
     return;
   }
   await writeDb((db) => {
@@ -169,6 +196,28 @@ export async function latestSelfReport(): Promise<SelfReport | null> {
       : null;
   }
   return (await readDb()).selfReports[0] ?? null;
+}
+
+/**
+ * Whether the full questionnaire has ever been completed.
+ *
+ * Not the same as "the latest self-report has answers": a one-tap quick flag is
+ * also a self-report, and it has no answers. Asking the latest row meant a
+ * single tap on the mood row flipped the calibration screen's questionnaire
+ * card back to "Not started".
+ */
+export async function hasQuestionnaireAnswers(): Promise<boolean> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('self_reports')
+      .select('id')
+      .eq('user_id', userId)
+      .not('raw_answers', 'is', null)
+      .limit(1);
+    return (data ?? []).length > 0;
+  }
+  return (await readDb()).selfReports.some((r) => r.rawAnswers !== null);
 }
 
 /* ── Fused score (handoff to Pillar 4) ───────────────────────────── */

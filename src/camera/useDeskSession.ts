@@ -3,18 +3,39 @@
  *
  * Responsibilities:
  *   • 3-second setup check before the timer starts
- *   • interval-sampled face rPPG bursts (camera off in between)
+ *   • face rPPG sampling, continuous or duty-cycled (see SENSING in config.ts)
  *   • adaptive Pomodoro — break timing moves with the stress trend
  *   • threshold escalation — two consecutive good High Stress reads lock the
  *     timer and force a guided breathing pause
  *   • session summary for the post-session calibration prompt
  *
- * Nothing about a frame survives a burst. Each burst reduces ~360 frames to one
- * {heart rate, HRV, deviation} triple; the frames themselves were already
- * reduced to a single number each inside the frame processor.
+ * ── Continuous by default ───────────────────────────────────────────
+ * The first version opened the camera for 12s a minute. Two things were wrong
+ * with that, and neither was fixable by tuning the duty cycle:
+ *
+ *   • 12s yields ~11-14 inter-beat intervals, far too few for RMSSD to be
+ *     stable. The classifier was reading sampling noise as stress.
+ *   • Restlessness observed 20% of the time is a coin flip. Someone fidgeting
+ *     constantly who happened to be still during the burst read as "steady",
+ *     and nothing in the design would ever have shown that up.
+ *
+ * Continuous mode keeps the camera open across the focus block and analyses a
+ * sliding 40-second window every 15 seconds. Readings overlap, so the trend is
+ * a curve rather than a scatter, and movement is observed for the whole block.
+ *
+ * Nothing about a frame survives. Each frame was already reduced to a single
+ * number inside the frame processor; the rolling buffer holds at most
+ * ANALYSIS_WINDOW_SECONDS of those numbers and is discarded as it ages out.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ESCALATION_CONSECUTIVE_READS, FACE, POMODORO, SETUP_CHECK_SECONDS } from './config';
+import {
+  ESCALATION_CONSECUTIVE_READS,
+  FACE,
+  POMODORO,
+  SENSING,
+  SETUP_CHECK_SECONDS,
+  type SensingMode,
+} from './config';
 import {
   checkFaceFraming,
   facePresent,
@@ -44,15 +65,21 @@ export type SessionPhase =
 export interface Reading {
   at: number;
   heartRate: number | null;
+  /** Null when the window was too short for RMSSD to be meaningful. */
   hrvRmssd: number | null;
   deviationPct: number | null;
   level: StressLevel;
   quality: 'good' | 'poor';
+  /** Seconds of signal this reading was computed from. */
+  windowSeconds: number;
   /**
-   * Fraction of the burst spent moving, 0–1. Derived from large excursions in
-   * the ROI mean: when the head shifts, the sampled patch slides off skin and
-   * the mean jumps far more than a heartbeat ever does. This is the "fidgeting
-   * frequency" secondary cue. Posture angle and jaw tension would need a real
+   * Fraction of the analysis window spent moving, 0–1. Derived from large
+   * excursions in the ROI mean: when the head shifts, the sampled patch slides
+   * off skin and the mean jumps far more than a heartbeat ever does.
+   *
+   * In continuous mode this is a genuine measurement of the whole window. In
+   * saver mode it describes only the sampled slice, which is why the UI labels
+   * it differently there. Posture angle and jaw tension would need a real
    * pose/landmark model and are deliberately not faked here.
    */
   movementIndex: number;
@@ -72,10 +99,17 @@ export interface DeskSessionState {
   faces: FaceBox[];
   /** Whether a person appears to be in front of the camera right now. */
   present: boolean;
-  /** Why the last burst was thrown away, if it was. */
+  /** Why the last window was thrown away, if it was. */
   lastDiscardReason: string | null;
-  /** True while a burst is running: camera on, indicator lit. */
+  /** True while the camera is reading. Continuous for the whole block by default. */
   sampling: boolean;
+  /**
+   * Restlessness over the last few seconds, 0–1, updated live rather than once
+   * per reading. This is the fidget cue the interval design could not see.
+   */
+  movementLive: number;
+  /** Fraction of the focus block so far spent restless. Continuous mode only. */
+  movementSessionPct: number | null;
   readings: Reading[];
   latest: Reading | null;
   breaksTaken: number;
@@ -84,6 +118,8 @@ export interface DeskSessionState {
   escalationReason: string | null;
   baselineReady: boolean;
   simulated: boolean;
+  /** Seconds until the next reading lands, for the UI countdown. */
+  secondsToNextReading: number;
 }
 
 export interface SessionSummary {
@@ -96,28 +132,65 @@ export interface SessionSummary {
   stressDeltaPct: number | null;
   readings: Reading[];
   enforcedAtIndex: number | null;
+  /** Windows thrown away for no face / two faces. Not the same as poor signal. */
+  discardedWindows: number;
+  movementSessionPct: number | null;
+  sensingMode: SensingMode;
+  /** Filled in by the screen — the hook has no opinion about audio. */
+  soundscape: string | null;
 }
 
 export interface DeskSessionOptions {
   plannedMinutes?: number;
   /** User-chosen break length. The adaptive logic moves *when*, never how long. */
   breakMinutes?: number;
-  /** Shorten the sampling cadence for a live demo. Real cadence is 3 minutes. */
-  demoMode?: boolean;
+  /** How the camera is scheduled. See SENSING in config.ts. */
+  mode?: SensingMode;
   /** Simulation only: 'ramp' walks stress upward so escalation is demonstrable. */
   simArc?: 'steady' | 'ramp';
+}
+
+/** Timing for a sensing mode, resolved once. */
+function schedule(mode: SensingMode) {
+  if (mode === 'demo') {
+    return {
+      continuous: true,
+      windowSeconds: SENSING.DEMO_WINDOW_SECONDS,
+      strideSeconds: SENSING.DEMO_STRIDE_SECONDS,
+      dutyIntervalSeconds: 0,
+    };
+  }
+  if (mode === 'saver') {
+    return {
+      continuous: false,
+      windowSeconds: SENSING.SAVER_WINDOW_SECONDS,
+      strideSeconds: SENSING.SAVER_INTERVAL_SECONDS,
+      dutyIntervalSeconds: SENSING.SAVER_INTERVAL_SECONDS,
+    };
+  }
+  return {
+    continuous: true,
+    windowSeconds: SENSING.ANALYSIS_WINDOW_SECONDS,
+    strideSeconds: SENSING.ANALYSIS_STRIDE_SECONDS,
+    dutyIntervalSeconds: 0,
+  };
+}
+
+interface Sample {
+  v: number;
+  t: number;
+  present: boolean;
 }
 
 export function useDeskSession(options: DeskSessionOptions = {}) {
   const {
     plannedMinutes = POMODORO.DEFAULT_MINUTES,
     breakMinutes = POMODORO.DEFAULT_BREAK_MINUTES,
-    demoMode = false,
+    mode = 'continuous',
     simArc = 'ramp',
   } = options;
 
-  const burstInterval = demoMode ? 20 : FACE.BURST_INTERVAL_SECONDS;
-  const burstLength = demoMode ? 6 : FACE.BURST_SECONDS;
+  const timing = useMemo(() => schedule(mode), [mode]);
 
   const [state, setState] = useState<DeskSessionState>(() => ({
     phase: 'idle',
@@ -130,6 +203,8 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     present: false,
     lastDiscardReason: null,
     sampling: false,
+    movementLive: 0,
+    movementSessionPct: null,
     readings: [],
     latest: null,
     breaksTaken: 0,
@@ -137,24 +212,32 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     escalationReason: null,
     baselineReady: false,
     simulated: !cameraAvailable,
+    secondsToNextReading: timing.windowSeconds,
   }));
 
   const phaseRef = useRef<SessionPhase>('idle');
   const startedAt = useRef<string>('');
   const tick = useRef<ReturnType<typeof setInterval> | null>(null);
-  const burstSamples = useRef<number[]>([]);
-  const burstStart = useRef<number>(0);
+
+  /** Rolling analysis buffer. Never longer than the analysis window. */
+  const buffer = useRef<Sample[]>([]);
+  /** When the current continuous run of sampling began. */
+  const samplingSince = useRef<number>(0);
+  const lastEmit = useRef<number>(0);
+  /** Saver mode only: seconds until the camera wakes again. */
+  const secondsUntilWake = useRef<number>(0);
+
   const setupSamples = useRef<FrameSample[]>([]);
   const setupStart = useRef<number>(0);
-  const secondsUntilBurst = useRef<number>(burstInterval);
   const burstIndex = useRef<number>(0);
   const baselineRmssd = useRef<number | null>(null);
   const consecutiveHigh = useRef<number>(0);
   const enforcedAtIndex = useRef<number | null>(null);
   const enforcedLeft = useRef<number>(0);
   const facesRef = useRef<FaceBox[]>([]);
-  const burstFaceFrames = useRef<number>(0);
-  const burstTotalFrames = useRef<number>(0);
+  const discarded = useRef<number>(0);
+  /** Whole-session movement tally, one entry per second of focus. */
+  const movementTally = useRef<{ moving: number; total: number }>({ moving: 0, total: 0 });
 
   const stop = () => {
     if (tick.current) clearInterval(tick.current);
@@ -167,107 +250,146 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     setState((s) => ({ ...s, phase, ...extra }));
   };
 
-  /* ── burst handling ─────────────────────────────────────────────── */
+  const resetBuffer = () => {
+    buffer.current = [];
+    samplingSince.current = Date.now();
+    lastEmit.current = Date.now();
+  };
+
+  /* ── window handling ────────────────────────────────────────────── */
 
   /**
-   * Throws a burst away without producing a reading.
+   * Throws a window away without producing a reading.
    *
    * This matters more than it looks. Sensor noise off any surface, once it has
    * been through a 0.7–3.5 Hz bandpass, contains oscillations that peak
    * detection will happily turn into a heart rate. Without this gate the app
    * reports a pulse for an empty chair. Silence is the correct output.
    */
-  const discardBurst = useCallback((reason: string) => {
-    setState((s) => ({ ...s, sampling: false, lastDiscardReason: reason }));
+  const discardWindow = useCallback((reason: string) => {
+    discarded.current += 1;
+    setState((s) => ({ ...s, lastDiscardReason: reason }));
   }, []);
 
-  const ingestReading = useCallback((rawSignal: number[], fps: number) => {
-    const result = PPGService.process(rawSignal, fps);
-    const movement = movementIndex(rawSignal);
-    const classification = PPGService.classifyStress(result.hrvRmssd ?? 0, baselineRmssd.current);
+  const ingestReading = useCallback(
+    (rawSignal: number[], fps: number, movement: number) => {
+      const result = PPGService.process(rawSignal, fps);
+      // A null RMSSD is not an error — it means the window was honest about
+      // being too short. Either way there is nothing to classify against.
+      const classification =
+        result.hrvRmssd === null
+          ? { stressLevel: 'Unknown' as StressLevel, deviationPct: null, message: '' }
+          : PPGService.classifyStress(result.hrvRmssd, baselineRmssd.current);
 
-    const reading: Reading = {
-      at: Date.now(),
-      heartRate: result.heartRate,
-      hrvRmssd: result.hrvRmssd,
-      deviationPct: result.signalQuality === 'good' ? classification.deviationPct : null,
-      level: result.signalQuality === 'good' ? classification.stressLevel : 'Unknown',
-      quality: result.signalQuality,
-      movementIndex: movement,
-    };
+      const usable = result.signalQuality === 'good' && result.hrvRmssd !== null;
 
-    // Escalation counts only good-quality High Stress reads. A poor read resets
-    // nothing (noise shouldn't clear a genuine streak) but never advances it.
-    if (reading.quality === 'good') {
-      if (reading.level === 'High Stress') consecutiveHigh.current += 1;
-      else consecutiveHigh.current = 0;
-    }
+      const reading: Reading = {
+        at: Date.now(),
+        heartRate: result.heartRate,
+        hrvRmssd: result.hrvRmssd,
+        deviationPct: usable ? classification.deviationPct : null,
+        level: usable ? classification.stressLevel : 'Unknown',
+        quality: result.signalQuality,
+        windowSeconds: result.hrvWindowSeconds,
+        movementIndex: movement,
+      };
 
-    setState((s) => {
-      const readings = [...s.readings, reading];
-      const next: Partial<DeskSessionState> = { readings, latest: reading, sampling: false };
-
-      // Adaptive Pomodoro: pull the break earlier when strain is rising, push it
-      // out when the read is calm — bounded so it never becomes absurd.
-      if (reading.quality === 'good' && phaseRef.current === 'focus') {
-        const delta =
-          reading.level === 'High Stress' ? -300 : reading.level === 'Elevated Stress' ? -180 : 120;
-        const block = clamp(
-          s.blockSeconds + delta,
-          POMODORO.MIN_MINUTES * 60,
-          POMODORO.MAX_MINUTES * 60
-        );
-        next.blockSeconds = block;
-        next.secondsLeft = clamp(block - s.elapsedSeconds, 0, block);
+      // Escalation counts only classifiable High Stress reads. A poor read
+      // resets nothing (noise shouldn't clear a genuine streak) but never
+      // advances it either.
+      if (usable) {
+        if (reading.level === 'High Stress') consecutiveHigh.current += 1;
+        else consecutiveHigh.current = 0;
       }
-      return { ...s, ...next };
-    });
 
-    // Enforced pause. Deliberately not a dismissible notification.
-    if (
-      consecutiveHigh.current >= ESCALATION_CONSECUTIVE_READS &&
-      phaseRef.current === 'focus'
-    ) {
-      consecutiveHigh.current = 0;
-      enforcedLeft.current = POMODORO.ENFORCED_BREAK_SECONDS;
       setState((s) => {
-        enforcedAtIndex.current = s.readings.length - 1;
-        return {
-          ...s,
-          phase: 'enforced',
-          enforcedBreaks: s.enforcedBreaks + 1,
-          secondsLeft: POMODORO.ENFORCED_BREAK_SECONDS,
-          escalationReason: `Two consecutive readings showed sustained high stress (HRV ${Math.round(
-            reading.deviationPct ?? 0
-          )}% below your baseline). Wick paused the timer.`,
-        };
+        const readings = [...s.readings, reading];
+        const next: Partial<DeskSessionState> = { readings, latest: reading };
+
+        // Adaptive Pomodoro: pull the break earlier when strain is rising, push
+        // it out when the read is calm — bounded so it never becomes absurd.
+        //
+        // The step is scaled by how often readings arrive. At the old one-a-
+        // minute cadence a 300s cut was one decisive move; at one every 15s the
+        // same step would collapse a 25-minute block to the floor inside two
+        // minutes. Per-minute-of-evidence keeps the behaviour identical whatever
+        // the sensing mode.
+        if (usable && phaseRef.current === 'focus') {
+          const perMinute =
+            reading.level === 'High Stress' ? -300 : reading.level === 'Elevated Stress' ? -180 : 120;
+          const delta = (perMinute * timing.strideSeconds) / 60;
+          const block = clamp(
+            s.blockSeconds + delta,
+            POMODORO.MIN_MINUTES * 60,
+            POMODORO.MAX_MINUTES * 60
+          );
+          next.blockSeconds = Math.round(block);
+          next.secondsLeft = Math.round(clamp(block - s.elapsedSeconds, 0, block));
+        }
+        return { ...s, ...next };
       });
-      phaseRef.current = 'enforced';
-    }
-  }, []);
 
-  const runSimulatedBurst = useCallback(() => {
-    setState((s) => ({ ...s, sampling: true }));
-    const idx = burstIndex.current++;
-    setTimeout(() => {
-      const profile = rampedProfile(idx, simArc);
-      ingestReading(simulateBurst(profile, FACE.BURST_SECONDS, 30), 30);
-    }, Math.min(burstLength, 3) * 1000);
-  }, [burstLength, ingestReading, simArc]);
+      // Enforced pause. Deliberately not a dismissible notification.
+      if (consecutiveHigh.current >= ESCALATION_CONSECUTIVE_READS && phaseRef.current === 'focus') {
+        consecutiveHigh.current = 0;
+        enforcedLeft.current = POMODORO.ENFORCED_BREAK_SECONDS;
+        setState((s) => {
+          enforcedAtIndex.current = s.readings.length - 1;
+          return {
+            ...s,
+            phase: 'enforced',
+            enforcedBreaks: s.enforcedBreaks + 1,
+            secondsLeft: POMODORO.ENFORCED_BREAK_SECONDS,
+            escalationReason: `Two consecutive ${reading.windowSeconds}-second readings showed sustained high stress (HRV ${Math.round(
+              reading.deviationPct ?? 0
+            )}% below your baseline). Wick paused the timer.`,
+          };
+        });
+        phaseRef.current = 'enforced';
+      }
+    },
+    [timing.strideSeconds]
+  );
 
-  const beginBurst = useCallback(() => {
-    if (!cameraAvailable) {
-      runSimulatedBurst();
+  /**
+   * Analyses the trailing window and emits a reading, or discards it.
+   * Called on a stride boundary in continuous mode, and at the end of each
+   * on-window in saver mode.
+   */
+  const analyseWindow = useCallback(() => {
+    const samples = buffer.current;
+    if (samples.length < 2) return;
+
+    const span = (samples[samples.length - 1].t - samples[0].t) / 1000;
+    if (span <= 0) return;
+    const fps = samples.length / span;
+
+    const coverage = samples.filter((s) => s.present).length / samples.length;
+    if (coverage < FACE.MIN_FACE_COVERAGE) {
+      discardWindow(
+        coverage === 0
+          ? 'No face in frame — reading discarded'
+          : 'You moved out of frame — reading discarded'
+      );
+      lastEmit.current = Date.now();
       return;
     }
-    burstSamples.current = [];
-    burstStart.current = Date.now();
-    burstFaceFrames.current = 0;
-    burstTotalFrames.current = 0;
-    setState((s) => ({ ...s, sampling: true, lastDiscardReason: null }));
-  }, [runSimulatedBurst]);
 
-  /* ── per-frame callback (setup check + bursts) ──────────────────── */
+    const raw = samples.map((s) => s.v);
+    burstIndex.current += 1;
+    lastEmit.current = Date.now();
+    setState((s) => ({ ...s, lastDiscardReason: null }));
+    ingestReading(raw, fps, movementIndex(raw));
+  }, [discardWindow, ingestReading]);
+
+  const runSimulatedReading = useCallback(() => {
+    const idx = burstIndex.current++;
+    lastEmit.current = Date.now();
+    const profile = rampedProfile(idx, simArc);
+    ingestReading(simulateBurst(profile, timing.windowSeconds, 30), 30, 0.12);
+  }, [ingestReading, simArc, timing.windowSeconds]);
+
+  /* ── per-frame callback ─────────────────────────────────────────── */
 
   const onSample = useCallback(
     (sample: FrameSample) => {
@@ -278,17 +400,17 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
         const nowPresent = faceDetectionAvailable
           ? facesRef.current.length === 1
           : facePresent(setupSamples.current);
-        setState((s) => (s.present === nowPresent ? s : { ...s, present: nowPresent }));
         const elapsed = (Date.now() - setupStart.current) / 1000;
         // Lighting alone is not framing. A wall at a reasonable brightness used
-        // to pass this check; now the face detector has to see exactly one
-        // person before the countdown is allowed to run down.
+        // to pass this check; presence is now checked first and is not
+        // negotiable.
         const issue = checkFaceFraming(
           setupSamples.current.slice(-45),
           faceDetectionAvailable ? facesRef.current.length : null
         );
         setState((s) => ({
           ...s,
+          present: nowPresent,
           setupIssue: issue,
           setupSecondsLeft: Math.max(0, Math.ceil(SETUP_CHECK_SECONDS - elapsed)),
         }));
@@ -301,64 +423,49 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
         return;
       }
 
-      if (!burstStart.current) return;
-      burstSamples.current.push(sample.mean);
-      burstTotalFrames.current += 1;
+      if (!samplingSince.current) return;
+
       // Presence per frame. Where a real detector exists it is authoritative;
       // otherwise skin coverage of the sampled region stands in for it.
       const present = faceDetectionAvailable
         ? facesRef.current.length === 1
         : sample.skinFraction >= SKIN_PRESENCE_THRESHOLD;
-      if (present) burstFaceFrames.current += 1;
+
+      const now = Date.now();
+      buffer.current.push({ v: sample.mean, t: now, present });
+
+      // Drop anything older than the analysis window. This is the only place
+      // sample data is retained at all, and it is bounded by wall-clock time
+      // rather than count, so a slow frame rate cannot grow it.
+      const cutoff = now - timing.windowSeconds * 1000;
+      if (buffer.current.length > 0 && buffer.current[0].t < cutoff) {
+        let drop = 0;
+        while (drop < buffer.current.length && buffer.current[drop].t < cutoff) drop++;
+        buffer.current = buffer.current.slice(drop);
+      }
 
       if (!faceDetectionAvailable) {
         setState((s) => (s.present === present ? s : { ...s, present }));
       }
-
-      const elapsed = (Date.now() - burstStart.current) / 1000;
-      if (elapsed >= burstLength) {
-        const fps = burstSamples.current.length / elapsed;
-        const raw = [...burstSamples.current];
-        const faceFrames = burstFaceFrames.current;
-        const totalFrames = burstTotalFrames.current;
-        burstSamples.current = [];
-        burstStart.current = 0;
-        burstFaceFrames.current = 0;
-        burstTotalFrames.current = 0;
-        burstIndex.current += 1;
-
-        const coverage = totalFrames > 0 ? faceFrames / totalFrames : 0;
-        if (coverage < FACE.MIN_FACE_COVERAGE) {
-          discardBurst(
-            coverage === 0
-              ? 'No face in frame — reading discarded'
-              : 'You moved out of frame — reading discarded'
-          );
-          return;
-        }
-        ingestReading(raw, fps);
-      }
     },
-    [burstLength, ingestReading]
+    [timing.windowSeconds]
   );
 
   /**
-   * Face detector callback. A second face means someone is behind you: the
-   * burst is dropped rather than silently averaging two people's skin tones.
+   * Face detector callback (iOS only). A second face means someone is behind
+   * you: the window is dropped rather than silently averaging two people.
    */
   const onFaces = useCallback(
     (faces: FaceBox[]) => {
       facesRef.current = faces;
       setState((s) => (sameBoxes(s.faces, faces) ? s : { ...s, faces }));
-      if (faces.length > 1 && burstStart.current) {
-        burstSamples.current = [];
-        burstStart.current = 0;
-        burstFaceFrames.current = 0;
-        burstTotalFrames.current = 0;
-        discardBurst('Someone else came into frame — reading discarded');
+      if (faces.length > 1 && samplingSince.current) {
+        buffer.current = [];
+        lastEmit.current = Date.now();
+        discardWindow('Someone else came into frame — reading discarded');
       }
     },
-    [discardBurst]
+    [discardWindow]
   );
 
   /* ── the clock ──────────────────────────────────────────────────── */
@@ -375,8 +482,8 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
           setState((s) => ({ ...s, setupSecondsLeft: left }));
           if (left === 0) {
             phaseRef.current = 'focus';
-            secondsUntilBurst.current = Math.min(burstInterval, 5);
-            setState((s) => ({ ...s, phase: 'focus' }));
+            resetBuffer();
+            setState((s) => ({ ...s, phase: 'focus', sampling: true }));
           }
           return;
         }
@@ -385,8 +492,8 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
         setState((s) => {
           if (s.setupSecondsLeft === 0 && s.phase === 'setup') {
             phaseRef.current = 'focus';
-            secondsUntilBurst.current = Math.min(burstInterval, 10);
-            return { ...s, phase: 'focus' };
+            resetBuffer();
+            return { ...s, phase: 'focus', sampling: true };
           }
           return s;
         });
@@ -399,9 +506,11 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
         setState((s) => ({ ...s, secondsLeft: left }));
         if (left === 0) {
           phaseRef.current = 'focus';
+          resetBuffer();
           setState((s) => ({
             ...s,
             phase: 'focus',
+            sampling: true,
             breaksTaken: s.breaksTaken + 1,
             secondsLeft: clamp(s.blockSeconds - s.elapsedSeconds, 60, s.blockSeconds),
           }));
@@ -414,9 +523,11 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
           const left = s.secondsLeft - 1;
           if (left > 0) return { ...s, secondsLeft: left };
           phaseRef.current = 'focus';
+          resetBuffer();
           return {
             ...s,
             phase: 'focus',
+            sampling: true,
             elapsedSeconds: 0,
             secondsLeft: s.blockSeconds,
             breaksTaken: s.breaksTaken + 1,
@@ -427,35 +538,92 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
 
       if (phase !== 'focus') return;
 
-      // Focus tick.
-      secondsUntilBurst.current -= 1;
-      if (secondsUntilBurst.current <= 0) {
-        secondsUntilBurst.current = burstInterval;
-        beginBurst();
+      /* ── sensing schedule ── */
+      const now = Date.now();
+
+      if (!cameraAvailable) {
+        if ((now - lastEmit.current) / 1000 >= timing.strideSeconds) runSimulatedReading();
+      } else if (timing.continuous) {
+        // Camera stays on. Emit whenever a full stride has passed and the
+        // buffer covers enough time to be worth analysing.
+        const span = buffer.current.length
+          ? (buffer.current[buffer.current.length - 1].t - buffer.current[0].t) / 1000
+          : 0;
+        const due = (now - lastEmit.current) / 1000 >= timing.strideSeconds;
+        // The first reading has to wait for a full window; after that each
+        // stride slides it forward.
+        if (due && span >= Math.min(timing.windowSeconds, SENSING.ANALYSIS_WINDOW_SECONDS) * 0.9) {
+          analyseWindow();
+        }
+      } else {
+        // Saver mode: on for windowSeconds, then off until the next interval.
+        setState((s) => {
+          if (s.sampling) {
+            const on = (now - samplingSince.current) / 1000;
+            if (on >= timing.windowSeconds) {
+              analyseWindow();
+              buffer.current = [];
+              samplingSince.current = 0;
+              secondsUntilWake.current = timing.dutyIntervalSeconds - timing.windowSeconds;
+              return { ...s, sampling: false };
+            }
+            return s;
+          }
+          secondsUntilWake.current -= 1;
+          if (secondsUntilWake.current <= 0) {
+            resetBuffer();
+            return { ...s, sampling: true };
+          }
+          return s;
+        });
       }
 
+      /* ── movement, tracked every second the camera is on ── */
+      const movementWindow = buffer.current.filter(
+        (s) => now - s.t <= SENSING.MOVEMENT_WINDOW_SECONDS * 1000
+      );
+      const live = movementWindow.length >= 8 ? movementIndex(movementWindow.map((s) => s.v)) : 0;
+      if (movementWindow.length >= 8) {
+        movementTally.current.total += 1;
+        if (live > 0.25) movementTally.current.moving += 1;
+      }
+
+      /* ── the focus clock ── */
       setState((s) => {
         const elapsedSeconds = s.elapsedSeconds + 1;
         const left = Math.max(0, s.blockSeconds - elapsedSeconds);
+        const tally = movementTally.current;
+        const common = {
+          movementLive: live,
+          movementSessionPct: tally.total > 0 ? tally.moving / tally.total : null,
+          secondsToNextReading: Math.max(
+            0,
+            Math.ceil(timing.strideSeconds - (now - lastEmit.current) / 1000)
+          ),
+        };
         if (left === 0) {
           phaseRef.current = 'break';
+          buffer.current = [];
+          samplingSince.current = 0;
           return {
             ...s,
+            ...common,
             phase: 'break',
+            sampling: false,
             elapsedSeconds,
             secondsLeft: breakMinutes * 60,
           };
         }
-        return { ...s, elapsedSeconds, secondsLeft: left };
+        return { ...s, ...common, elapsedSeconds, secondsLeft: left };
       });
     }, 1000);
-  }, [beginBurst, burstInterval]);
+  }, [analyseWindow, breakMinutes, runSimulatedReading, timing]);
 
   /* ── public controls ────────────────────────────────────────────── */
 
   const start = useCallback(async () => {
     const baseline = await getBaseline();
-    baselineRmssd.current = baseline.scanCount >= 3 ? baseline.rmssdBaseline : null;
+    baselineRmssd.current = baseline.calibrationScans >= 3 ? baseline.rmssdBaseline : null;
 
     if (cameraAvailable) {
       const granted = await requestCameraPermission();
@@ -471,7 +639,11 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     burstIndex.current = 0;
     consecutiveHigh.current = 0;
     enforcedAtIndex.current = null;
-    secondsUntilBurst.current = burstInterval;
+    discarded.current = 0;
+    movementTally.current = { moving: 0, total: 0 };
+    buffer.current = [];
+    samplingSince.current = 0;
+    lastEmit.current = Date.now();
 
     setState((s) => ({
       ...s,
@@ -486,20 +658,25 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
       breaksTaken: 0,
       enforcedBreaks: 0,
       escalationReason: null,
+      movementLive: 0,
+      movementSessionPct: null,
+      sampling: false,
       baselineReady: baselineRmssd.current !== null,
       simulated: !cameraAvailable,
+      secondsToNextReading: timing.windowSeconds,
     }));
     phaseRef.current = 'setup';
     startClock();
-  }, [burstInterval, plannedMinutes, startClock]);
+  }, [plannedMinutes, startClock, timing.windowSeconds]);
 
   const end = useCallback((): SessionSummary => {
     stop();
     phaseRef.current = 'ended';
+    buffer.current = [];
+    samplingSince.current = 0;
     const readings = state.readings;
     const good = readings.filter((r) => r.deviationPct !== null);
-    const delta =
-      good.length >= 2 ? (good[good.length - 1].deviationPct! - good[0].deviationPct!) : null;
+    const delta = good.length >= 2 ? good[good.length - 1].deviationPct! - good[0].deviationPct! : null;
 
     setState((s) => ({ ...s, phase: 'ended', sampling: false }));
 
@@ -515,23 +692,37 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
       stressDeltaPct: delta === null ? null : Math.round(delta * 10) / 10,
       readings,
       enforcedAtIndex: enforcedAtIndex.current,
+      discardedWindows: discarded.current,
+      movementSessionPct: state.movementSessionPct,
+      sensingMode: mode,
+      soundscape: null,
     };
-  }, [plannedMinutes, state.breaksTaken, state.enforcedBreaks, state.readings]);
+  }, [
+    mode,
+    plannedMinutes,
+    state.breaksTaken,
+    state.enforcedBreaks,
+    state.movementSessionPct,
+    state.readings,
+  ]);
 
-  /** Skip the remaining enforced pause is intentionally NOT offered. */
+  /** Skipping the remaining enforced pause is intentionally NOT offered. */
   const takeBreakNow = useCallback(() => {
     if (phaseRef.current !== 'focus') return;
     phaseRef.current = 'break';
-    setState((s) => ({ ...s, phase: 'break', secondsLeft: breakMinutes * 60 }));
+    buffer.current = [];
+    samplingSince.current = 0;
+    setState((s) => ({ ...s, phase: 'break', sampling: false, secondsLeft: breakMinutes * 60 }));
   }, [breakMinutes]);
 
-  /** Camera should be live during the setup check and during bursts only. */
-  const cameraActive = useMemo(
-    () => state.phase === 'setup' || state.sampling,
-    [state.phase, state.sampling]
-  );
+  /**
+   * Camera is live during the setup check and while sampling. In continuous
+   * mode that is the whole focus block; during breaks and enforced pauses it is
+   * off, because there is nothing to measure and every second off is battery.
+   */
+  const cameraActive = state.phase === 'setup' || state.sampling;
 
-  /** Stress curve for the trend chart: deviation %, good reads only. */
+  /** Stress curve for the trend chart: deviation %, classifiable reads only. */
   const curve = useMemo(
     () => state.readings.filter((r) => r.deviationPct !== null).map((r) => r.deviationPct as number),
     [state.readings]
@@ -555,8 +746,11 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     onFaces,
     cameraActive,
     curve,
-    burstInterval,
     primaryFace,
+    sensingMode: mode,
+    windowSeconds: timing.windowSeconds,
+    strideSeconds: timing.strideSeconds,
+    continuous: timing.continuous,
   };
 }
 

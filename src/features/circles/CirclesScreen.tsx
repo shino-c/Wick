@@ -18,6 +18,7 @@ import {
 } from '@/services/repository';
 import type { ChallengeRow, CircleSummary, FriendSummary, IncomingRequest } from '@/data/types';
 import BottomNavigation from '@/components/bottombar';
+import { formatSchedule, isPast } from './scheduling';
 
 export default function CirclesScreen() {
   const router = useRouter();
@@ -55,8 +56,18 @@ export default function CirclesScreen() {
     );
   };
 
+  const [joinError, setJoinError] = React.useState<string | null>(null);
+
+  // toggleChallenge throws when a challenge is full — the server enforces
+  // capacity, so the client cannot assume its own count is current. Without
+  // this the rejection was an unhandled promise and the tap just did nothing.
   const join = async (id: string) => {
-    await toggleChallenge(id);
+    setJoinError(null);
+    try {
+      await toggleChallenge(id);
+    } catch (e) {
+      setJoinError(e instanceof Error ? e.message : 'Could not join that challenge');
+    }
     setChallenges(await listChallenges());
   };
 
@@ -206,7 +217,25 @@ export default function CirclesScreen() {
       </Row>
       <Spacer h={3} />
 
-      {challenges.map((ch) => (
+      {joinError && (
+        <>
+          <View
+            style={{ backgroundColor: colors.alertWash, borderRadius: radius.sm, padding: spacing(3) }}
+          >
+            <Txt v="small" color={colors.alert}>
+              {joinError}
+            </Txt>
+          </View>
+          <Spacer h={3} />
+        </>
+      )}
+
+      {/* Past meetups sink to the bottom rather than vanishing: people still
+          want to mark one done, and deleting other people's history is not
+          this screen's call. */}
+      {[...challenges]
+        .sort((a, b) => Number(isPast(a.scheduledFor)) - Number(isPast(b.scheduledFor)))
+        .map((ch) => (
         <View key={ch.id}>
           <Pressable
             onPress={() => router.push({ pathname: '/challenge', params: { id: ch.id } })}
@@ -224,7 +253,7 @@ export default function CirclesScreen() {
                   <Spacer h={1} />
                   <Txt v="small" color={colors.inkFaint}>
                     {ch.kind === 'meetup' ? '📍 Meet up' : '🏠 Together, apart'}
-                    {ch.scheduledFor ? ` · ${ch.scheduledFor}` : ''}
+                    {ch.scheduledFor ? ` · ${formatSchedule(ch.scheduledFor)}` : ''}
                   </Txt>
                 </View>
                 <Button

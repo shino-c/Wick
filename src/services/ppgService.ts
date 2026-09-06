@@ -22,15 +22,41 @@ const HIGH_HZ = 3.5; // 210 BPM
 const ORDER = 4;
 const MIN_PEAKS = 5;
 
-/** Below this, rPPG bursts are treated as unusable rather than merely noisy. */
-export const MIN_BURST_SECONDS = 5;
+/**
+ * Absolute floor for reporting a heart rate. Five beats over five seconds is
+ * enough to average an interval; it is nowhere near enough for HRV.
+ */
+export const MIN_BURST_SECONDS = 8;
+
+/**
+ * Floor for reporting RMSSD.
+ *
+ * RMSSD is the standard deviation of *successive differences*, so its own
+ * sampling error falls roughly as 1/sqrt(n). With ten intervals the 95%
+ * interval on a 40 ms RMSSD is wider than the 10%/30% thresholds the stress
+ * classifier uses — which means a short window can flip a user between Normal
+ * and High Stress purely on how many beats happened to land in it. Below this
+ * duration heart rate is still reported and RMSSD is returned as null, so the
+ * classifier says "Unknown" instead of guessing.
+ *
+ * Ultra-short-term HRV work (Munoz 2015, Shaffer & Ginsberg 2017) puts usable
+ * RMSSD at roughly 30s and reliable RMSSD at 60s. 30 is the compromise that
+ * keeps a sliding window responsive without reporting noise.
+ */
+export const MIN_HRV_SECONDS = 30;
+
+/** RMSSD also needs enough intervals, not just enough seconds. */
+const MIN_IBIS_FOR_HRV = 20;
 
 export type SignalQuality = 'good' | 'poor';
 export type StressLevel = 'Normal' | 'Elevated Stress' | 'High Stress' | 'Unknown';
 
 export interface PPGResult {
   heartRate: number | null;
+  /** Null when the window was too short for RMSSD to mean anything. */
   hrvRmssd: number | null;
+  /** Length of the window this reading came from, for honest UI copy. */
+  hrvWindowSeconds: number;
   heartRateCategory: 'Bradycardia' | 'Normal' | 'Tachycardia' | null;
   /** Inter-beat intervals in ms. Stays on-device — never uploaded. */
   ibiList: number[];
@@ -57,7 +83,8 @@ export class PPGService {
     if (!Number.isFinite(fps) || fps <= 0) {
       return poor('Invalid frame rate');
     }
-    if (rawSignal.length < fps * MIN_BURST_SECONDS) {
+    const durationSeconds = rawSignal.length / fps;
+    if (durationSeconds < MIN_BURST_SECONDS) {
       return poor(`Signal too short (< ${MIN_BURST_SECONDS}s)`);
     }
 
@@ -72,9 +99,18 @@ export class PPGService {
       return poor(`Too few peaks (${peaks.length}) — motion artifact likely`);
     }
 
+    // Sub-sample peak positions. Integer peak indices quantise every beat to
+    // 1/fps — 33 ms at 30fps — and RMSSD is built from the *differences*
+    // between intervals, where that quantisation is the dominant error term for
+    // values in the 20-50 ms range we care about. Fitting a parabola through
+    // each peak and its two neighbours recovers the true maximum to a fraction
+    // of a sample and cuts that error several-fold, at the cost of three
+    // multiplications per beat.
+    const refined = peaks.map((p) => refinePeak(filtered, p));
+
     let ibiMs: number[] = [];
-    for (let i = 1; i < peaks.length; i++) {
-      ibiMs.push(((peaks[i] - peaks[i - 1]) / fps) * 1000);
+    for (let i = 1; i < refined.length; i++) {
+      ibiMs.push(((refined[i] - refined[i - 1]) / fps) * 1000);
     }
     // Drop physiologically implausible intervals.
     ibiMs = ibiMs.filter((v) => v > 300 && v < 2000);
@@ -88,15 +124,23 @@ export class PPGService {
     const diffs = ibiMs.slice(1).map((v, i) => v - ibiMs[i]);
     const rmssd = round(Math.sqrt(diffs.reduce((s, d) => s + d * d, 0) / diffs.length), 2);
 
+    // Heart rate survives a short window; RMSSD does not. Saying so is the
+    // whole point — a null here makes the classifier report "Unknown" rather
+    // than turn sampling noise into a stress level.
+    const hrvUsable = durationSeconds >= MIN_HRV_SECONDS && ibiMs.length >= MIN_IBIS_FOR_HRV;
+
     return {
       heartRate,
-      hrvRmssd: rmssd,
+      hrvRmssd: hrvUsable ? rmssd : null,
+      hrvWindowSeconds: Math.round(durationSeconds),
       heartRateCategory: hrCategory(heartRate),
       ibiList: ibiMs.map((v) => round(v, 2)),
       peakCount: peaks.length,
       signalQuality: 'good',
       filteredSignal: filtered.map((v) => round(v, 4)),
-      error: null,
+      error: hrvUsable
+        ? null
+        : `Heart rate only — HRV needs ${MIN_HRV_SECONDS}s of clean signal (had ${Math.round(durationSeconds)}s, ${ibiMs.length} intervals)`,
     };
   }
 
@@ -150,10 +194,27 @@ export class PPGService {
   /**
    * Biometric contribution to the fused dashboard score, on the shared 0–100
    * scale. Pillar 4 receives the continuous number, never a bucketed label.
+   *
+   * This is NOT the raw deviation percentage, which is what it used to return.
+   * The two scales have different breakpoints, and passing one through as the
+   * other made the app contradict itself: a 32% deviation is "High Stress" by
+   * the Plews thresholds, but 32 on the fused scale is "Mildly Tense", so the
+   * spot-check screen and the dashboard reported different verdicts on the same
+   * measurement.
+   *
+   * The mapping is piecewise linear through the shared bucket boundaries:
+   *
+   *    deviation   0% → 0     (baseline or better)
+   *               10% → 30    Normal / Elevated boundary  = Relaxed / Mildly Tense
+   *               30% → 60    Elevated / High boundary    = Mildly Tense / Very Stressed
+   *               60% → 100   floor of the HRV range worth distinguishing
    */
   static biometricScore(deviationPct: number | null): number | null {
     if (deviationPct === null) return null;
-    return Math.max(0, Math.min(100, deviationPct));
+    const d = Math.max(0, deviationPct);
+    if (d <= 10) return round((d / 10) * 30, 1);
+    if (d <= 30) return round(30 + ((d - 10) / 20) * 30, 1);
+    return round(Math.min(100, 60 + ((d - 30) / 30) * 40), 1);
   }
 }
 
@@ -170,10 +231,32 @@ function hrCategory(bpm: number): 'Bradycardia' | 'Normal' | 'Tachycardia' {
   return 'Normal';
 }
 
+/**
+ * Quadratic (parabolic) interpolation of a discrete maximum.
+ *
+ * Given y(-1), y(0), y(1) around an integer peak, the vertex of the parabola
+ * through them sits at 0.5*(y(-1) - y(1)) / (y(-1) - 2y(0) + y(1)) samples from
+ * the centre. Standard practice in spectral peak picking; here it is applied in
+ * the time domain to beat locations.
+ */
+function refinePeak(x: number[], i: number): number {
+  if (i <= 0 || i >= x.length - 1) return i;
+  const a = x[i - 1];
+  const b = x[i];
+  const c = x[i + 1];
+  const denom = a - 2 * b + c;
+  if (denom === 0) return i;
+  const delta = (0.5 * (a - c)) / denom;
+  // A parabola fitted to noise can put the vertex anywhere; a true maximum's
+  // vertex is always within half a sample of the centre.
+  return Math.abs(delta) > 0.5 ? i : i + delta;
+}
+
 function poor(reason: string): PPGResult {
   return {
     heartRate: null,
     hrvRmssd: null,
+    hrvWindowSeconds: 0,
     heartRateCategory: null,
     ibiList: [],
     peakCount: 0,

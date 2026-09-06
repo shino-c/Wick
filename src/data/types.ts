@@ -1,6 +1,19 @@
 export interface Baseline {
   rmssdBaseline: number | null;
+  /** Every scan ever recorded, finger and face. Display only. */
   scanCount: number;
+  /**
+   * Finger spot checks only — the scans the RMSSD baseline is actually built
+   * from, and the count the "3 scans to unlock" gate reads.
+   *
+   * These are separate because they must be. A baseline is a *resting*
+   * reference; Desk Mode readings are taken mid-task, by definition while the
+   * user is working. Folding them into the same moving average dragged the
+   * baseline down toward whatever the user's stressed HRV happened to be, which
+   * shrank every subsequent deviation toward zero — the app quietly learned to
+   * stop detecting stress the more it was used.
+   */
+  calibrationScans: number;
   perceivedStressBaseline: number | null;
   updatedAt: string;
 }

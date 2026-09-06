@@ -14,9 +14,19 @@
  * That means the alert can fire while the absolute score still looks fine,
  * which is the whole point: it catches the silent pile-up before the load
  * score itself looks alarming.
+ *
+ * ── Why scans are collapsed to daily means first ─────────────────────
+ * Velocity is expressed per DAY, and the slope is taken over consecutive
+ * readings. Desk Mode emits a reading every 15 seconds, so four consecutive
+ * scans can span a single minute: a perfectly ordinary 3-point rise over 60
+ * seconds becomes a slope of ~4,300 %-points per day, which beat every
+ * percentile in the user's history and lit the alert permanently. Averaging to
+ * one point per calendar day makes the unit mean what it says and stops a long
+ * focus session from drowning out weeks of history.
  */
 import type { PpgScan } from '@/data/types';
 
+/** Days, not scans. See the note above about collapsing to daily means. */
 const RECENT_WINDOW = 4;
 /** Below this, a rise is inside day-to-day HRV noise and not worth flagging. */
 const MIN_SLOPE_PER_DAY = 4;
@@ -74,9 +84,18 @@ function percentile(sorted: number[], q: number): number {
  * @param scans newest-first, as returned by repository.listScans()
  */
 export function computeTrendVelocity(scans: PpgScan[]): TrendVelocity {
-  const usable = scans
-    .filter((s) => s.signalQuality === 'good' && s.deviationPct !== null)
-    .map((s) => ({ t: new Date(s.createdAt).getTime() / 86_400_000, v: s.deviationPct as number }))
+  // One point per calendar day: the mean deviation of that day's usable scans.
+  const byDay = new Map<number, { sum: number; n: number }>();
+  for (const scan of scans) {
+    if (scan.signalQuality !== 'good' || scan.deviationPct === null) continue;
+    const day = Math.floor(new Date(scan.createdAt).getTime() / 86_400_000);
+    const bucket = byDay.get(day) ?? { sum: 0, n: 0 };
+    bucket.sum += scan.deviationPct;
+    bucket.n += 1;
+    byDay.set(day, bucket);
+  }
+  const usable: Point[] = [...byDay.entries()]
+    .map(([day, b]) => ({ t: day, v: b.sum / b.n }))
     .sort((a, b) => a.t - b.t);
 
   const series = usable.slice(-12).map((p) => p.v);
@@ -92,12 +111,14 @@ export function computeTrendVelocity(scans: PpgScan[]): TrendVelocity {
   });
 
   if (usable.length < RECENT_WINDOW) {
-    return empty(`${usable.length}/${RECENT_WINDOW} scans — a few more and Wick can spot a surge early.`);
+    return empty(
+      `${usable.length}/${RECENT_WINDOW} days of readings — a few more and Wick can spot a surge early.`
+    );
   }
 
   const recent = usable.slice(-RECENT_WINDOW);
   const velocity = slope(recent);
-  if (velocity === null) return empty('Scans are too close together to measure a trend.');
+  if (velocity === null) return empty('Readings are all from one day — no trend to measure yet.');
 
   // Every earlier overlapping window forms this user's personal slope history.
   const history: number[] = [];

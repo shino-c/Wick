@@ -103,6 +103,19 @@ export interface CaptureCameraProps {
   /** The box to centre on in face-crop mode. */
   faceBox?: FaceBox | null;
   size?: number;
+  /**
+   * Capture resolution. Lower is cheaper on the ISP and on the RGB conversion,
+   * and costs nothing in signal quality: every frame is reduced to the mean of
+   * one channel over a region, which is resolution-independent.
+   */
+  targetWidth?: number;
+  targetHeight?: number;
+  /**
+   * Camera-session errors, surfaced instead of swallowed. Without this,
+   * VisionCamera's default handler console.errors them and the user sees a red
+   * screen in dev and nothing at all in production.
+   */
+  onCameraError?: (error: Error) => void;
 }
 
 export function CaptureCamera(props: CaptureCameraProps) {
@@ -155,9 +168,12 @@ function RealCaptureCamera({
   roi,
   stride,
   onSample,
+  onCameraError,
   preview = 'none',
   faceBox,
   size = PREVIEW_SIZE,
+  targetWidth = 640,
+  targetHeight = 480,
   extraOutput,
   dynamicRoi,
 }: CaptureCameraProps & {
@@ -182,6 +198,9 @@ function RealCaptureCamera({
   const sink = React.useRef(onSample);
   sink.current = onSample;
   const deliver = React.useCallback((s: FrameSample) => sink.current(s), []);
+
+  const errorSink = React.useRef(onCameraError);
+  errorSink.current = onCameraError;
 
   // Sampling region. On iOS this tracks the detected face; elsewhere it is the
   // static centre box, and presence is judged from skin coverage instead.
@@ -212,7 +231,7 @@ function RealCaptureCamera({
     // a specific colour channel — the red/green distinction the PPG pipeline
     // depends on.
     pixelFormat: 'rgb',
-    targetResolution: { width: 640, height: 480 },
+    targetResolution: { width: targetWidth, height: targetHeight },
     dropFramesWhileBusy: true,
     onFrame,
   });
@@ -224,23 +243,71 @@ function RealCaptureCamera({
 
   const isActive = active && foreground;
 
-  // Front cameras have no flash unit, and CameraX throws IllegalStateException
-  // if torchMode is set on one at all — even to 'off'. So the prop is omitted
-  // entirely unless we're on a lens that can actually have a torch.
-  const torchProps = facing === 'back' ? { torchMode: torch ? 'on' : 'off' } : {};
+  /**
+   * Torch is applied imperatively, with retries, rather than through the
+   * declarative `torchMode` prop.
+   *
+   * VisionCamera hands you a CameraController as soon as the session is
+   * *configured*, but CameraX cannot enable the torch until the device is
+   * actually *open*. Setting torchMode declaratively fires in that gap and
+   * CameraX rejects it:
+   *
+   *   CameraControl$OperationCanceledException: Camera is not active.
+   *     at TorchControl.setTorchAsync(TorchControl.kt:179)
+   *
+   * The declarative prop never retries, so the flash stayed off for the entire
+   * scan and the rejection surfaced as an unhandled console error. Polling for
+   * the controller and retrying until the device is open fixes both. Front
+   * cameras are skipped entirely — most have no flash unit, and CameraX throws
+   * on them even when the mode is 'off'.
+   */
+  const cameraRef = React.useRef<any>(null);
+  const wantsTorch = facing === 'back' && torch === true && isActive;
+
+  React.useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+
+    const apply = (): void => {
+      if (cancelled) return;
+      const controller = cameraRef.current?.controller;
+      const retry = () => {
+        // ~4s of retries at 200ms. Longer than any cold camera open, short
+        // enough that a genuinely torch-less device reports quickly.
+        if (!cancelled && attempts++ < 20) setTimeout(apply, 200);
+        else if (!cancelled && wantsTorch) {
+          errorSink.current?.(new Error("This device's flash could not be turned on."));
+        }
+      };
+      if (!controller) return retry();
+      controller
+        .setTorchMode(wantsTorch ? 'on' : 'off')
+        .then(() => {
+          // Settled. Nothing else to do.
+        })
+        .catch(retry);
+    };
+
+    // Turning the torch off on a camera that is already gone is a no-op we do
+    // not want to retry or report.
+    if (!wantsTorch && !cameraRef.current?.controller) return;
+    apply();
+    return () => {
+      cancelled = true;
+    };
+  }, [wantsTorch]);
 
   return (
     <View style={containerStyle(preview, size)} pointerEvents="none">
       <View style={innerStyle(preview, size, faceBox)}>
         <Camera
+          ref={cameraRef}
           style={{ flex: 1 }}
           device={facing}
           isActive={isActive}
           outputs={outputs}
           constraints={[{ fps: 30 }]}
-          // VisionCamera 5 renamed this from `torch`. The old name is silently
-          // ignored, which is exactly how the flashlight ended up never firing.
-          {...torchProps}
+          onError={(e: Error) => errorSink.current?.(e)}
         />
       </View>
     </View>

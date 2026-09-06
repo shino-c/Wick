@@ -10,9 +10,9 @@ import { Ring, Sparkline } from '@/components/charts';
 import { BreathingPacer } from '@/components/BreathingPacer';
 import { colors, radius, spacing } from '@/theme';
 import { CaptureCamera } from '@/camera/CaptureCamera';
-import { FACE, POMODORO, PREVIEW_MODE, PREVIEW_SIZE } from '@/camera/config';
+import { FACE, POMODORO, PREVIEW_MODE, PREVIEW_SIZE, SETUP_CHECK_SECONDS, type SensingMode } from '@/camera/config';
 import { FRAMING_MESSAGE } from '@/camera/frameSampling';
-import { useDeskSession, type Reading } from '@/camera/useDeskSession';
+import { useDeskSession } from '@/camera/useDeskSession';
 import {
   playSoundscape,
   SOUNDSCAPES,
@@ -28,19 +28,21 @@ export default function SessionScreen() {
   const params = useLocalSearchParams<{
     minutes?: string;
     soundscape?: string;
-    demoMode?: string;
+    sensing?: string;
     breakMinutes?: string;
   }>();
 
   // Route params arrive as strings; parse once and defend against a deep link
   // that arrives with nothing set.
   const minutes = Number(params.minutes) || POMODORO.DEFAULT_MINUTES;
-  const demoMode = params.demoMode === '1';
+  const sensing: SensingMode =
+    params.sensing === 'saver' || params.sensing === 'demo' ? params.sensing : 'continuous';
   const breakMinutes = Number(params.breakMinutes) || POMODORO.DEFAULT_BREAK_MINUTES;
   const initialSound = (params.soundscape as SoundscapeId) ?? 'rain';
 
-  const session = useDeskSession({ plannedMinutes: minutes, breakMinutes, demoMode });
+  const session = useDeskSession({ plannedMinutes: minutes, breakMinutes, mode: sensing });
   const [sound, setSound] = React.useState<SoundscapeId>(initialSound);
+  const [cameraError, setCameraError] = React.useState<string | null>(null);
   const [volume, setVolume] = React.useState(0.6);
   const persisted = React.useRef(0);
   const started = React.useRef(false);
@@ -68,6 +70,7 @@ export default function SessionScreen() {
         {
           heartRate: r.heartRate,
           hrvRmssd: r.hrvRmssd,
+          hrvWindowSeconds: r.windowSeconds,
           heartRateCategory: null,
           ibiList: [],
           peakCount: 0,
@@ -95,9 +98,12 @@ export default function SessionScreen() {
   const finish = React.useCallback(() => {
     const summary = session.end();
     stopSoundscape();
-    stageSessionSummary(summary);
+    // The soundscape was chosen here, so it is recorded here. The session row
+    // used to store null unconditionally, which meant the one thing a user
+    // actively picks about a session was the one thing never saved.
+    stageSessionSummary({ ...summary, soundscape: sound });
     router.replace('/summary');
-  }, [router, session]);
+  }, [router, session, sound]);
 
   // Hardware back must not be an escape hatch out of an enforced pause.
   React.useEffect(() => {
@@ -115,7 +121,10 @@ export default function SessionScreen() {
       channel={FACE.CHANNEL}
       roi={FACE.ROI}
       stride={FACE.PIXEL_STRIDE}
+      targetWidth={FACE.TARGET_WIDTH}
+      targetHeight={FACE.TARGET_HEIGHT}
       onSample={session.onSample}
+      onCameraError={(e) => setCameraError(e.message)}
       trackFaces
       onFaces={session.onFaces}
       preview={session.cameraActive ? (session.primaryFace ? PREVIEW_MODE : 'full') : 'none'}
@@ -155,6 +164,7 @@ export default function SessionScreen() {
     <ActiveSession
       session={session}
       camera={camera}
+      cameraError={cameraError}
       sound={sound}
       setSound={setSound}
       volume={volume}
@@ -181,7 +191,7 @@ function SetupCheck({
         <Eyebrow color={colors.onNightSoft}>Setup check</Eyebrow>
         <Spacer h={5} />
         <Ring
-          progress={1 - session.setupSecondsLeft / 3}
+          progress={1 - session.setupSecondsLeft / SETUP_CHECK_SECONDS}
           size={200}
           color={session.setupIssue ? colors.warn : colors.calm}
         >
@@ -251,6 +261,7 @@ function EnforcedPause({
 function ActiveSession({
   session,
   camera,
+  cameraError,
   sound,
   setSound,
   volume,
@@ -259,6 +270,7 @@ function ActiveSession({
 }: {
   session: ReturnType<typeof useDeskSession>;
   camera: React.ReactNode;
+  cameraError: string | null;
   sound: SoundscapeId;
   setSound: (s: SoundscapeId) => void;
   volume: number;
@@ -271,7 +283,20 @@ function ActiveSession({
 
   return (
     <Screen dark>
+      {/* The camera element is mounted either way; when a reading isn't running
+          it is inactive and occupies no space. */}
       {!session.sampling && <View style={{ opacity: 0, height: 0 }}>{camera}</View>}
+
+      {cameraError && (
+        <>
+          <NightCard>
+            <Txt v="small" color={colors.warn}>
+              ⚠  {cameraError}
+            </Txt>
+          </NightCard>
+          <Spacer h={3} />
+        </>
+      )}
 
       <Row style={{ justifyContent: 'space-between' }}>
         <Txt v="title" color={colors.onNight}>
@@ -364,12 +389,24 @@ function ActiveSession({
         <Vital
           label="HRV"
           value={latest?.hrvRmssd ? `${Math.round(latest.hrvRmssd)}` : '—'}
-          unit="ms"
+          unit={
+            latest && latest.hrvRmssd === null && latest.heartRate !== null
+              ? 'window too short'
+              : `ms · ${session.windowSeconds}s`
+          }
         />
+        {/* Movement is read live, not once per reading. In continuous mode this
+            is the whole point: someone who fidgets constantly but happened to
+            be still during a sampled burst used to read as perfectly steady,
+            and nothing in the old design could ever have shown that. */}
         <Vital
           label="Movement"
-          value={latest ? movementLabel(latest) : '—'}
-          unit={latest && latest.movementIndex > 0.25 ? 'restless' : 'steady'}
+          value={movementLabel(session.movementLive)}
+          unit={
+            session.movementSessionPct === null
+              ? 'now'
+              : `${Math.round(session.movementSessionPct * 100)}% of block`
+          }
         />
       </Row>
 
@@ -467,8 +504,8 @@ function ActiveSession({
           <Sparkline values={session.curve} width={270} height={70} color={colors.yellow} fill />
         ) : (
           <Txt v="small" color={colors.onNightSoft}>
-            First readings land after the opening {session.burstInterval}s. The camera is off in
-            between.
+            The first reading lands after {session.windowSeconds}s — that is how much clean signal
+            HRV needs before it means anything.
           </Txt>
         )}
       </NightCard>
@@ -552,9 +589,9 @@ function Vital({ label, value, unit }: { label: string; value: string; unit: str
   );
 }
 
-function movementLabel(r: Reading) {
-  if (r.movementIndex > 0.4) return 'High';
-  if (r.movementIndex > 0.25) return 'Some';
+function movementLabel(index: number) {
+  if (index > 0.4) return 'High';
+  if (index > 0.25) return 'Some';
   return 'Low';
 }
 

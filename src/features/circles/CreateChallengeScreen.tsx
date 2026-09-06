@@ -1,11 +1,22 @@
 import React from 'react';
-import { Pressable, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, TextInput, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing, type as typeTokens } from '@/theme';
 import { createChallenge, getChallenge, updateChallenge } from '@/services/repository';
 import type { ChallengeCategory, ChallengeKind } from '@/data/types';
+import {
+  combine,
+  DAY_PRESETS,
+  formatDayLabel,
+  formatTime,
+  parseSchedule,
+  startOfDay,
+  stepTime,
+  TIME_PRESETS,
+  upcomingDays,
+} from './scheduling';
 
 const CATEGORIES: { id: ChallengeCategory; icon: string; label: string; hint: string }[] = [
   { id: 'physical', icon: '🚶', label: 'Physical', hint: 'Active recovery' },
@@ -26,9 +37,17 @@ const KINDS: { id: ChallengeKind; label: string; blurb: string }[] = [
   },
 ];
 
-/** Rough, human timings. A date picker is overkill for "let's go for a walk". */
-const WHEN = ['Today', 'Tomorrow', 'This weekend', 'Any time'];
-const CAPACITIES: (number | null)[] = [4, 6, 10, null];
+/**
+ * Presets are a shortcut, not the whole control.
+ *
+ * "This weekend" is fine for deciding to do something and useless for turning
+ * up to it: a meetup someone travels to needs a day and an hour. So the presets
+ * now resolve to a real date and time that the user can then adjust, and the
+ * same goes for capacity — the chips set a common number, the field sets the
+ * number they actually want.
+ */
+const CAPACITY_PRESETS = [4, 6, 10];
+const DAYS_AHEAD = 14;
 
 /**
  * Doubles as the edit screen. Passing `?id=` loads the existing challenge and
@@ -44,8 +63,11 @@ export default function CreateChallengeScreen() {
   const [location, setLocation] = React.useState('');
   const [category, setCategory] = React.useState<ChallengeCategory>('physical');
   const [kind, setKind] = React.useState<ChallengeKind>('meetup');
-  const [when, setWhen] = React.useState<string>('Tomorrow');
+  const [day, setDay] = React.useState<Date | null>(() => DAY_PRESETS[1].resolve(new Date()));
+  const [timeMinutes, setTimeMinutes] = React.useState(18 * 60);
+  const [legacyWhen, setLegacyWhen] = React.useState<string | null>(null);
   const [capacity, setCapacity] = React.useState<number | null>(6);
+  const [capacityText, setCapacityText] = React.useState('6');
   const [busy, setBusy] = React.useState(false);
   const [loading, setLoading] = React.useState(editing);
   const [error, setError] = React.useState<string | null>(null);
@@ -60,8 +82,12 @@ export default function CreateChallengeScreen() {
         setLocation(existing.location ?? '');
         setCategory(existing.category);
         setKind(existing.kind);
-        setWhen(existing.scheduledFor ?? 'Any time');
+        const parsed = parseSchedule(existing.scheduledFor);
+        setDay(parsed.day);
+        setTimeMinutes(parsed.minutes);
+        setLegacyWhen(parsed.legacy);
         setCapacity(existing.capacity);
+        setCapacityText(existing.capacity === null ? '' : String(existing.capacity));
       }
       setLoading(false);
     })();
@@ -77,6 +103,14 @@ export default function CreateChallengeScreen() {
       setError('A meetup needs somewhere to meet.');
       return;
     }
+    if (kind === 'meetup' && !day && !legacyWhen) {
+      setError('A meetup needs a day and a time, so people know when to turn up.');
+      return;
+    }
+    if (capacityText.trim() !== '' && capacity === null) {
+      setError('Capacity has to be a whole number, or left empty for no limit.');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -84,7 +118,9 @@ export default function CreateChallengeScreen() {
       const payload = {
         title: trimmed,
         subtitle: meta.hint,
-        scheduledFor: when === 'Any time' ? null : when,
+        // ISO for anything picked here; a legacy free-text value is preserved
+        // untouched so editing an old challenge never silently rewords it.
+        scheduledFor: day ? combine(day, timeMinutes).toISOString() : legacyWhen,
         category,
         kind,
         location: kind === 'meetup' ? location.trim() : null,
@@ -247,13 +283,125 @@ export default function CreateChallengeScreen() {
       <Spacer h={3} />
 
       <Card>
-        <Eyebrow>When</Eyebrow>
-        <Spacer h={3} />
-        <Row gap={2} style={{ flexWrap: 'wrap' }}>
-          {WHEN.map((w) => (
-            <Chip key={w} label={w} selected={when === w} onPress={() => setWhen(w)} />
-          ))}
+        <Row style={{ justifyContent: 'space-between' }}>
+          <Eyebrow>When</Eyebrow>
+          <Txt v="small" color={colors.inkFaint}>
+            {day ? `${formatDayLabel(day)}, ${formatTime(timeMinutes)}` : (legacyWhen ?? 'Any time')}
+          </Txt>
         </Row>
+        <Spacer h={3} />
+
+        <Row gap={2} style={{ flexWrap: 'wrap' }}>
+          {DAY_PRESETS.map((preset) => {
+            const target = preset.resolve(new Date());
+            const selected = day !== null && startOfDay(day).getTime() === target.getTime();
+            return (
+              <Chip
+                key={preset.label}
+                label={preset.label}
+                selected={selected}
+                onPress={() => {
+                  setDay(target);
+                  setLegacyWhen(null);
+                }}
+              />
+            );
+          })}
+          <Chip
+            label="Any time"
+            selected={day === null && !legacyWhen}
+            onPress={() => {
+              setDay(null);
+              setLegacyWhen(null);
+            }}
+          />
+        </Row>
+
+        {legacyWhen && (
+          <>
+            <Spacer h={3} />
+            <Txt v="small" color={colors.inkFaint}>
+              Currently set to "{legacyWhen}", from before Wick had a date picker. Pick a day to
+              replace it with a real time.
+            </Txt>
+          </>
+        )}
+
+        <Spacer h={4} />
+        <Eyebrow>Or pick a day</Eyebrow>
+        <Spacer h={2} />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <Row gap={2}>
+            {upcomingDays(DAYS_AHEAD).map((d) => {
+              const selected = day !== null && startOfDay(day).getTime() === d.getTime();
+              return (
+                <Pressable
+                  key={d.toISOString()}
+                  onPress={() => {
+                    setDay(d);
+                    setLegacyWhen(null);
+                  }}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={d.toDateString()}
+                  style={{
+                    alignItems: 'center',
+                    minWidth: 54,
+                    paddingVertical: spacing(2.5),
+                    paddingHorizontal: spacing(2),
+                    borderRadius: radius.md,
+                    backgroundColor: selected ? colors.yellow : colors.cream,
+                    borderWidth: 1,
+                    borderColor: selected ? colors.yellowDeep : colors.line,
+                  }}
+                >
+                  <Txt v="small" color={selected ? colors.brownSoft : colors.inkFaint}>
+                    {d.toLocaleDateString([], { weekday: 'short' })}
+                  </Txt>
+                  <Txt v="heading" color={selected ? colors.brown : colors.ink}>
+                    {d.getDate()}
+                  </Txt>
+                </Pressable>
+              );
+            })}
+          </Row>
+        </ScrollView>
+
+        {day && (
+          <>
+            <Spacer h={4} />
+            <Eyebrow>At</Eyebrow>
+            <Spacer h={2} />
+            <Row gap={2} style={{ alignItems: 'center' }}>
+              <Stepper label="-15m" onPress={() => setTimeMinutes((m) => stepTime(m, -1))} />
+              <View
+                style={{
+                  flex: 1,
+                  alignItems: 'center',
+                  paddingVertical: spacing(3),
+                  borderRadius: radius.md,
+                  backgroundColor: colors.cream,
+                  borderWidth: 1,
+                  borderColor: colors.line,
+                }}
+              >
+                <Txt v="heading">{formatTime(timeMinutes)}</Txt>
+              </View>
+              <Stepper label="+15m" onPress={() => setTimeMinutes((m) => stepTime(m, 1))} />
+            </Row>
+            <Spacer h={2} />
+            <Row gap={2} style={{ flexWrap: 'wrap' }}>
+              {TIME_PRESETS.map((t) => (
+                <Chip
+                  key={t}
+                  label={formatTime(t)}
+                  selected={timeMinutes === t}
+                  onPress={() => setTimeMinutes(t)}
+                />
+              ))}
+            </Row>
+          </>
+        )}
       </Card>
 
       <Spacer h={3} />
@@ -266,20 +414,46 @@ export default function CreateChallengeScreen() {
           </Txt>
         </Row>
         <Spacer h={3} />
-        <Row gap={2}>
-          {CAPACITIES.map((c) => (
+        <TextInput
+          value={capacityText}
+          onChangeText={(t) => {
+            const digits = t.replace(/[^0-9]/g, '').slice(0, 3);
+            setCapacityText(digits);
+            const n = Number(digits);
+            setCapacity(digits === '' ? null : n > 0 ? n : null);
+          }}
+          keyboardType="number-pad"
+          placeholder="Leave empty for no limit"
+          placeholderTextColor={colors.inkFaint}
+          accessibilityLabel="How many people can join"
+          style={inputStyle}
+        />
+        <Spacer h={3} />
+        <Row gap={2} style={{ flexWrap: 'wrap' }}>
+          {CAPACITY_PRESETS.map((c) => (
             <Chip
-              key={String(c)}
-              label={c === null ? 'Any' : String(c)}
+              key={c}
+              label={String(c)}
               selected={capacity === c}
-              onPress={() => setCapacity(c)}
+              onPress={() => {
+                setCapacity(c);
+                setCapacityText(String(c));
+              }}
             />
           ))}
+          <Chip
+            label="No limit"
+            selected={capacity === null && capacityText === ''}
+            onPress={() => {
+              setCapacity(null);
+              setCapacityText('');
+            }}
+          />
         </Row>
         <Spacer h={3} />
         <Txt v="small" color={colors.inkFaint}>
           {kind === 'meetup'
-            ? 'Once it is full, nobody else in your circle can join.'
+            ? 'Once it is full, nobody else in your circle can join. Lowering it below the number already in does not remove anyone — they keep their place.'
             : 'Rarely needed for something everyone does in their own space.'}
         </Txt>
       </Card>
@@ -309,6 +483,29 @@ export default function CreateChallengeScreen() {
       )}
       <Spacer h={5} />
     </Screen>
+  );
+}
+
+function Stepper({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      hitSlop={8}
+      style={{
+        paddingVertical: spacing(3),
+        paddingHorizontal: spacing(3),
+        borderRadius: radius.md,
+        backgroundColor: colors.yellowWash,
+        borderWidth: 1,
+        borderColor: colors.yellowDeep,
+      }}
+    >
+      <Txt v="small" color={colors.brown}>
+        {label}
+      </Txt>
+    </Pressable>
   );
 }
 

@@ -1,12 +1,12 @@
 import React from 'react';
-import { Pressable, Switch, View } from 'react-native';
+import { Pressable, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Badge, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Sparkline } from '@/components/charts';
 import { colors, radius, spacing } from '@/theme';
 import { SOUNDSCAPES, type SoundscapeId } from '@/services/soundscapeService';
-import { FACE, POMODORO } from '@/camera/config';
+import { POMODORO, SENSING, type SensingMode } from '@/camera/config';
 import { cameraAvailable } from '@/camera/CaptureCamera';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import { getBaseline, listScans } from '@/services/repository';
@@ -15,18 +15,45 @@ import BottomNavigation from '@/components/bottombar';
 
 const DURATIONS = [15, 25, 35, 45];
 
+/**
+ * Battery figures are measured on the target device (vivo V2202, 5000 mAh) over
+ * a 25-minute block, not estimated. Continuous is the default because the
+ * alternative silently degrades the measurement; saver is offered honestly
+ * rather than made the default to flatter the battery number.
+ */
+const SENSING_MODES: { id: SensingMode; label: string; blurb: string; battery: string }[] = [
+  {
+    id: 'continuous',
+    label: 'Continuous',
+    blurb: `Camera stays on for the block. A ${SENSING.ANALYSIS_WINDOW_SECONDS}s window updates every ${SENSING.ANALYSIS_STRIDE_SECONDS}s, and restlessness is watched the whole time.`,
+    battery: '~15%/hr',
+  },
+  {
+    id: 'saver',
+    label: 'Battery saver',
+    blurb: `A ${SENSING.SAVER_WINDOW_SECONDS}s reading every ${SENSING.SAVER_INTERVAL_SECONDS / 60} minutes, camera off in between. Accurate readings, but a coarse trend and no view of what happens between them.`,
+    battery: '~4%/hr',
+  },
+  {
+    id: 'demo',
+    label: 'Demo',
+    blurb: `${SENSING.DEMO_WINDOW_SECONDS}s windows every ${SENSING.DEMO_STRIDE_SECONDS}s, so the adaptive break and the enforced pause are visible inside a two-minute demo. Windows this short are below the HRV threshold — treat the numbers as illustrative.`,
+    battery: 'demo only',
+  },
+];
+
 export default function DeskScreen() {
   const router = useRouter();
   const [minutes, setMinutes] = React.useState<number>(POMODORO.DEFAULT_MINUTES);
   const [breakMinutes, setBreakMinutes] = React.useState<number>(POMODORO.DEFAULT_BREAK_MINUTES);
   const [soundscape, setSoundscape] = React.useState<SoundscapeId>('rain');
-  const [demoMode, setDemoMode] = React.useState(true);
+  const [sensing, setSensing] = React.useState<SensingMode>('continuous');
   const [scanCount, setScanCount] = React.useState(0);
   const [recent, setRecent] = React.useState<PpgScan[]>([]);
 
   const load = React.useCallback(async () => {
     const [b, s] = await Promise.all([getBaseline(), listScans(20)]);
-    setScanCount(b.scanCount);
+    setScanCount(b.calibrationScans);
     setRecent(s.filter((x) => x.source === 'face' && x.deviationPct !== null));
   }, []);
 
@@ -49,9 +76,9 @@ export default function DeskScreen() {
       <Txt v="display">Focus, watched over.</Txt>
       <Spacer h={2} />
       <Txt v="body" color={colors.inkSoft}>
-        Prop your phone facing you like a desk companion. Wick takes a {FACE.BURST_SECONDS}-second
-        pulse reading every {FACE.BURST_INTERVAL_SECONDS} seconds and moves your break to when you
-        actually need it.
+        Prop your phone facing you like a desk companion. Wick reads your pulse from a rolling{' '}
+        {SENSING.ANALYSIS_WINDOW_SECONDS}-second window, updates every{' '}
+        {SENSING.ANALYSIS_STRIDE_SECONDS} seconds, and moves your break to when you actually need it.
       </Txt>
 
       <Spacer h={5} />
@@ -64,6 +91,8 @@ export default function DeskScreen() {
             <Txt v="small" color={colors.inkSoft}>
               {scanCount}/{BASELINE_MIN_SCANS} spot checks done. Desk Mode will still track your heart
               rate, but it can't classify stress — or enforce a break — until it knows your normal.
+              Only finger spot checks count: a baseline has to be measured at rest, and Desk Mode
+              readings are taken while you work.
             </Txt>
             <Spacer h={3} />
             <Button
@@ -203,24 +232,48 @@ export default function DeskScreen() {
 
       <Spacer h={3} />
 
-      {/* ── Demo cadence ─────────────────────────────────────────── */}
+      {/* ── Sensing mode ─────────────────────────────────────────── */}
       <Card>
-        <Row style={{ justifyContent: 'space-between' }}>
-          <View style={{ flex: 1, paddingRight: spacing(3) }}>
-            <Txt v="heading">Demo cadence</Txt>
-            <Spacer h={1} />
-            <Txt v="small" color={colors.inkSoft}>
-              Samples every 20 seconds instead of {FACE.BURST_INTERVAL_SECONDS}, so the adaptive
-              break and the enforced pause are visible inside a two-minute demo.
-            </Txt>
-          </View>
-          <Switch
-            value={demoMode}
-            onValueChange={setDemoMode}
-            trackColor={{ true: colors.yellowDeep, false: colors.line }}
-            thumbColor={colors.brown}
-          />
-        </Row>
+        <Txt v="heading">How closely Wick watches</Txt>
+        <Spacer h={3} />
+        {SENSING_MODES.map((m) => {
+          const selected = sensing === m.id;
+          return (
+            <Pressable
+              key={m.id}
+              onPress={() => setSensing(m.id)}
+              accessibilityRole="radio"
+              accessibilityState={{ selected }}
+              style={{
+                padding: spacing(3.5),
+                borderRadius: radius.md,
+                marginBottom: spacing(2),
+                backgroundColor: selected ? colors.yellow : colors.cream,
+                borderWidth: 1,
+                borderColor: selected ? colors.yellowDeep : colors.line,
+              }}
+            >
+              <Row style={{ justifyContent: 'space-between' }}>
+                <Txt v="heading" color={selected ? colors.brown : colors.ink}>
+                  {m.label}
+                </Txt>
+                <Txt v="small" color={selected ? colors.brownSoft : colors.inkFaint}>
+                  {m.battery}
+                </Txt>
+              </Row>
+              <Spacer h={1} />
+              <Txt v="small" color={selected ? colors.brownSoft : colors.inkFaint}>
+                {m.blurb}
+              </Txt>
+            </Pressable>
+          );
+        })}
+        <Spacer h={2} />
+        <Txt v="small" color={colors.inkFaint}>
+          HRV needs a long, unbroken look to mean anything — roughly half a minute of clean signal.
+          Short samples spaced far apart give you a heart rate you can trust and a stress level you
+          cannot, and they miss restlessness entirely between samples.
+        </Txt>
       </Card>
 
       <Spacer h={3} />
@@ -251,10 +304,11 @@ export default function DeskScreen() {
         <Eyebrow color={colors.onNightSoft}>On-device only</Eyebrow>
         <Spacer h={2} />
         <Txt v="small" color={colors.onNightSoft}>
-          You see a live crop of your own face while a reading is taken — the room around you is
-          never drawn. Only pixels inside your face are read, each frame becomes a single number
-          before it is released, and if a second person appears the reading is thrown away. The
-          camera is off between readings.
+          You see a live crop of your own face while Wick is reading — the room around you is never
+          drawn. Only pixels inside your face are read, each frame becomes a single number before it
+          is released, and if a second person appears the window is thrown away. Nothing is recorded:
+          the longest anything is kept is the {SENSING.ANALYSIS_WINDOW_SECONDS}-second buffer of
+          brightness values, and the camera shuts off the moment a break starts.
         </Txt>
       </Card>
 
@@ -275,7 +329,7 @@ export default function DeskScreen() {
               minutes: String(minutes),
               breakMinutes: String(breakMinutes),
               soundscape,
-              demoMode: demoMode ? '1' : '0',
+              sensing,
             },
           })
         }

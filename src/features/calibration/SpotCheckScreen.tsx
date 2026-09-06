@@ -29,8 +29,8 @@ export default function SpotCheckScreen() {
 
   React.useEffect(() => {
     getBaseline().then((b) => {
-      setScanCount(b.scanCount);
-      setBaselineRmssd(b.scanCount >= BASELINE_MIN_SCANS ? b.rmssdBaseline : null);
+      setScanCount(b.calibrationScans);
+      setBaselineRmssd(b.calibrationScans >= BASELINE_MIN_SCANS ? b.rmssdBaseline : null);
     });
   }, []);
 
@@ -38,13 +38,23 @@ export default function SpotCheckScreen() {
   React.useEffect(() => {
     if (scan.phase !== 'done' || !scan.result || saved.current) return;
     saved.current = true;
-    const c = PPGService.classifyStress(scan.result.hrvRmssd ?? 0, baselineRmssd);
+    // A null RMSSD means the window was too short to measure HRV, not that HRV
+    // was zero. `?? 0` turned "we could not measure this" into a 100% deviation
+    // from baseline — the strongest possible High Stress reading.
+    const c =
+      scan.result.hrvRmssd === null
+        ? {
+            stressLevel: 'Unknown' as const,
+            deviationPct: null,
+            message: 'Signal was clean but too short to measure HRV. Try another scan.',
+          }
+        : PPGService.classifyStress(scan.result.hrvRmssd, baselineRmssd);
     setClassification(c);
     (async () => {
       await saveScan(scan.result!, 'finger', c);
       await recomputeFusedScore();
       const b = await getBaseline();
-      setScanCount(b.scanCount);
+      setScanCount(b.calibrationScans);
     })();
   }, [baselineRmssd, scan.phase, scan.result]);
 

@@ -70,6 +70,11 @@ create table if not exists baselines (
   updated_at timestamptz default now()
 );
 
+-- Finger spot checks only. The RMSSD baseline is a RESTING reference, so it is
+-- built from deliberate spot checks and never from Desk Mode readings, which
+-- are taken mid-task by definition. scan_count stays as the display total.
+alter table baselines add column if not exists calibration_scans int not null default 0;
+
 alter table baselines enable row level security;
 drop policy if exists "own baseline" on baselines;
 create policy "own baseline" on baselines for all

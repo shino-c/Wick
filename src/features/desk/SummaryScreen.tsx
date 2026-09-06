@@ -37,7 +37,7 @@ export default function SummaryScreen() {
         breaksTaken: summary.breaksTaken,
         enforcedBreaks: summary.enforcedBreaks,
         stressDeltaPct: summary.stressDeltaPct,
-        soundscape: null,
+        soundscape: summary.soundscape,
       });
       setSessionId(id);
       await recomputeFusedScore();
@@ -90,10 +90,15 @@ export default function SummaryScreen() {
           caption={delta === null ? 'not enough reads' : improved ? 'lower' : 'higher'}
           tone={delta === null ? colors.inkFaint : improved ? colors.calm : colors.warn}
         />
+        {/* Two different failures, counted separately. A "poor" reading reached
+            the filter and came out unusable; a discarded window never became a
+            reading at all because nobody was in frame. Lumping them together
+            under-reported the second, which is the one that means the phone is
+            pointed at an empty chair. */}
         <Stat
           label="Readings"
           value={`${summary.readings.length}`}
-          caption={`${summary.readings.filter((r) => r.quality === 'poor').length} discarded`}
+          caption={`${summary.readings.filter((r) => r.quality === 'poor').length} noisy · ${summary.discardedWindows} no face`}
         />
       </Row>
 
@@ -133,6 +138,31 @@ export default function SummaryScreen() {
       )}
 
       <Spacer h={3} />
+
+      {summary.movementSessionPct !== null && (
+        <>
+          <Card>
+            <Row style={{ justifyContent: 'space-between' }}>
+              <Txt v="heading">Restlessness</Txt>
+              <Txt v="heading" color={summary.movementSessionPct > 0.35 ? colors.warn : colors.calm}>
+                {Math.round(summary.movementSessionPct * 100)}% of the block
+              </Txt>
+            </Row>
+            <Spacer h={3} />
+            <Bar
+              pct={summary.movementSessionPct * 100}
+              color={summary.movementSessionPct > 0.35 ? colors.warn : colors.calm}
+            />
+            <Spacer h={3} />
+            <Txt v="small" color={colors.inkFaint}>
+              {summary.sensingMode === 'saver'
+                ? 'Measured only during sampling windows, so treat it as a sample rather than a total.'
+                : 'Measured continuously across the whole block, not sampled — fidgeting between readings counts.'}
+            </Txt>
+          </Card>
+          <Spacer h={3} />
+        </>
+      )}
 
       {summary.enforcedBreaks > 0 && (
         <>

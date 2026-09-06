@@ -9,6 +9,7 @@ import { QUICK_FLAGS } from './questionnaire';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import {
   getBaseline,
+  hasQuestionnaireAnswers,
   latestSelfReport,
   listScans,
   listStressScores,
@@ -34,18 +35,22 @@ export default function CalibrationScreen() {
   const [hasQuestionnaire, setHasQuestionnaire] = React.useState(false);
 
   const load = React.useCallback(async () => {
-    const [b, s, a, self, scores] = await Promise.all([
+    const [b, s, a, self, scores, hasCompletedQuestionnaire] = await Promise.all([
       getBaseline(),
       listScans(40),
       personalAccuracy(),
       latestSelfReport(),
       listStressScores(1),
+      hasQuestionnaireAnswers(),
     ]);
     setBaseline(b);
     setScans(s);
     setTrend(computeTrendVelocity(s));
     setAccuracy(a);
-    setHasQuestionnaire(Boolean(self?.rawAnswers));
+    // A quick flag is also a self-report but carries no answers, so "latest
+    // report" was the wrong question — one tap on the mood row used to reset the
+    // questionnaire card back to "Not started".
+    setHasQuestionnaire(hasCompletedQuestionnaire);
     if (scores[0]) {
       setFusion({
         fusedScore: scores[0].fusedScore,
@@ -71,7 +76,9 @@ export default function CalibrationScreen() {
     load();
   };
 
-  const scanCount = baseline?.scanCount ?? 0;
+  // Finger spot checks only — Desk Mode readings are taken mid-task and are not
+  // evidence about rest, so they never count toward the baseline gate.
+  const scanCount = baseline?.calibrationScans ?? 0;
   const scansLeft = Math.max(0, BASELINE_MIN_SCANS - scanCount);
 
   return (

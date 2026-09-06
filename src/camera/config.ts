@@ -1,15 +1,6 @@
 /**
  * Capture policy for both camera modes.
  *
- * ── Why interval sampling ────────────────────────────────────────────
- * Continuous rPPG for a 25-minute session means 25 minutes of camera plus
- * per-frame processing, the single biggest battery cost in the app. Desk Mode
- * runs a BURST_SECONDS window every BURST_INTERVAL_SECONDS and holds the camera
- * inactive in between. At 12s/60s that is a ~20% duty cycle and roughly 25
- * readings across a 25-minute session — dense enough that the stress curve is
- * actually a curve, and that the two-consecutive-reads lock can react within a
- * couple of minutes rather than six.
- *
  * ── Why the face box, not a fixed ROI ────────────────────────────────
  * Sampling is confined to the detected face's bounding box. Everything outside
  * it — the room, the doorway, whoever walks past behind you — is never read, so
@@ -19,11 +10,9 @@
  * number would be worse than reporting nothing.
  */
 
+export type SensingMode = 'continuous' | 'saver' | 'demo';
+
 export const FACE = {
-  /** Length of one rPPG burst. ~12s at 30fps = 360 frames, enough for 5+ peaks. */
-  BURST_SECONDS: 12,
-  /** Gap between bursts. Camera device is fully inactive for this whole span. */
-  BURST_INTERVAL_SECONDS: 60,
   /** Green channel: least sensitive to skin tone and ambient colour temperature. */
   CHANNEL: 'green' as const,
   /**
@@ -36,16 +25,76 @@ export const FACE = {
    * pulsatile signal, while the edges drift on and off skin as the head moves.
    */
   FACE_ROI_INSET: 0.18,
-  /** Read every Nth pixel inside the ROI — 16x less work per frame, same mean. */
-  PIXEL_STRIDE: 4,
-  TARGET_WIDTH: 640,
-  TARGET_HEIGHT: 480,
+  /** Read every Nth pixel inside the ROI — same mean, a fraction of the work. */
+  PIXEL_STRIDE: 2,
+  /**
+   * 320x240 rather than 640x480. Every frame collapses to the mean of one
+   * channel over a region, so resolution buys nothing here — but it costs ISP
+   * throughput and, more importantly, an RGB conversion of every pixel. A
+   * quarter of the pixels is roughly a quarter of the per-frame cost, which is
+   * what makes continuous sensing affordable at all.
+   */
+  TARGET_WIDTH: 320,
+  TARGET_HEIGHT: 240,
+  /**
+   * Frame rate is an ACCURACY setting, not a smoothness one. Peak positions are
+   * quantised to 1/fps, and RMSSD — the quantity the whole stress model rests
+   * on — is typically 20-50 ms. At 15fps the 67ms quantisation alone would
+   * exceed the signal. 30fps plus sub-sample peak interpolation (ppgService)
+   * brings timing error well under the values being measured.
+   */
   TARGET_FPS: 30,
   /**
-   * A burst needs the face present for at least this fraction of its frames.
+   * A window needs the face present for at least this fraction of its frames.
    * Below it the window is discarded rather than filtered into a number.
    */
   MIN_FACE_COVERAGE: 0.7,
+} as const;
+
+/**
+ * ── Continuous sensing ───────────────────────────────────────────────
+ *
+ * Desk Mode used to open the camera for 12 seconds a minute. That was wrong on
+ * two counts, and both were things a duty cycle cannot fix by tuning:
+ *
+ *   1. 12 seconds is roughly 12-15 beats, so ~11-14 inter-beat intervals. RMSSD
+ *      from that few intervals has a confidence interval wide enough to swing a
+ *      reading between "Normal" and "High Stress" on noise alone.
+ *   2. Restlessness sampled 20% of the time is a coin flip. A user who fidgets
+ *      constantly but happens to be still during the burst reads as steady, and
+ *      nothing about the design would ever reveal the error.
+ *
+ * Continuous mode keeps the camera open for the focus block and analyses a
+ * sliding window, so readings overlap and movement is observed for 100% of the
+ * session rather than 20% of it.
+ *
+ * The cost is real and is stated plainly in the UI: roughly 12-18% battery per
+ * hour on a mid-range phone, against ~4% for the interval mode, which is kept
+ * as an explicit battery-saver choice.
+ */
+export const SENSING = {
+  /**
+   * Length of the trailing window each reading is computed from. 40s at 30fps
+   * is 1200 samples and ~40-70 beats — enough intervals for RMSSD to be a
+   * measurement rather than an estimate.
+   */
+  ANALYSIS_WINDOW_SECONDS: 40,
+  /**
+   * How often a new reading is emitted. Windows overlap heavily, which is what
+   * turns a handful of points into a curve you can actually read a trend off.
+   */
+  ANALYSIS_STRIDE_SECONDS: 15,
+  /**
+   * Movement is judged over a much shorter, non-overlapping window so a burst
+   * of fidgeting shows up while it is happening rather than 40 seconds later.
+   */
+  MOVEMENT_WINDOW_SECONDS: 10,
+  /** Battery-saver mode: camera open for this long, then off. */
+  SAVER_WINDOW_SECONDS: 45,
+  SAVER_INTERVAL_SECONDS: 180,
+  /** Demo: fast enough that escalation is visible inside a two-minute pitch. */
+  DEMO_WINDOW_SECONDS: 20,
+  DEMO_STRIDE_SECONDS: 8,
 } as const;
 
 export const FINGER = {

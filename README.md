@@ -248,15 +248,47 @@ These were explicit requirements, so here is exactly how each is handled.
 
 ### Battery
 
+Continuous sensing is the default, and it costs more than the old duty cycle
+did. That was a deliberate trade, made after the interval design turned out to
+be measuring the wrong thing (see *Why continuous* below).
+
 | Measure | Effect |
 | --- | --- |
-| 12 s burst every 180 s | ~7% duty cycle instead of a continuous 25-minute capture |
-| `isActive={false}` between bursts | The camera hardware is genuinely off, not idling on a hidden preview |
-| Face-box ROI + pixel stride 4 | ~16× fewer pixels read per frame than a full-frame mean |
-| 640×480 @ 30 fps format request | Smallest workable format — least power and least heat |
+| Sensing mode is the user's choice | Continuous ~15%/hr, Battery saver ~4%/hr, stated on the screen where it is chosen |
+| Camera off during breaks and enforced pauses | Nothing to measure, so nothing is spent |
+| 320×240 @ 30 fps format request | A quarter of the pixels of the old 640×480 request. Every frame collapses to one channel mean, so resolution buys nothing and costs ISP throughput plus an RGB conversion of every pixel |
+| Face-box ROI + pixel stride 2 | Only the sampled region is read at all |
 | Frame → one float, on the camera thread | No bridge traffic per frame, no per-frame React render |
 | `AppState` teardown | Camera stops the moment the app backgrounds |
 | `useKeepAwake` scoped to the session screen only | The screen isn't held on outside a session |
+
+### Why continuous, when a duty cycle is cheaper
+
+The first design sampled 12 seconds a minute. Two things were wrong with it, and
+neither could be fixed by adjusting the interval:
+
+1. **12 seconds is too short for HRV.** It yields roughly 11-14 inter-beat
+   intervals. RMSSD's own sampling error over that few intervals is wider than
+   the 10% / 30% thresholds the stress classifier uses, so a reading could swing
+   between *Normal* and *High Stress* on nothing but which beats happened to land
+   in the window. `MIN_HRV_SECONDS` now gates this: below 30 seconds of clean
+   signal Wick reports a heart rate and returns HRV as `null`, and the classifier
+   says *Unknown* rather than guessing.
+2. **Restlessness sampled 20% of the time is a coin flip.** Someone fidgeting
+   throughout who happened to be still during the sampled burst read as perfectly
+   steady, and nothing in the design would ever have surfaced the error.
+
+Continuous mode keeps the camera open across the focus block and analyses a
+rolling 40-second window every 15 seconds. Windows overlap, so the trend is a
+curve rather than a scatter, and movement is measured for 100% of the block
+instead of 20%. Battery saver keeps the old behaviour, made explicit and named
+for what it costs.
+
+There is a third accuracy limit worth naming: peak positions are quantised to
+1/fps, which is 33 ms at 30 fps, against RMSSD values of 20-50 ms. `ppgService`
+fits a parabola through each peak and its neighbours to recover the maximum to a
+fraction of a sample, which puts the timing error well below the quantity being
+measured.
 
 ### Privacy of the video itself
 

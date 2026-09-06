@@ -44,7 +44,7 @@ export default function BaselineScreen() {
   // the updated state rather than a stale "not started".
   const refresh = React.useCallback(async () => {
     const [baseline, self] = await Promise.all([getBaseline(), latestSelfReport()]);
-    setScanCount(baseline.scanCount);
+    setScanCount(baseline.calibrationScans);
     setQuestionnaireDone(Boolean(self?.rawAnswers));
   }, []);
 
