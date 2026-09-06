@@ -1,0 +1,53 @@
+{
+  "name": "wick",
+  "version": "1.0.0",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "start": "expo start --dev-client",
+    "start:go": "expo start --go",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild": "expo prebuild --clean",
+    "gen:sounds": "node scripts/generate-sounds.js",
+    "verify:ppg": "node --experimental-strip-types --no-warnings scripts/verify-ppg.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@expo-google-fonts/rubik": "^0.4.1",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-community/slider": "5.2.0",
+    "@react-navigation/bottom-tabs": "^7.4.2",
+    "@react-navigation/native": "^7.1.14",
+    "@react-navigation/native-stack": "^7.3.21",
+    "@supabase/supabase-js": "^2.45.4",
+    "expo": "~57.0.0",
+    "expo-asset": "~57.0.16",
+    "expo-audio": "~57.0.4",
+    "expo-build-properties": "~57.0.17",
+    "expo-dev-client": "~57.0.18",
+    "expo-font": "~57.0.3",
+    "expo-haptics": "~57.0.2",
+    "expo-keep-awake": "~57.0.1",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-gesture-handler": "~2.32.0",
+    "react-native-nitro-image": "^0.15.2",
+    "react-native-nitro-modules": "^0.37.1",
+    "react-native-reanimated": "4.5.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "react-native-svg": "15.15.4",
+    "react-native-url-polyfill": "^2.0.0",
+    "react-native-vision-camera": "^5.2.3",
+    "react-native-vision-camera-worklets": "^5.2.3",
+    "react-native-worklets": "0.10.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.0",
+    "@types/react": "~19.2.0",
+    "babel-plugin-module-resolver": "^5.0.2",
+    "typescript": "~6.0.3"
+  }
+}
