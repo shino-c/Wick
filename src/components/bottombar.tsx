@@ -4,6 +4,18 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 type TabName = 'Home' | 'Desk' | 'Recovery' | 'Social';
 
+/*
+ * RECOVERY TAB — reserved for Shino.
+ *
+ * The icon stays so the bar keeps its intended shape, but `route` is null and
+ * the tab is dimmed and non-interactive. That is the important difference from
+ * how this shipped the first time: then it pointed at '/recovery' when no such
+ * route existed, so tapping it silently did nothing and looked broken. Now it
+ * reads as a place that is not ready yet.
+ *
+ * To wire it up: create src/app/recovery.tsx and set `route: '/recovery'`.
+ */
+
 interface BottomNavigationProps {
   activeTab?: TabName;
   router?: any; // Expo Router instance
@@ -13,10 +25,16 @@ export default function BottomNavigation({
   activeTab = 'Home',
   router,
 }: BottomNavigationProps) {
-  const tabs: { name: TabName; route: string; activeIcon: string; inactiveIcon: string }[] = [
+  const tabs: {
+    name: TabName;
+    /** null = reserved, rendered but not navigable. */
+    route: string | null;
+    activeIcon: string;
+    inactiveIcon: string;
+  }[] = [
     {
       name: 'Home',
-      route: '/',
+      route: '/home',
       activeIcon: 'home',
       inactiveIcon: 'home-outline',
     },
@@ -28,7 +46,7 @@ export default function BottomNavigation({
     },
     {
       name: 'Recovery',
-      route: '/recovery',
+      route: null,
       activeIcon: 'heart-pulse',
       inactiveIcon: 'heart-pulse',
     },
@@ -40,25 +58,45 @@ export default function BottomNavigation({
     },
   ];
 
-  const handlePress = (route: string) => {
-    if (router) {
-      router.push(route);
-    }
+  /**
+   * `replace`, not `push`.
+   *
+   * A tab bar names the destinations you can be at; a stack names how you got
+   * somewhere. Pushing meant every tap stacked another screen on top of the
+   * last, so Social opened *over* Desk rather than replacing it — three taps
+   * around the bar left three screens on the stack, the back gesture retraced
+   * your tab history, and the bar stopped describing where you were. Replacing
+   * keeps the stack one deep, which is what a tab actually is.
+   *
+   * A real expo-router `(tabs)` group would be better still: it would keep each
+   * tab's own scroll position and its own nested history. That is a change to
+   * the route tree rather than to this component, so it is left alone here.
+   */
+  const handlePress = (route: string | null, isActive: boolean) => {
+    // Re-tapping the tab you are on should do nothing, not remount the screen.
+    if (!router || isActive || !route) return;
+    router.replace(route);
   };
 
   return (
     <View style={styles.nav}>
       {tabs.map((tab) => {
         const isActive = activeTab === tab.name;
+        const reserved = tab.route === null;
 
         return (
           <Pressable
             key={tab.name}
-            onPress={() => handlePress(tab.route)}
+            onPress={() => handlePress(tab.route, isActive)}
+            disabled={reserved}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: isActive, disabled: reserved }}
+            accessibilityHint={reserved ? 'Coming soon' : undefined}
             style={({ pressed }) => [
               styles.tabItem,
               isActive && styles.activeTabItem,
-              pressed && styles.pressed,
+              reserved && styles.reserved,
+              pressed && !reserved && styles.pressed,
             ]}
           >
             <MaterialCommunityIcons
@@ -111,6 +149,10 @@ const styles = StyleSheet.create({
   pressed: {
     opacity: 0.8,
     transform: [{ scale: 0.95 }],
+  },
+  /** Reserved: present in the bar, visibly not ready, and not tappable. */
+  reserved: {
+    opacity: 0.35,
   },
   tabLabel: {
     fontSize: 11,

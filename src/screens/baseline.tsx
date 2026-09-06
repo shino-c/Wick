@@ -9,24 +9,62 @@ import {
 } from 'react-native';
 
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import Slider from '@react-native-community/slider';
 
+import { colors } from '@/theme';
+import { ITEMS } from '@/features/calibration/questionnaire';
+import { BASELINE_MIN_SCANS } from '@/services/ppgService';
+import { getBaseline, latestSelfReport, saveSelfReport } from '@/services/repository';
+import { markOnboarded } from '@/lib/bootstrap';
+
+// Palette comes from src/theme — the values there are the Figma swatches
+// (#FFFBEB, #FDF1A9, #6B5038, #3D3A34). Keeping a second hardcoded set here is
+// how two screens quietly drift apart.
 const COLORS = {
-  background: '#FFFBEB',
-  text: '#2D2723',
-  muted: '#7D756E',
-  card: '#FFFFFF',
-  border: '#EFE9DF',
-  brown: '#5D4632',
-  yellow: '#FEF0A5',
-  yellowLight: '#FFF9E6',
-  green: '#15803D',
+  background: colors.cream,
+  text: colors.ink,
+  muted: colors.inkSoft,
+  card: colors.surface,
+  border: colors.line,
+  brown: colors.brown,
+  yellow: colors.yellow,
+  yellowLight: colors.yellowWash,
+  green: colors.calm,
 };
 
 export default function BaselineScreen() {
   const router = useRouter();
   const [stress, setStress] = useState(35);
+  const [scanCount, setScanCount] = useState(0);
+  const [questionnaireDone, setQuestionnaireDone] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // Re-read on focus so returning from the questionnaire or a spot check shows
+  // the updated state rather than a stale "not started".
+  const refresh = React.useCallback(async () => {
+    const [baseline, self] = await Promise.all([getBaseline(), latestSelfReport()]);
+    setScanCount(baseline.calibrationScans);
+    setQuestionnaireDone(Boolean(self?.rawAnswers));
+  }, []);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      refresh();
+    }, [refresh])
+  );
+
+  const scansLeft = Math.max(0, BASELINE_MIN_SCANS - scanCount);
+
+  const handleContinue = async () => {
+    setSaving(true);
+    // The slider is itself a self-report, so recording it means the first
+    // dashboard read already has a real signal behind it.
+    await saveSelfReport(Math.round(stress), null);
+    await markOnboarded();
+    setSaving(false);
+    router.push('/home');
+  };
 
   const getStressState = () => {
     if (stress < 25) {
@@ -164,8 +202,10 @@ export default function BaselineScreen() {
           <View style={styles.card}>
             <View style={styles.assessmentRow}>
               <View style={styles.assessmentLeft}>
-                <View style={styles.checkCircle}>
-                  <Text style={styles.checkIcon}>✓</Text>
+                <View style={[styles.checkCircle, !questionnaireDone && { backgroundColor: '#F1EDE4' }]}>
+                  <Text style={[styles.checkIcon, !questionnaireDone && { color: '#A79E93' }]}>
+                    {questionnaireDone ? '✓' : '○'}
+                  </Text>
                 </View>
 
                 <View style={styles.assessmentText}>
@@ -174,19 +214,19 @@ export default function BaselineScreen() {
                   </Text>
 
                   <Text style={styles.assessmentSubtitle}>
-                    4-Item Perceived Stress (Completed)
+                    {ITEMS.length}-Item Perceived Stress{questionnaireDone ? ' (Completed)' : ' (Not started)'}
                   </Text>
                 </View>
               </View>
 
               <Pressable
-                onPress={() => {}}
+                onPress={() => router.push('/questionnaire')}
                 style={({ pressed }) => [
                   styles.recalibrateButton,
                   pressed && styles.pressed,
                 ]}
               >
-                <Text style={styles.recalibrateText}>Recalibrate</Text>
+                <Text style={styles.recalibrateText}>{questionnaireDone ? 'Recalibrate' : 'Start'}</Text>
                 <Text style={styles.chevron}>›</Text>
               </Pressable>
             </View>
@@ -209,8 +249,30 @@ export default function BaselineScreen() {
               </View>
             </View>
 
+            {/* Cold start made visible: stress detection needs three scans
+                before there is a baseline to compare against. */}
+            <View style={styles.progressRow}>
+              <Text style={styles.progressLabel}>
+                {scanCount}/{BASELINE_MIN_SCANS} scans
+              </Text>
+              <Text style={[styles.progressHint, { color: scansLeft > 0 ? '#B4892F' : COLORS.green }]}>
+                {scansLeft > 0 ? `${scansLeft} more to unlock stress detection` : 'Baseline active'}
+              </Text>
+            </View>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    width: `${(Math.min(scanCount, BASELINE_MIN_SCANS) / BASELINE_MIN_SCANS) * 100}%`,
+                    backgroundColor: scansLeft > 0 ? COLORS.yellow : COLORS.green,
+                  },
+                ]}
+              />
+            </View>
+
             <Pressable
-              onPress={() => {}}
+              onPress={() => router.push('/spot-check')}
               style={({ pressed }) => [
                 styles.yellowButton,
                 pressed && styles.pressedButton,
@@ -265,14 +327,15 @@ export default function BaselineScreen() {
         {/* Bottom CTA */}
         <View style={styles.bottomContainer}>
           <Pressable
-            onPress={() => router.push('/home')}
+            onPress={handleContinue}
+            disabled={saving}
             style={({ pressed }) => [
               styles.continueButton,
               pressed && styles.pressedContinue,
             ]}
           >
             <Text style={styles.continueText}>
-              Continue to Dashboard
+              {saving ? 'Saving…' : 'Continue to Dashboard'}
             </Text>
 
             <Text style={styles.arrow}>→</Text>
@@ -329,6 +392,11 @@ const styles = StyleSheet.create({
   ppgText: { flex: 1 },
   ppgTitle: { color: COLORS.text, fontSize: 16, lineHeight: 21, fontWeight: '700' },
   ppgSubtitle: { marginTop: 4, color: '#80776F', fontSize: 13, lineHeight: 18 },
+  progressRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  progressLabel: { color: '#8C847C', fontSize: 11, fontWeight: '700', letterSpacing: 1.4 },
+  progressHint: { fontSize: 12, fontWeight: '600' },
+  progressTrack: { height: 6, borderRadius: 3, backgroundColor: '#F1EDE4', overflow: 'hidden', marginBottom: 16 },
+  progressFill: { height: '100%', borderRadius: 3 },
   yellowButton: { width: '100%', height: 48, borderRadius: 16, backgroundColor: COLORS.yellow, alignItems: 'center', justifyContent: 'center' },
   yellowButtonText: { color: '#3D2E1E', fontSize: 15, fontWeight: '700' },
   calendarIllustration: { width: '100%', height: 80, borderRadius: 16, backgroundColor: '#FAF6E8', overflow: 'hidden', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
