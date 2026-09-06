@@ -38,7 +38,10 @@ import type { PPGResult } from '@/services/ppgService';
 export default function BreathingScreen() {
   const router = useRouter();
   useKeepAwake();
-  const { challenge } = useLocalSearchParams<{ challenge?: string }>();
+  const { challenge, pacerOnly } = useLocalSearchParams<{
+    challenge?: string;
+    pacerOnly?: string;
+  }>();
   const scan = useBreathingScan();
 
   const [baselineRmssd, setBaselineRmssd] = React.useState<number | null>(null);
@@ -93,6 +96,12 @@ export default function BreathingScreen() {
 
   const measuring =
     scan.phase === 'before' || scan.phase === 'breathe' || scan.phase === 'after';
+
+  // Pacer only: sixty seconds of paced breathing with the camera never opened
+  // and nothing written anywhere. Offered because "let me measure that" is not
+  // always a welcome answer to feeling awful, and an app that insists on
+  // instrumenting every calm moment stops being restful.
+  if (pacerOnly === '1') return <PacerOnly onDone={() => router.back()} />;
 
   const camera = (
     <CaptureCamera
@@ -256,6 +265,44 @@ export default function BreathingScreen() {
       ) : (
         <Button label="Cancel" variant="ghost" onPress={scan.cancel} />
       )}
+      <Spacer h={4} />
+    </Screen>
+  );
+}
+
+/** Sixty seconds, no sensor, no record. */
+function PacerOnly({ onDone }: { onDone: () => void }) {
+  const [elapsed, setElapsed] = React.useState(0);
+  React.useEffect(() => {
+    const t = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const done = elapsed >= 60;
+
+  return (
+    <Screen scroll={false}>
+      <NavBar title="Breathe" onBack={onDone} />
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+        <BreathingPacer />
+        <Spacer h={8} />
+        <View style={{ width: '80%' }}>
+          <Bar pct={(Math.min(elapsed, 60) / 60) * 100} color={colors.calm} />
+          <Spacer h={2} />
+          <Eyebrow>
+            {done ? 'Complete' : `${60 - elapsed}s left · ${Math.round(CYCLE_MS / 1000)}s per cycle`}
+          </Eyebrow>
+        </View>
+      </View>
+      <Txt v="small" color={colors.inkFaint} center>
+        Nothing is being measured or saved. Follow the circle — longer out than in, which is the part
+        that calms you down.
+      </Txt>
+      <Spacer h={4} />
+      <Button
+        label={done ? 'Done' : 'Finish early'}
+        variant={done ? 'primary' : 'ghost'}
+        onPress={onDone}
+      />
       <Spacer h={4} />
     </Screen>
   );

@@ -28,8 +28,7 @@ export default function BottomNavigation({
     },
     {
       name: 'Recovery',
-      // '/recovery' was never a route. Tapping this did nothing at all.
-      route: '/calibrate',
+      route: '/recovery',
       activeIcon: 'heart-pulse',
       inactiveIcon: 'heart-pulse',
     },

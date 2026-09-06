@@ -313,11 +313,31 @@ export default function DeskScreen() {
       </Card>
 
       <Spacer h={3} />
-      <Button
-        label="Calibration & baseline"
-        variant="ghost"
-        onPress={() => router.push('/calibrate')}
-      />
+
+      {/* Calibration's home. It is not a tab: it is measurement setup for Desk
+          Mode and the spot check, not something you go looking for on a bad
+          afternoon. Everything it configures is used here. */}
+      <Card>
+        <Row style={{ justifyContent: 'space-between' }}>
+          <View style={{ flex: 1, paddingRight: spacing(3) }}>
+            <Txt v="heading">Calibration & baseline</Txt>
+            <Spacer h={1} />
+            <Txt v="small" color={colors.inkSoft}>
+              {baselineReady
+                ? 'Your baseline, spot-check history, personal accuracy and the early-warning trend.'
+                : `Set your normal first — ${BASELINE_MIN_SCANS - scanCount} more spot check${
+                    BASELINE_MIN_SCANS - scanCount === 1 ? '' : 's'
+                  } and Desk Mode can classify stress.`}
+            </Txt>
+          </View>
+          <Button
+            label="Open"
+            variant="soft"
+            style={{ height: 40, paddingHorizontal: spacing(5) }}
+            onPress={() => router.push('/calibrate')}
+          />
+        </Row>
+      </Card>
 
       <Spacer h={5} />
       <Button
