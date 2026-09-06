@@ -166,6 +166,47 @@ export default function BreathingScreen() {
               </>
             )}
 
+            {/* The live number. It exists so the two minutes do not feel like
+                dead time, and it is labelled as indicative because near a
+                segment boundary the trailing window straddles two states. The
+                three reported numbers come from clean per-segment windows. */}
+            {scan.liveRmssd !== null && (
+              <>
+                <Spacer h={4} />
+                <Row gap={4} style={{ alignItems: 'flex-end' }}>
+                  <View style={{ alignItems: 'center' }}>
+                    <Txt v="title" color={colors.brown}>
+                      {Math.round(scan.liveRmssd)}
+                    </Txt>
+                    <Eyebrow>HRV now · ms</Eyebrow>
+                  </View>
+                  {scan.liveHeartRate !== null && (
+                    <View style={{ alignItems: 'center' }}>
+                      <Txt v="title" color={colors.ink}>
+                        {Math.round(scan.liveHeartRate)}
+                      </Txt>
+                      <Eyebrow>bpm</Eyebrow>
+                    </View>
+                  )}
+                </Row>
+                {scan.liveSeries.length > 2 && (
+                  <>
+                    <Spacer h={2} />
+                    <Sparkline
+                      values={scan.liveSeries}
+                      width={240}
+                      height={44}
+                      color={colors.calm}
+                      fill
+                    />
+                    <Txt v="small" color={colors.inkFaint} center>
+                      Rolling 30s window · indicative, not the result
+                    </Txt>
+                  </>
+                )}
+              </>
+            )}
+
             <Spacer h={5} />
             <Txt v="body" color={colors.inkSoft} center style={{ paddingHorizontal: spacing(6) }}>
               {scan.framingIssue
@@ -229,7 +270,7 @@ const STEP_LABEL: Partial<Record<string, string>> = {
 };
 
 const STEP_HINT: Partial<Record<string, string>> = {
-  before: 'Sit normally and breathe however you normally would. This is the "before" picture.',
+  before: 'Sit normally and breathe however you normally would. This is the reference the rest is measured against.',
   breathe: 'Follow the circle. Longer out than in — that is the part that calms you down.',
   after: 'Stop pacing and breathe normally again. This is the reading that counts.',
   processing: 'Comparing the three windows…',
@@ -252,9 +293,15 @@ function Intro({
       </Txt>
       <Spacer h={3} />
       <Txt v="body" color={colors.inkSoft} center>
-        Keep your fingertip on the rear camera for about {Math.round(total / 60)} and a half minutes.
-        Wick reads your pulse before, during and after the exercise, and shows you the difference —
-        measured on you, not quoted from a study.
+        Keep your fingertip on the rear camera for {Math.round(total / 60)} minutes. The reading and
+        the breathing run together — the sensor never stops — and Wick shows you what changed,
+        measured on you rather than quoted from a study.
+      </Txt>
+      <Spacer h={3} />
+      <Txt v="small" color={colors.inkFaint} center>
+        It needs a before and an after because the answer is a difference. A single reading taken
+        while you breathe slowly is always high: slow breathing raises heart-rate variation directly,
+        so that number would only tell you that you followed the instructions.
       </Txt>
       <Spacer h={5} />
       <Card>

@@ -5,6 +5,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing } from '@/theme';
 import {
+  cancelChallenge,
   completeChallenge,
   deleteChallenge,
   getChallenge,
@@ -12,6 +13,16 @@ import {
 } from '@/services/repository';
 import type { ChallengeRow } from '@/data/types';
 import { formatSchedule, isPast } from './scheduling';
+
+/** "2h ago" / "3d ago" — an edit notice is about recency, not timestamps. */
+function timeAgo(iso: string): string {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
 
 const CATEGORY: Record<ChallengeRow['category'], { icon: string; label: string }> = {
   physical: { icon: '🚶', label: 'Active recovery' },
@@ -83,6 +94,10 @@ export default function ChallengeDetailScreen() {
   const full = spotsLeft === 0 && !challenge.joined;
   // A meetup whose time has been and gone should not still be recruiting.
   const past = isPast(challenge.scheduledFor);
+  // Deleting is only safe while nobody else is involved. After that the
+  // challenge lives in other people's history and, for a meetup, in their
+  // evening — so the creator gets "cancel" instead, which keeps the record.
+  const othersJoined = challenge.participants.some((p) => !p.isMe);
 
   return (
     <Screen>
@@ -119,6 +134,35 @@ export default function ChallengeDetailScreen() {
 
       <Spacer h={5} />
 
+      {challenge.cancelled && (
+        <>
+          <Card style={{ backgroundColor: colors.alertWash, borderColor: colors.alertWash }}>
+            <Txt v="heading" color={colors.alert}>
+              This challenge was called off
+            </Txt>
+            <Spacer h={2} />
+            <Txt v="small" color={colors.inkSoft}>
+              Whoever created it cancelled it. It stays here rather than disappearing, so anyone who
+              was counting on it can see what happened — and anyone who already did it keeps the
+              credit.
+            </Txt>
+          </Card>
+          <Spacer h={3} />
+        </>
+      )}
+
+      {challenge.updatedAt && !challenge.cancelled && (
+        <>
+          <Card style={{ backgroundColor: colors.yellowWash, borderColor: colors.yellowDeep }}>
+            <Txt v="small" color={colors.brownSoft}>
+              ✎ Details changed {timeAgo(challenge.updatedAt)} — check the time and place before you
+              set off.
+            </Txt>
+          </Card>
+          <Spacer h={3} />
+        </>
+      )}
+
       <Card>
         <Row style={{ justifyContent: 'space-between' }}>
           <View style={{ flex: 1 }}>
@@ -126,8 +170,10 @@ export default function ChallengeDetailScreen() {
             <Spacer h={1} />
             <Txt v="heading">{formatSchedule(challenge.scheduledFor)}</Txt>
           </View>
-          {past && (
-            <Badge label="Passed" fg={colors.inkSoft} bg={colors.line} />
+          {challenge.cancelled ? (
+            <Badge label="Cancelled" fg={colors.alert} bg={colors.alertWash} />
+          ) : (
+            past && <Badge label="Passed" fg={colors.inkSoft} bg={colors.line} />
           )}
           {challenge.joined && (
             <Badge
@@ -359,15 +405,17 @@ export default function ChallengeDetailScreen() {
         label={
           challenge.joined
             ? 'Leave challenge'
-            : past
-              ? 'This one has already happened'
-              : full
-                ? 'Challenge is full'
-                : 'Join challenge'
+            : challenge.cancelled
+              ? 'Cancelled'
+              : past
+                ? 'This one has already happened'
+                : full
+                  ? 'Challenge is full'
+                  : 'Join challenge'
         }
         variant={challenge.joined ? 'ghost' : 'primary'}
         onPress={() => run(() => toggleChallenge(challenge.id))}
-        disabled={busy || full || (past && !challenge.joined)}
+        disabled={busy || full || ((past || challenge.cancelled) && !challenge.joined)}
       />
 
       {challenge.createdByMe && (
@@ -380,21 +428,59 @@ export default function ChallengeDetailScreen() {
             disabled={busy}
           />
           <Spacer h={3} />
-          <Button
-            label="Delete challenge"
-            variant="danger"
-            onPress={() =>
-              run(async () => {
-                await deleteChallenge(challenge.id);
-                router.back();
-              })
-            }
-            disabled={busy}
-          />
-          <Spacer h={2} />
-          <Txt v="small" color={colors.inkFaint} center>
-            You created this. Deleting removes it for everyone in your circle.
-          </Txt>
+
+          {/* Two different operations, and which one you get is not a setting.
+              Alone, the challenge is yours to remove. Once somebody else has
+              joined it is in their history and possibly in their evening, so it
+              can only be called off — the record stays, marked. */}
+          {challenge.cancelled ? (
+            <>
+              <Button
+                label="Reinstate challenge"
+                variant="soft"
+                onPress={() => run(() => cancelChallenge(challenge.id, false))}
+                disabled={busy}
+              />
+              <Spacer h={2} />
+              <Txt v="small" color={colors.inkFaint} center>
+                Puts it back, open to joins again.
+              </Txt>
+            </>
+          ) : othersJoined ? (
+            <>
+              <Button
+                label="Cancel challenge"
+                variant="danger"
+                onPress={() => run(() => cancelChallenge(challenge.id, true))}
+                disabled={busy}
+              />
+              <Spacer h={2} />
+              <Txt v="small" color={colors.inkFaint} center>
+                {challenge.joinedCount - 1}{' '}
+                {challenge.joinedCount - 1 === 1 ? 'other person has' : 'other people have'} joined,
+                so this is called off rather than deleted. They keep it in their history, and
+                anyone who already did it keeps the credit.
+              </Txt>
+            </>
+          ) : (
+            <>
+              <Button
+                label="Delete challenge"
+                variant="danger"
+                onPress={() =>
+                  run(async () => {
+                    await deleteChallenge(challenge.id);
+                    router.back();
+                  })
+                }
+                disabled={busy}
+              />
+              <Spacer h={2} />
+              <Txt v="small" color={colors.inkFaint} center>
+                Nobody else has joined yet, so this removes it completely.
+              </Txt>
+            </>
+          )}
         </>
       )}
 

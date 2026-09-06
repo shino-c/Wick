@@ -340,6 +340,14 @@ alter table challenges add column if not exists verify_with text
 -- Whether this person's completion was witnessed by a measurement, rather than
 -- self-reported. Both are valid; they are simply not the same claim, so they
 -- are stored and displayed as different things.
+-- Cancelled, not deleted. Once anyone else has joined, the challenge is in
+-- their history and possibly in their evening's plans; making it vanish leaves
+-- them with a gap and no explanation. A cancelled challenge stays visible,
+-- clearly marked, and cannot be joined.
+alter table challenges add column if not exists cancelled_at timestamptz;
+-- So a meetup whose time or place moved can say so.
+alter table challenges add column if not exists updated_at timestamptz;
+
 alter table challenge_participants add column if not exists verified boolean not null default false;
 alter table challenge_participants add column if not exists completed_at timestamptz;
 
@@ -408,6 +416,8 @@ returns table (
   location text,
   capacity int,
   verify_with text,
+  cancelled boolean,
+  updated_at timestamptz,
   joined_count int,
   completed_count int,
   circle_size int,
@@ -455,6 +465,8 @@ begin
     c.location,
     c.capacity,
     c.verify_with,
+    (c.cancelled_at is not null),
+    c.updated_at,
     (select count(*)::int from visible_participants vp where vp.challenge_id = c.id),
     (select count(*)::int from visible_participants vp
       where vp.challenge_id = c.id and vp.completed_at is not null),
@@ -518,6 +530,13 @@ begin
     delete from challenge_participants p
     where p.challenge_id = toggle_challenge.challenge_id and p.user_id = auth.uid();
   else
+    if exists (
+      select 1 from challenges c
+      where c.id = toggle_challenge.challenge_id and c.cancelled_at is not null
+    ) then
+      raise exception 'This challenge was cancelled';
+    end if;
+
     -- Capacity is enforced server-side; a client that ignores the full state
     -- still cannot squeeze in.
     if exists (
@@ -592,7 +611,26 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  others int;
 begin
+  select count(*) into others
+    from challenge_participants p
+   where p.challenge_id = update_challenge.challenge_id
+     and p.user_id <> auth.uid();
+
+  -- Turning a meetup people committed to travel for into a "do it in your own
+  -- space" challenge (or the reverse) changes what they agreed to. Everything
+  -- else stays editable; plans move, and pretending otherwise just means people
+  -- delete and re-create, which loses the participants.
+  if others > 0 and exists (
+    select 1 from challenges c
+     where c.id = update_challenge.challenge_id
+       and c.kind is distinct from coalesce(p_kind, c.kind)
+  ) then
+    raise exception 'Others have joined — a meetup cannot become a solo challenge, or the reverse';
+  end if;
+
   update challenges c set
     title = trim(p_title),
     subtitle = p_subtitle,
@@ -602,7 +640,8 @@ begin
     location = p_location,
     capacity = p_capacity,
     notes = p_notes,
-    verify_with = p_verify_with
+    verify_with = p_verify_with,
+    updated_at = case when others > 0 then now() else c.updated_at end
   where c.id = update_challenge.challenge_id
     and c.created_by = auth.uid();
 
@@ -643,74 +682,69 @@ end;
 $$;
 
 
+/**
+ * Hard delete, allowed only while you are the only participant.
+ *
+ * Once anyone else has joined, the challenge exists in their history and
+ * possibly in their evening. Deleting it would remove rows from someone else's
+ * record and leave a meetup they had planned around simply gone, with nothing
+ * to explain it. cancel_challenge() is the operation for that case.
+ */
 create or replace function public.delete_challenge(challenge_id text)
 returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  others int;
 begin
-  -- Seeded challenges have created_by null and can never be deleted by a client.
+  select count(*) into others
+    from challenge_participants p
+   where p.challenge_id = delete_challenge.challenge_id
+     and p.user_id <> auth.uid();
+
+  if others > 0 then
+    raise exception 'Others have joined — cancel it instead, so it stays in their history';
+  end if;
+
   delete from challenges c
-  where c.id = delete_challenge.challenge_id
-    and c.created_by = auth.uid();
+   where c.id = delete_challenge.challenge_id
+     and c.created_by = auth.uid();
+
+  if not found then
+    raise exception 'Only the creator can remove this challenge';
+  end if;
 end;
 $$;
 
 
--- ── Anonymous support nudges ────────────────────────────────────────────────
---
--- Note there is no recipient parameter on the client side. The function picks
--- the recipients itself, so the sender is never told which friend is
--- struggling; it returns only how many people were reached.
-
-create table if not exists support_nudges (
-  id uuid primary key default gen_random_uuid(),
-  recipient_id uuid not null references auth.users on delete cascade,
-  body text not null,
-  created_at timestamptz default now()
-);
-
--- A nudge nobody can mark as read is a notification that never goes away.
-alter table support_nudges add column if not exists seen_at timestamptz;
-
-alter table support_nudges enable row level security;
-
-drop policy if exists "see nudges sent to me" on support_nudges;
-create policy "see nudges sent to me" on support_nudges for select
-  using (auth.uid() = recipient_id);
-
--- Recipients may mark their own nudges seen. They may not write new ones —
--- only send_circle_support() can, which is what keeps the sender anonymous and
--- stops anyone from addressing a nudge at a specific person.
-drop policy if exists "mark my nudges seen" on support_nudges;
-create policy "mark my nudges seen" on support_nudges for update
-  using (auth.uid() = recipient_id) with check (auth.uid() = recipient_id);
-
-
 /**
- * Removes a friendship in BOTH directions.
+ * Calls it off without erasing it.
  *
- * Deliberately symmetrical and deliberately silent. A circle is a mutual
- * arrangement, so a one-sided version would leave the other person still
- * "seeing" someone who has left. And no notification is sent: telling someone
- * they were removed turns a quiet boundary into a confrontation, which is
- * exactly the thing that makes people stay in circles they want out of.
- *
- * The removal is not concealed either — the person simply disappears from the
- * other side's circle list, the same way it works when you stop following
- * someone. Nothing is deleted beyond the link: no scans, no history, no
- * challenges, and neither side ever had access to the other's readings anyway.
+ * The challenge stays visible to everyone who joined, marked cancelled and
+ * closed to new joins. Completions already recorded are left alone: somebody
+ * who did the thing before it was called off still did it.
  */
-/**
- * Sets your own display name.
- *
- * Every account starts as 'student_a1b2c3', which is fine for privacy and
- * useless for a circle: two people who invited each other cannot tell which row
- * is which. A name people choose is what makes "who is coming to this meetup"
- * answerable. It is not an identity claim and nothing is verified — it is a
- * label your own friends see, and only they see it.
- */
+create or replace function public.cancel_challenge(challenge_id text, p_cancelled boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update challenges c
+     set cancelled_at = case when p_cancelled then now() else null end
+   where c.id = cancel_challenge.challenge_id
+     and c.created_by = auth.uid();
+
+  if not found then
+    raise exception 'Only the creator can cancel this challenge';
+  end if;
+end;
+$$;
+
+
 create or replace function public.set_username(new_username text)
 returns text
 language plpgsql
@@ -796,5 +830,6 @@ grant execute on function public.update_challenge(text, text, text, text, text, 
 grant execute on function public.complete_challenge(text, boolean, boolean) to authenticated;
 grant execute on function public.remove_friend(uuid) to authenticated;
 grant execute on function public.set_username(text) to authenticated;
+grant execute on function public.cancel_challenge(text, boolean) to authenticated;
 grant execute on function public.delete_challenge(text)    to authenticated;
 grant execute on function public.send_circle_support(text) to authenticated;

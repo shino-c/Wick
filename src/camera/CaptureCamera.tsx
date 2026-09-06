@@ -343,7 +343,9 @@ function containerStyle(preview: CaptureCameraProps['preview'], size: number) {
       overflow: 'hidden',
     } as const;
   }
-  return { width: size, height: size, borderRadius: 16, overflow: 'hidden' } as const;
+  // Circular. The finger preview sits inside a progress ring, and a rounded
+  // square inside a circle reads as a rendering mistake rather than a choice.
+  return { width: size, height: size, borderRadius: size / 2, overflow: 'hidden' } as const;
 }
 
 /**

@@ -609,6 +609,8 @@ export async function listChallenges(): Promise<ChallengeRow[]> {
       location: r.location ?? null,
       capacity: r.capacity ?? null,
       verifyWith: (r.verify_with ?? null) as ChallengeRow['verifyWith'],
+      cancelled: r.cancelled ?? false,
+      updatedAt: r.updated_at ?? null,
       joinedCount: r.joined_count,
       completedCount: r.completed_count ?? 0,
       circleSize: r.circle_size,
@@ -672,6 +674,8 @@ export async function createChallenge(input: NewChallenge): Promise<string> {
       location: input.location,
       capacity: input.capacity,
       verifyWith: input.verifyWith,
+      cancelled: false,
+      updatedAt: null,
       joinedCount: 1,
       completedCount: 0,
       circleSize: db.friends.length + 1,
@@ -720,6 +724,7 @@ export async function updateChallenge(id: string, input: NewChallenge): Promise<
       capacity: input.capacity,
       verifyWith: input.verifyWith,
       notes: input.notes,
+      updatedAt: ch.participants.some((p) => !p.isMe) ? new Date().toISOString() : ch.updatedAt,
     });
   });
 }
@@ -759,14 +764,48 @@ export async function completeChallenge(
   });
 }
 
+/**
+ * Hard delete. Only available while you are the only participant.
+ *
+ * Once anyone else has joined, the challenge is in their history and possibly
+ * in their evening's plans; deleting it would take rows out of someone else's
+ * record and leave a meetup they had arranged around simply gone, with nothing
+ * to explain it. cancelChallenge is the operation for that case, and the server
+ * refuses this one.
+ */
 export async function deleteChallenge(id: string): Promise<void> {
   if (hasSupabase) {
     const { error } = await supabase.rpc('delete_challenge', { challenge_id: id });
-    if (error) throw error;
+    if (error) throw new Error(error.message);
     return;
   }
   await writeDb((db) => {
+    const ch = db.challenges.find((c) => c.id === id);
+    if (ch && ch.participants.some((p) => !p.isMe)) {
+      throw new Error('Others have joined — cancel it instead, so it stays in their history');
+    }
     db.challenges = db.challenges.filter((c) => c.id !== id);
+  });
+}
+
+/**
+ * Calls a challenge off without erasing it. It stays visible to everyone who
+ * joined, clearly marked, and closed to new joins. Completions already recorded
+ * are left alone — somebody who did the thing before it was called off still
+ * did it.
+ */
+export async function cancelChallenge(id: string, cancelled: boolean): Promise<void> {
+  if (hasSupabase) {
+    const { error } = await supabase.rpc('cancel_challenge', {
+      challenge_id: id,
+      p_cancelled: cancelled,
+    });
+    if (error) throw new Error(error.message);
+    return;
+  }
+  await writeDb((db) => {
+    const ch = db.challenges.find((c) => c.id === id);
+    if (ch) ch.cancelled = cancelled;
   });
 }
 
@@ -779,6 +818,9 @@ export async function toggleChallenge(id: string): Promise<void> {
   await writeDb((db) => {
     const ch = db.challenges.find((x) => x.id === id);
     if (!ch) return;
+    if (!ch.joined && ch.cancelled) {
+      throw new Error('This challenge was cancelled');
+    }
     if (!ch.joined && ch.capacity !== null && ch.joinedCount >= ch.capacity) {
       throw new Error('This challenge is full');
     }

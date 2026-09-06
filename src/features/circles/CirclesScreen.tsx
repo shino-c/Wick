@@ -317,7 +317,11 @@ export default function CirclesScreen() {
           want to mark one done, and deleting other people's history is not
           this screen's call. */}
       {[...challenges]
-        .sort((a, b) => Number(isPast(a.scheduledFor)) - Number(isPast(b.scheduledFor)))
+        .sort(
+          (a, b) =>
+            Number(a.cancelled || isPast(a.scheduledFor)) -
+            Number(b.cancelled || isPast(b.scheduledFor))
+        )
         .map((ch) => (
         <View key={ch.id}>
           <Pressable
@@ -326,7 +330,7 @@ export default function CirclesScreen() {
             accessibilityLabel={`${ch.title}, view details`}
             style={({ pressed }) => [pressed && { opacity: 0.85 }]}
           >
-            <Card>
+            <Card style={ch.cancelled ? { opacity: 0.6 } : undefined}>
               <Row style={{ justifyContent: 'space-between' }}>
                 <View style={{ flex: 1, paddingRight: spacing(3) }}>
                   <Row gap={2}>
@@ -340,10 +344,11 @@ export default function CirclesScreen() {
                   </Txt>
                 </View>
                 <Button
-                  label={ch.joined ? 'Joined' : '+ Join'}
+                  label={ch.cancelled ? 'Cancelled' : ch.joined ? 'Joined' : '+ Join'}
                   variant={ch.joined ? 'soft' : 'ghost'}
                   style={{ height: 38, paddingHorizontal: spacing(4) }}
                   onPress={() => join(ch.id)}
+                  disabled={ch.cancelled && !ch.joined}
                 />
               </Row>
               <Spacer h={3} />

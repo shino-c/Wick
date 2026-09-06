@@ -80,6 +80,8 @@ function seedChallenges(): ChallengeRow[] {
       location: 'Lakeside path, main entrance',
       capacity: 6,
       verifyWith: null,
+      cancelled: false,
+      updatedAt: null,
       joinedCount: 0,
       completedCount: 0,
       circleSize: 1,
@@ -104,6 +106,8 @@ function seedChallenges(): ChallengeRow[] {
       // A tea break is a recovery break, and a recovery break is exactly the
       // thing Wick can actually witness.
       verifyWith: 'breathing',
+      cancelled: false,
+      updatedAt: null,
       joinedCount: 0,
       completedCount: 0,
       circleSize: 1,
@@ -125,6 +129,8 @@ function seedChallenges(): ChallengeRow[] {
       location: null,
       capacity: null,
       verifyWith: null,
+      cancelled: false,
+      updatedAt: null,
       joinedCount: 0,
       completedCount: 0,
       circleSize: 1,

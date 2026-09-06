@@ -137,6 +137,10 @@ export interface ChallengeRow {
   /** Max people, null for unlimited. */
   capacity: number | null;
   verifyWith: ChallengeVerification;
+  /** Called off by its creator. Stays visible and in everyone's history. */
+  cancelled: boolean;
+  /** Set once the creator edits a challenge other people had already joined. */
+  updatedAt: string | null;
   joinedCount: number;
   completedCount: number;
   circleSize: number;

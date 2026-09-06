@@ -6,23 +6,40 @@
  * the one intervention in the app with a large, fast, well-documented effect on
  * exactly the quantity Wick already measures.
  *
- * At roughly 5.5 breaths per minute, respiratory sinus arrhythmia is maximised:
- * heart rate swings up on the inhale and down on the exhale far more than at
- * rest, which shows up as a large rise in RMSSD. So the protocol is simply:
+ * ── Why this cannot be one 60-second measurement ────────────────────
+ * The sensor and the pacer DO run simultaneously — the finger never leaves the
+ * lens and the recording is continuous from the first second to the last. What
+ * cannot be compressed is the comparison. "Did breathing change anything" is a
+ * question about a difference, and a difference needs two measurements with the
+ * intervention between them. One window taken during the exercise gives a
+ * single number with nothing to hold it against.
  *
- *     BEFORE  (45s)  finger on the lens, sit normally
- *     BREATHE (60s)  finger stays on, follow the pacer
- *     AFTER   (45s)  finger stays on, sit normally again
+ * Worse, that single number would be actively misleading. At ~5.5 breaths per
+ * minute respiratory sinus arrhythmia is at its maximum: heart rate swings up
+ * on the inhale and down on the exhale, which inflates RMSSD directly, as a
+ * mechanical consequence of the breathing itself. A big number during the
+ * exercise is not evidence that anything shifted — it is evidence that you were
+ * breathing slowly, which we already knew because we asked you to.
  *
- * Three independent windows, each long enough to clear MIN_HRV_SECONDS, from
- * one unbroken contact with the sensor. The user sees what their own breathing
- * did to their own autonomic state, measured rather than asserted.
+ * So: three windows from one unbroken recording.
  *
- * Two honest limitations, both stated in the UI:
- *   • The rise DURING breathing is partly the breathing itself, not a lasting
- *     change. The BEFORE → AFTER difference is the one that means something.
- *   • Forty-five seconds is a short window. It clears the floor for RMSSD, but
- *     it is not a clinical measurement, and the number carries that caveat.
+ *     BEFORE  (30s)  sit normally — the reference
+ *     BREATHE (60s)  follow the pacer
+ *     AFTER   (30s)  sit normally again — what actually persisted
+ *
+ * Two minutes total, down from two and a half. Thirty seconds is the floor
+ * (MIN_HRV_SECONDS) rather than a comfortable margin, and the UI says so.
+ *
+ * ── The live readout ────────────────────────────────────────────────
+ * Waiting two minutes for three numbers feels like nothing is happening, so a
+ * trailing 30-second window is also analysed every 5 seconds throughout. That
+ * gives a live HRV figure and a curve that visibly climbs during the paced
+ * segment — the "measuring while you breathe" experience, without pretending a
+ * live number is the result.
+ *
+ * The live values are explicitly NOT the reported ones: near a segment boundary
+ * the trailing window straddles two different states, so it is smeared. The
+ * three reported numbers come from clean, non-overlapping per-segment windows.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { FINGER } from './config';
@@ -41,8 +58,20 @@ export type BreathPhase =
   | 'done'
   | 'error';
 
-/** Seconds per segment. Each clears MIN_HRV_SECONDS on its own. */
-export const SEGMENTS = { before: 45, breathe: 60, after: 45 } as const;
+/**
+ * Seconds per segment. `before` and `after` sit exactly on MIN_HRV_SECONDS —
+ * the shortest window from which RMSSD is reportable at all, which is what
+ * keeps the whole exercise to two minutes.
+ */
+export const SEGMENTS = { before: 30, breathe: 60, after: 30 } as const;
+
+/**
+ * Live readout: a trailing window re-analysed on this stride, purely so the
+ * screen has something moving on it. Never the reported result — near a segment
+ * boundary this window straddles two states.
+ */
+const LIVE_WINDOW_SECONDS = 30;
+const LIVE_STRIDE_SECONDS = 5;
 
 /** Frames must be usable for this long before a segment starts. */
 const FRAMING_SECONDS = 1.5;
@@ -61,6 +90,11 @@ export interface BreathingScanState {
   after: PPGResult | null;
   error: string | null;
   trace: number[];
+  /** Indicative HRV from the trailing window, updated every few seconds. */
+  liveRmssd: number | null;
+  liveHeartRate: number | null;
+  /** Every live HRV value so far, for the curve that climbs while you breathe. */
+  liveSeries: number[];
   simulated: boolean;
 }
 
@@ -75,6 +109,9 @@ const EMPTY: BreathingScanState = {
   after: null,
   error: null,
   trace: [],
+  liveRmssd: null,
+  liveHeartRate: null,
+  liveSeries: [],
   simulated: !cameraAvailable,
 };
 
@@ -91,6 +128,9 @@ export function useBreathingScan() {
   const goodFramesSince = useRef<number | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const results = useRef<Partial<Record<Segment, PPGResult>>>({});
+  /** Rolling buffer for the live readout, spanning segment boundaries. */
+  const live = useRef<{ v: number; t: number }[]>([]);
+  const lastLiveAt = useRef<number>(0);
 
   const stopTimer = () => {
     if (timer.current) clearInterval(timer.current);
@@ -192,7 +232,36 @@ export function useBreathingScan() {
 
       samples.current.push(sample.mean);
       const segment = segmentRef.current;
-      const elapsed = (Date.now() - segmentStart.current) / 1000;
+      const now = Date.now();
+      const elapsed = (now - segmentStart.current) / 1000;
+
+      // Live readout. Deliberately independent of the segment boundaries: the
+      // point is a number that moves while you breathe, not a result.
+      live.current.push({ v: sample.mean, t: now });
+      const cutoff = now - LIVE_WINDOW_SECONDS * 1000;
+      while (live.current.length && live.current[0].t < cutoff) live.current.shift();
+
+      if (
+        now - lastLiveAt.current >= LIVE_STRIDE_SECONDS * 1000 &&
+        live.current.length > 2 &&
+        (live.current[live.current.length - 1].t - live.current[0].t) / 1000 >=
+          LIVE_WINDOW_SECONDS * 0.9
+      ) {
+        lastLiveAt.current = now;
+        const span = (live.current[live.current.length - 1].t - live.current[0].t) / 1000;
+        const snapshot = PPGService.process(
+          live.current.map((x) => x.v),
+          live.current.length / span
+        );
+        if (snapshot.hrvRmssd !== null) {
+          setState((st) => ({
+            ...st,
+            liveRmssd: snapshot.hrvRmssd,
+            liveHeartRate: snapshot.heartRate,
+            liveSeries: [...st.liveSeries, snapshot.hrvRmssd as number].slice(-40),
+          }));
+        }
+      }
 
       if (elapsed >= SEGMENTS[segment]) {
         // Measured frame rate, not the requested one — trusting 30fps would
@@ -264,6 +333,8 @@ export function useBreathingScan() {
   const start = useCallback(async () => {
     samples.current = [];
     results.current = {};
+    live.current = [];
+    lastLiveAt.current = 0;
     segmentRef.current = 'before';
     goodFramesSince.current = null;
     setState({ ...EMPTY, simulated: !cameraAvailable });
@@ -286,6 +357,8 @@ export function useBreathingScan() {
     stopTimer();
     samples.current = [];
     results.current = {};
+    live.current = [];
+    lastLiveAt.current = 0;
     segmentRef.current = 'before';
     goodFramesSince.current = null;
     phaseRef.current = 'idle';
