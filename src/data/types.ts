@@ -77,13 +77,27 @@ export interface CircleSummary {
   suppressed: boolean;
 }
 
+export type ChallengeCategory = 'physical' | 'social' | 'mental';
+
 export interface ChallengeRow {
   id: string;
   title: string;
   subtitle: string;
   scheduledFor: string | null;
-  category: 'physical' | 'social' | 'mental';
+  category: ChallengeCategory;
   joinedCount: number;
   circleSize: number;
   joined: boolean;
+  /** Null for the seeded challenges; set for anything a member created. */
+  createdBy: string | null;
+  createdByMe: boolean;
+  notes: string | null;
+}
+
+export interface NewChallenge {
+  title: string;
+  subtitle: string;
+  scheduledFor: string | null;
+  category: ChallengeCategory;
+  notes: string | null;
 }

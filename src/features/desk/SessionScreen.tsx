@@ -10,7 +10,7 @@ import { Ring, Sparkline } from '@/components/charts';
 import { BreathingPacer } from '@/components/BreathingPacer';
 import { colors, radius, spacing } from '@/theme';
 import { CaptureCamera } from '@/camera/CaptureCamera';
-import { FACE, POMODORO, PREVIEW_HIDDEN } from '@/camera/config';
+import { FACE, POMODORO, PREVIEW_MODE, PREVIEW_SIZE } from '@/camera/config';
 import { FRAMING_MESSAGE } from '@/camera/frameSampling';
 import { useDeskSession, type Reading } from '@/camera/useDeskSession';
 import {
@@ -29,15 +29,17 @@ export default function SessionScreen() {
     minutes?: string;
     soundscape?: string;
     demoMode?: string;
+    breakMinutes?: string;
   }>();
 
   // Route params arrive as strings; parse once and defend against a deep link
   // that arrives with nothing set.
   const minutes = Number(params.minutes) || POMODORO.DEFAULT_MINUTES;
   const demoMode = params.demoMode === '1';
+  const breakMinutes = Number(params.breakMinutes) || POMODORO.DEFAULT_BREAK_MINUTES;
   const initialSound = (params.soundscape as SoundscapeId) ?? 'rain';
 
-  const session = useDeskSession({ plannedMinutes: minutes, demoMode });
+  const session = useDeskSession({ plannedMinutes: minutes, breakMinutes, demoMode });
   const [sound, setSound] = React.useState<SoundscapeId>(initialSound);
   const [volume, setVolume] = React.useState(0.6);
   const persisted = React.useRef(0);
@@ -103,18 +105,23 @@ export default function SessionScreen() {
     return () => sub.remove();
   }, [session.phase]);
 
+  // One camera element, positioned by whoever renders it. In face-crop mode it
+  // is a small circle showing only the detected face; the room around you is
+  // clipped away rather than drawn and covered.
   const camera = (
-    <View style={{ position: 'absolute', top: 0, left: 0, opacity: 0 }}>
-      <CaptureCamera
-        facing="front"
-        active={session.cameraActive}
-        channel={FACE.CHANNEL}
-        roi={FACE.ROI}
-        stride={FACE.PIXEL_STRIDE}
-        onSample={session.onSample}
-        showPreview={!PREVIEW_HIDDEN}
-      />
-    </View>
+    <CaptureCamera
+      facing="front"
+      active={session.cameraActive}
+      channel={FACE.CHANNEL}
+      roi={FACE.ROI}
+      stride={FACE.PIXEL_STRIDE}
+      onSample={session.onSample}
+      trackFaces
+      onFaces={session.onFaces}
+      preview={session.cameraActive ? PREVIEW_MODE : 'none'}
+      faceBox={session.primaryFace}
+      size={PREVIEW_SIZE}
+    />
   );
 
   if (session.phase === 'permission_denied') {
@@ -170,27 +177,32 @@ function SetupCheck({
 }) {
   return (
     <Screen dark scroll={false}>
-      {camera}
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
         <Eyebrow color={colors.onNightSoft}>Setup check</Eyebrow>
         <Spacer h={5} />
         <Ring
           progress={1 - session.setupSecondsLeft / 3}
           size={200}
-          color={session.setupIssue ? colors.warn : colors.yellow}
+          color={session.setupIssue ? colors.warn : colors.calm}
         >
-          <Txt v="display" color={colors.onNight}>
-            {session.setupSecondsLeft}
-          </Txt>
+          {/* The live face crop sits inside the ring, so you can see your own
+              framing while the countdown runs. */}
+          <View style={{ alignItems: 'center', justifyContent: 'center' }}>
+            {session.primaryFace ? camera : <View style={{ opacity: 0 }}>{camera}</View>}
+            <Spacer h={2} />
+            <Txt v="title" color={colors.onNight}>
+              {session.setupSecondsLeft}
+            </Txt>
+          </View>
         </Ring>
         <Spacer h={6} />
-        <Txt v="heading" color={colors.onNight} center>
+        <Txt v="heading" color={session.setupIssue ? colors.warn : colors.calm} center>
           {session.setupIssue ? FRAMING_MESSAGE[session.setupIssue] : 'Framing looks good'}
         </Txt>
         <Spacer h={3} />
         <Txt v="small" color={colors.onNightSoft} center style={{ paddingHorizontal: spacing(8) }}>
-          Prop your phone up facing you. The timer starts once Wick has three clean seconds — no
-          preview is shown, so nobody behind you ends up on screen.
+          Prop your phone up facing you. The timer starts after three clean seconds. Only your face
+          is shown — the room around you is never drawn on screen.
         </Txt>
       </View>
       <Button label="Cancel" variant="night" onPress={onCancel} />
@@ -259,7 +271,7 @@ function ActiveSession({
 
   return (
     <Screen dark>
-      {camera}
+      {!session.sampling && <View style={{ opacity: 0, height: 0 }}>{camera}</View>}
 
       <Row style={{ justifyContent: 'space-between' }}>
         <Txt v="title" color={colors.onNight}>
@@ -267,6 +279,55 @@ function ActiveSession({
         </Txt>
         <SensingBadge sampling={session.sampling} simulated={session.simulated} />
       </Row>
+
+      {/* Live face crop, visible only while a burst is running. Gives the user
+          framing feedback exactly when it matters, and disappears the rest of
+          the time so there's no feed sitting on screen for 48 seconds a minute. */}
+      {session.sampling && (
+        <>
+          <Spacer h={4} />
+          <Row gap={3}>
+            <View
+              style={{
+                borderWidth: 2,
+                borderRadius: (PREVIEW_SIZE + 8) / 2,
+                borderColor: session.primaryFace ? colors.calm : colors.warn,
+                padding: 2,
+              }}
+            >
+              {camera}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Txt v="heading" color={session.primaryFace ? colors.calm : colors.warn}>
+                {session.faces.length > 1
+                  ? 'Two people in frame'
+                  : session.primaryFace
+                    ? 'Reading your pulse'
+                    : 'Looking for your face'}
+              </Txt>
+              <Spacer h={1} />
+              <Txt v="small" color={colors.onNightSoft}>
+                {session.faces.length > 1
+                  ? 'Wick reads only you — this burst will be dropped.'
+                  : session.primaryFace
+                    ? 'Stay roughly still for a few seconds.'
+                    : 'Sit back in view of the camera.'}
+              </Txt>
+            </View>
+          </Row>
+        </>
+      )}
+
+      {session.lastDiscardReason && !session.sampling && (
+        <>
+          <Spacer h={3} />
+          <NightCard>
+            <Txt v="small" color={colors.warn}>
+              ⚠  {session.lastDiscardReason}. Wick would rather skip a reading than invent one.
+            </Txt>
+          </NightCard>
+        </>
+      )}
 
       <Spacer h={6} />
 

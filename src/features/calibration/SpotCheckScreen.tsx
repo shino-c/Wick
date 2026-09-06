@@ -66,19 +66,6 @@ export default function SpotCheckScreen() {
     <Screen>
       <NavBar title="Finger spot check" onBack={() => router.back()} />
 
-      {/* The camera lives here, hidden behind the ring, and is only active
-          while framing or capturing — never idling in the background. */}
-      <View style={{ position: 'absolute', opacity: 0 }}>
-        <CaptureCamera
-          facing="back"
-          active={scan.cameraActive}
-          torch={scan.cameraActive}
-          channel={FINGER.CHANNEL}
-          roi={FINGER.ROI}
-          stride={FINGER.PIXEL_STRIDE}
-          onSample={scan.onSample}
-        />
-      </View>
 
       {scan.phase === 'done' && scan.result ? (
         <ResultView
@@ -117,6 +104,8 @@ function CaptureView({
           ? 'Hold steady. Reading your pulse…'
           : 'Looking for your fingertip…';
 
+  const live = scan.phase === 'framing' || capturing;
+
   return (
     <View style={{ alignItems: 'center' }}>
       <Spacer h={4} />
@@ -124,19 +113,48 @@ function CaptureView({
         progress={scan.progress}
         size={220}
         stroke={10}
-        color={colors.yellowDeep}
+        color={scan.framingIssue ? colors.warn : colors.yellowDeep}
         track={colors.line}
       >
-        <View style={{ alignItems: 'center' }}>
+        {/* The camera preview sits inside the ring. On this screen a preview is
+            genuinely useful and carries no bystander risk: the lens is pressed
+            against a fingertip, so the only thing it can show is the finger. */}
+        {live && (
+          <View style={{ position: 'absolute' }}>
+            <CaptureCamera
+              facing="back"
+              active
+              torch
+              channel={FINGER.CHANNEL}
+              roi={FINGER.ROI}
+              stride={FINGER.PIXEL_STRIDE}
+              onSample={scan.onSample}
+              preview="full"
+              size={170}
+            />
+          </View>
+        )}
+        <View
+          style={{
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: live ? 'rgba(61,58,52,0.45)' : 'transparent',
+            width: 170,
+            height: 170,
+            borderRadius: 85,
+          }}
+        >
           {capturing ? (
             <>
-              <Txt v="display" color={colors.brown}>
+              <Txt v="display" color="#FFFFFF">
                 {scan.secondsLeft}
               </Txt>
-              <Eyebrow>seconds left</Eyebrow>
+              <Eyebrow color="#FFFFFF">seconds left</Eyebrow>
             </>
           ) : scan.phase === 'processing' ? (
             <Eyebrow>Analysing</Eyebrow>
+          ) : scan.phase === 'framing' ? (
+            <Eyebrow color="#FFFFFF">Looking…</Eyebrow>
           ) : (
             <Txt v="body" style={{ fontSize: 40 }}>
               ☝️

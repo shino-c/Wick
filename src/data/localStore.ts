@@ -70,6 +70,9 @@ function seedChallenges(): ChallengeRow[] {
       joinedCount: 1,
       circleSize: 1,
       joined: false,
+      createdBy: null,
+      createdByMe: false,
+      notes: 'Gentle loop of the lake. No pace, no tracking — just moving somewhere that is not your desk.',
     },
     {
       id: 'tea-break',
@@ -80,6 +83,9 @@ function seedChallenges(): ChallengeRow[] {
       joinedCount: 1,
       circleSize: 1,
       joined: false,
+      createdBy: null,
+      createdByMe: false,
+      notes: 'Fifteen minutes, no screens. Phones face-down on the table.',
     },
     {
       id: 'reach-out',
@@ -90,6 +96,9 @@ function seedChallenges(): ChallengeRow[] {
       joinedCount: 0,
       circleSize: 1,
       joined: false,
+      createdBy: null,
+      createdByMe: false,
+      notes: 'Message one person you have not spoken to this week. That is the whole challenge.',
     },
   ];
 }

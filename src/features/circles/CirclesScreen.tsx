@@ -1,5 +1,5 @@
 import React from 'react';
-import { View } from 'react-native';
+import { Pressable, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Badge, Bar, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
@@ -198,47 +198,68 @@ export default function CirclesScreen() {
       {/* ── Shared challenges ─────────────────────────────────────── */}
       <Row style={{ justifyContent: 'space-between' }}>
         <Txt v="heading">Shared Challenges</Txt>
-        <Txt v="small" color={colors.inkFaint}>
-          Recovery, together
-        </Txt>
+        <Pressable onPress={() => router.push('/new-challenge')} accessibilityRole="button">
+          <Txt v="small" color={colors.brown}>
+            + New
+          </Txt>
+        </Pressable>
       </Row>
       <Spacer h={3} />
 
       {challenges.map((ch) => (
         <View key={ch.id}>
-          <Card>
-            <Row style={{ justifyContent: 'space-between' }}>
-              <View style={{ flex: 1, paddingRight: spacing(3) }}>
-                <Row gap={2}>
-                  <Txt v="body">{categoryIcon(ch.category)}</Txt>
-                  <Txt v="heading">{ch.title}</Txt>
-                </Row>
-                <Spacer h={1} />
-                <Txt v="small" color={colors.inkFaint}>
-                  {ch.subtitle}
-                  {ch.scheduledFor ? ` · ${ch.scheduledFor}` : ''}
-                </Txt>
-              </View>
-              <Button
-                label={ch.joined ? 'Joined' : '+ Join'}
-                variant={ch.joined ? 'soft' : 'ghost'}
-                style={{ height: 38, paddingHorizontal: spacing(4) }}
-                onPress={() => join(ch.id)}
+          <Pressable
+            onPress={() => router.push({ pathname: '/challenge', params: { id: ch.id } })}
+            accessibilityRole="button"
+            accessibilityLabel={`${ch.title}, view details`}
+            style={({ pressed }) => [pressed && { opacity: 0.85 }]}
+          >
+            <Card>
+              <Row style={{ justifyContent: 'space-between' }}>
+                <View style={{ flex: 1, paddingRight: spacing(3) }}>
+                  <Row gap={2}>
+                    <Txt v="body">{categoryIcon(ch.category)}</Txt>
+                    <Txt v="heading">{ch.title}</Txt>
+                  </Row>
+                  <Spacer h={1} />
+                  <Txt v="small" color={colors.inkFaint}>
+                    {ch.subtitle}
+                    {ch.scheduledFor ? ` · ${ch.scheduledFor}` : ''}
+                  </Txt>
+                </View>
+                <Button
+                  label={ch.joined ? 'Joined' : '+ Join'}
+                  variant={ch.joined ? 'soft' : 'ghost'}
+                  style={{ height: 38, paddingHorizontal: spacing(4) }}
+                  onPress={() => join(ch.id)}
+                />
+              </Row>
+              <Spacer h={3} />
+              <Bar
+                pct={ch.circleSize ? (ch.joinedCount / ch.circleSize) * 100 : 0}
+                color={colors.yellowDeep}
               />
-            </Row>
-            <Spacer h={3} />
-            <Bar
-              pct={ch.circleSize ? (ch.joinedCount / ch.circleSize) * 100 : 0}
-              color={colors.yellowDeep}
-            />
-            <Spacer h={2} />
-            <Txt v="small" color={colors.inkFaint}>
-              {ch.joinedCount} of {ch.circleSize} joined
-            </Txt>
-          </Card>
+              <Spacer h={2} />
+              <Row style={{ justifyContent: 'space-between' }}>
+                <Txt v="small" color={colors.inkFaint}>
+                  {ch.joinedCount} of {ch.circleSize} joined
+                </Txt>
+                <Txt v="small" color={colors.inkFaint}>
+                  Details ›
+                </Txt>
+              </Row>
+            </Card>
+          </Pressable>
           <Spacer h={3} />
         </View>
       ))}
+
+      <Button
+        label="+ Create a challenge"
+        variant="ghost"
+        onPress={() => router.push('/new-challenge')}
+      />
+      <Spacer h={3} />
 
       <Spacer h={2} />
       <Button label="Add a friend" variant="ghost" onPress={() => router.push('/add-friend')} />

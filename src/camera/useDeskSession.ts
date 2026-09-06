@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ESCALATION_CONSECUTIVE_READS, FACE, POMODORO, SETUP_CHECK_SECONDS } from './config';
 import { checkFaceFraming, type FrameSample, type FramingIssue } from './frameSampling';
-import { cameraAvailable, requestCameraPermission } from './CaptureCamera';
+import { cameraAvailable, requestCameraPermission, type FaceBox } from './CaptureCamera';
 import { rampedProfile, simulateBurst } from './simulator';
 import { PPGService, type StressLevel } from '@/services/ppgService';
 import { getBaseline } from '@/services/repository';
@@ -57,6 +57,10 @@ export interface DeskSessionState {
   blockSeconds: number;
   setupIssue: FramingIssue;
   setupSecondsLeft: number;
+  /** Live face boxes, for the cropped preview and the framing indicator. */
+  faces: FaceBox[];
+  /** Why the last burst was thrown away, if it was. */
+  lastDiscardReason: string | null;
   /** True while a burst is running: camera on, indicator lit. */
   sampling: boolean;
   readings: Reading[];
@@ -83,6 +87,8 @@ export interface SessionSummary {
 
 export interface DeskSessionOptions {
   plannedMinutes?: number;
+  /** User-chosen break length. The adaptive logic moves *when*, never how long. */
+  breakMinutes?: number;
   /** Shorten the sampling cadence for a live demo. Real cadence is 3 minutes. */
   demoMode?: boolean;
   /** Simulation only: 'ramp' walks stress upward so escalation is demonstrable. */
@@ -90,7 +96,12 @@ export interface DeskSessionOptions {
 }
 
 export function useDeskSession(options: DeskSessionOptions = {}) {
-  const { plannedMinutes = POMODORO.DEFAULT_MINUTES, demoMode = false, simArc = 'ramp' } = options;
+  const {
+    plannedMinutes = POMODORO.DEFAULT_MINUTES,
+    breakMinutes = POMODORO.DEFAULT_BREAK_MINUTES,
+    demoMode = false,
+    simArc = 'ramp',
+  } = options;
 
   const burstInterval = demoMode ? 20 : FACE.BURST_INTERVAL_SECONDS;
   const burstLength = demoMode ? 6 : FACE.BURST_SECONDS;
@@ -102,6 +113,8 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     blockSeconds: plannedMinutes * 60,
     setupIssue: null,
     setupSecondsLeft: SETUP_CHECK_SECONDS,
+    faces: [],
+    lastDiscardReason: null,
     sampling: false,
     readings: [],
     latest: null,
@@ -125,6 +138,9 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
   const consecutiveHigh = useRef<number>(0);
   const enforcedAtIndex = useRef<number | null>(null);
   const enforcedLeft = useRef<number>(0);
+  const facesRef = useRef<FaceBox[]>([]);
+  const burstFaceFrames = useRef<number>(0);
+  const burstTotalFrames = useRef<number>(0);
 
   const stop = () => {
     if (tick.current) clearInterval(tick.current);
@@ -138,6 +154,18 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
   };
 
   /* ── burst handling ─────────────────────────────────────────────── */
+
+  /**
+   * Throws a burst away without producing a reading.
+   *
+   * This matters more than it looks. Sensor noise off any surface, once it has
+   * been through a 0.7–3.5 Hz bandpass, contains oscillations that peak
+   * detection will happily turn into a heart rate. Without this gate the app
+   * reports a pulse for an empty chair. Silence is the correct output.
+   */
+  const discardBurst = useCallback((reason: string) => {
+    setState((s) => ({ ...s, sampling: false, lastDiscardReason: reason }));
+  }, []);
 
   const ingestReading = useCallback((rawSignal: number[], fps: number) => {
     const result = PPGService.process(rawSignal, fps);
@@ -220,7 +248,9 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     }
     burstSamples.current = [];
     burstStart.current = Date.now();
-    setState((s) => ({ ...s, sampling: true }));
+    burstFaceFrames.current = 0;
+    burstTotalFrames.current = 0;
+    setState((s) => ({ ...s, sampling: true, lastDiscardReason: null }));
   }, [runSimulatedBurst]);
 
   /* ── per-frame callback (setup check + bursts) ──────────────────── */
@@ -232,7 +262,10 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
       if (phase === 'setup') {
         setupSamples.current.push(sample);
         const elapsed = (Date.now() - setupStart.current) / 1000;
-        const issue = checkFaceFraming(setupSamples.current.slice(-45));
+        // Lighting alone is not framing. A wall at a reasonable brightness used
+        // to pass this check; now the face detector has to see exactly one
+        // person before the countdown is allowed to run down.
+        const issue = checkFaceFraming(setupSamples.current.slice(-45), facesRef.current.length);
         setState((s) => ({
           ...s,
           setupIssue: issue,
@@ -249,17 +282,53 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
 
       if (!burstStart.current) return;
       burstSamples.current.push(sample.mean);
+      burstTotalFrames.current += 1;
+      if (facesRef.current.length === 1) burstFaceFrames.current += 1;
+
       const elapsed = (Date.now() - burstStart.current) / 1000;
       if (elapsed >= burstLength) {
         const fps = burstSamples.current.length / elapsed;
         const raw = [...burstSamples.current];
+        const faceFrames = burstFaceFrames.current;
+        const totalFrames = burstTotalFrames.current;
         burstSamples.current = [];
         burstStart.current = 0;
+        burstFaceFrames.current = 0;
+        burstTotalFrames.current = 0;
         burstIndex.current += 1;
+
+        const coverage = totalFrames > 0 ? faceFrames / totalFrames : 0;
+        if (coverage < FACE.MIN_FACE_COVERAGE) {
+          discardBurst(
+            coverage === 0
+              ? 'No face in frame — reading discarded'
+              : 'You moved out of frame — reading discarded'
+          );
+          return;
+        }
         ingestReading(raw, fps);
       }
     },
     [burstLength, ingestReading]
+  );
+
+  /**
+   * Face detector callback. A second face means someone is behind you: the
+   * burst is dropped rather than silently averaging two people's skin tones.
+   */
+  const onFaces = useCallback(
+    (faces: FaceBox[]) => {
+      facesRef.current = faces;
+      setState((s) => (sameBoxes(s.faces, faces) ? s : { ...s, faces }));
+      if (faces.length > 1 && burstStart.current) {
+        burstSamples.current = [];
+        burstStart.current = 0;
+        burstFaceFrames.current = 0;
+        burstTotalFrames.current = 0;
+        discardBurst('Someone else came into frame — reading discarded');
+      }
+    },
+    [discardBurst]
   );
 
   /* ── the clock ──────────────────────────────────────────────────── */
@@ -344,7 +413,7 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
             ...s,
             phase: 'break',
             elapsedSeconds,
-            secondsLeft: POMODORO.BREAK_MINUTES * 60,
+            secondsLeft: breakMinutes * 60,
           };
         }
         return { ...s, elapsedSeconds, secondsLeft: left };
@@ -423,8 +492,8 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
   const takeBreakNow = useCallback(() => {
     if (phaseRef.current !== 'focus') return;
     phaseRef.current = 'break';
-    setState((s) => ({ ...s, phase: 'break', secondsLeft: POMODORO.BREAK_MINUTES * 60 }));
-  }, []);
+    setState((s) => ({ ...s, phase: 'break', secondsLeft: breakMinutes * 60 }));
+  }, [breakMinutes]);
 
   /** Camera should be live during the setup check and during bursts only. */
   const cameraActive = useMemo(
@@ -438,11 +507,37 @@ export function useDeskSession(options: DeskSessionOptions = {}) {
     [state.readings]
   );
 
-  return { ...state, start, end, takeBreakNow, onSample, cameraActive, curve, burstInterval };
+  /** Largest detected face — what the cropped preview centres on. */
+  const primaryFace = useMemo(
+    () =>
+      state.faces.length === 0
+        ? null
+        : state.faces.slice().sort((a, b) => b.width * b.height - a.width * a.height)[0],
+    [state.faces]
+  );
+
+  return {
+    ...state,
+    start,
+    end,
+    takeBreakNow,
+    onSample,
+    onFaces,
+    cameraActive,
+    curve,
+    burstInterval,
+    primaryFace,
+  };
 }
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+/** Cheap identity check so face updates don't re-render on sub-pixel jitter. */
+function sameBoxes(a: FaceBox[], b: FaceBox[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((box, i) => Math.abs(box.x - b[i].x) < 0.01 && Math.abs(box.y - b[i].y) < 0.01);
 }
 
 /** See Reading.movementIndex. Excursion threshold is in 0–255 channel units. */

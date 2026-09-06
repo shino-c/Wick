@@ -12,21 +12,25 @@ import { useRouter } from 'expo-router';
 import Svg, { Path, Circle, Line, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { MaterialIcons } from '@expo/vector-icons';
 
+import { colors } from '@/theme';
 import TopNavigation from '@/components/topbar';
 import BottomNavigation from '@/components/bottombar';
 
+// Anchored to src/theme, which carries the Figma swatches. The few values
+// below that aren't in the token set (warning washes, error) stay literal until
+// they're needed on a second screen.
 const COLORS = {
-  background: '#FFFBEB',
-  surface: '#FFFFFF',
-  text: '#1C1C13',
-  textDark: '#2C2B29',
-  primary: '#523921',
-  primaryContainer: '#6B5036',
-  border: 'rgba(210, 196, 185, 0.3)',
-  outline: '#81756C',
-  error: '#BA1A1A',
-  warning: '#FEF9C3',
-  warningBorder: '#FEF08A',
+  background: colors.cream,
+  surface: colors.surface,
+  text: colors.ink,
+  textDark: colors.ink,
+  primary: colors.brown,
+  primaryContainer: colors.brownSoft,
+  border: colors.line,
+  outline: colors.inkSoft,
+  error: colors.alert,
+  warning: colors.warnWash,
+  warningBorder: colors.yellowDeep,
   warningText: '#854D0E',
   warningSubtext: '#713F12',
 };

@@ -12,6 +12,7 @@ import type {
   Baseline,
   ChallengeRow,
   CircleSummary,
+  NewChallenge,
   FocusSessionRow,
   FriendSummary,
   IncomingRequest,
@@ -478,6 +479,9 @@ export async function listChallenges(): Promise<ChallengeRow[]> {
       joinedCount: r.joined_count,
       circleSize: r.circle_size,
       joined: r.joined,
+      createdBy: r.created_by ?? null,
+      createdByMe: r.created_by_me ?? false,
+      notes: r.notes ?? null,
     }));
   }
   // Demo store: join counts scale with the real circle rather than showing a
@@ -489,6 +493,60 @@ export async function listChallenges(): Promise<ChallengeRow[]> {
     circleSize,
     joinedCount: Math.min(ch.joinedCount, circleSize),
   }));
+}
+
+export async function getChallenge(id: string): Promise<ChallengeRow | null> {
+  const all = await listChallenges();
+  return all.find((c) => c.id === id) ?? null;
+}
+
+/**
+ * Creates a challenge visible to the author's circle.
+ *
+ * Note what is NOT stored: who it is "for". A challenge is an open invitation
+ * to the whole circle, never something aimed at the person Wick thinks is
+ * struggling — that would leak the very signal the pillar keeps private.
+ */
+export async function createChallenge(input: NewChallenge): Promise<string> {
+  if (hasSupabase) {
+    const { data, error } = await supabase.rpc('create_challenge', {
+      p_title: input.title,
+      p_subtitle: input.subtitle,
+      p_scheduled_for: input.scheduledFor,
+      p_category: input.category,
+      p_notes: input.notes,
+    });
+    if (error) throw error;
+    return data as string;
+  }
+  const id = uid();
+  await writeDb((db) => {
+    db.challenges.unshift({
+      id,
+      title: input.title,
+      subtitle: input.subtitle,
+      scheduledFor: input.scheduledFor,
+      category: input.category,
+      joinedCount: 1,
+      circleSize: db.friends.length + 1,
+      joined: true,
+      createdBy: 'me',
+      createdByMe: true,
+      notes: input.notes,
+    });
+  });
+  return id;
+}
+
+export async function deleteChallenge(id: string): Promise<void> {
+  if (hasSupabase) {
+    const { error } = await supabase.rpc('delete_challenge', { challenge_id: id });
+    if (error) throw error;
+    return;
+  }
+  await writeDb((db) => {
+    db.challenges = db.challenges.filter((c) => c.id !== id);
+  });
 }
 
 export async function toggleChallenge(id: string): Promise<void> {

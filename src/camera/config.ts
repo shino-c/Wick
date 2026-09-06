@@ -2,34 +2,50 @@
  * Capture policy for both camera modes.
  *
  * ── Why interval sampling ────────────────────────────────────────────
- * Continuous rPPG for a 25-minute session means 25 minutes of camera +
- * per-frame processing, which is the single biggest battery cost in the app.
- * Desk Mode instead runs a BURST_SECONDS window every BURST_INTERVAL_SECONDS
- * and holds the camera device inactive in between, giving roughly a 7% duty
- * cycle. HRV trends move on a minutes timescale, so nothing useful is lost.
+ * Continuous rPPG for a 25-minute session means 25 minutes of camera plus
+ * per-frame processing, the single biggest battery cost in the app. Desk Mode
+ * runs a BURST_SECONDS window every BURST_INTERVAL_SECONDS and holds the camera
+ * inactive in between. At 12s/60s that is a ~20% duty cycle and roughly 25
+ * readings across a 25-minute session — dense enough that the stress curve is
+ * actually a curve, and that the two-consecutive-reads lock can react within a
+ * couple of minutes rather than six.
  *
- * ── Why the ROI ──────────────────────────────────────────────────────
- * Only pixels inside a small centred box are ever read. Everything outside it —
- * the room, the doorway, whoever walks past behind you — is never sampled, so
- * bystanders cannot influence the signal and are never part of any computation.
- * Combined with PREVIEW_HIDDEN below, a passer-by is neither measured nor shown.
+ * ── Why the face box, not a fixed ROI ────────────────────────────────
+ * Sampling is confined to the detected face's bounding box. Everything outside
+ * it — the room, the doorway, whoever walks past behind you — is never read, so
+ * bystanders cannot influence the signal. If no face is detected the burst is
+ * discarded outright: a wall has enough sensor noise to produce a plausible
+ * looking BPM once it has been through a bandpass filter, and reporting that
+ * number would be worse than reporting nothing.
  */
 
 export const FACE = {
   /** Length of one rPPG burst. ~12s at 30fps = 360 frames, enough for 5+ peaks. */
   BURST_SECONDS: 12,
   /** Gap between bursts. Camera device is fully inactive for this whole span. */
-  BURST_INTERVAL_SECONDS: 180,
+  BURST_INTERVAL_SECONDS: 60,
   /** Green channel: least sensitive to skin tone and ambient colour temperature. */
   CHANNEL: 'green' as const,
-  /** Fraction of frame width/height sampled, centred. Face fills this if centred. */
+  /**
+   * Fallback ROI, used only for the brightness pre-check before a face is
+   * found. Real sampling always uses the detected face box.
+   */
   ROI: { x: 0.32, y: 0.22, w: 0.36, h: 0.34 },
+  /**
+   * Sample the middle of the face box: forehead and cheeks carry the strongest
+   * pulsatile signal, while the edges drift on and off skin as the head moves.
+   */
+  FACE_ROI_INSET: 0.18,
   /** Read every Nth pixel inside the ROI — 16x less work per frame, same mean. */
   PIXEL_STRIDE: 4,
-  /** Requested capture size. Smallest workable format = least power and heat. */
   TARGET_WIDTH: 640,
   TARGET_HEIGHT: 480,
   TARGET_FPS: 30,
+  /**
+   * A burst needs the face present for at least this fraction of its frames.
+   * Below it the window is discarded rather than filtered into a number.
+   */
+  MIN_FACE_COVERAGE: 0.7,
 } as const;
 
 export const FINGER = {
@@ -48,16 +64,21 @@ export const FINGER = {
 } as const;
 
 /**
- * Desk Mode never renders a camera preview.
+ * Desk Mode shows a live preview cropped to the detected face.
  *
- * Two reasons, both deliberate: a live feed of the room on screen is the most
- * likely way a bystander ends up captured in a screenshot or a shoulder-surf,
- * and a moving video feed is a poor thing to stare at while trying to focus.
- * The user gets a status indicator instead — the same information, none of the
- * exposure. The finger spot check does show a small preview, because there the
- * lens is pressed against a fingertip and the user needs to see coverage.
+ * The earlier design showed no preview at all, on the grounds that a live view
+ * of the room is the easiest way for a bystander to end up on screen. That was
+ * right about the risk and wrong about the cost: without a preview the user has
+ * no idea whether they are framed, and no feedback when a reading fails.
+ *
+ * Cropping to the face box keeps both properties. The user sees themselves, and
+ * background pixels are never drawn — not blurred, not composited, simply
+ * outside the visible region.
  */
-export const PREVIEW_HIDDEN = true;
+export const PREVIEW_MODE: 'face-crop' | 'full' | 'none' = 'face-crop';
+
+/** Diameter of the cropped face preview, in points. */
+export const PREVIEW_SIZE = 96;
 
 /** 3-second framing check before the timer starts. */
 export const SETUP_CHECK_SECONDS = 3;
@@ -65,7 +86,8 @@ export const SETUP_CHECK_SECONDS = 3;
 /**
  * Escalation rule. A single high read never locks the timer — rPPG is noisy and
  * a false lockout destroys trust faster than a missed break. Two consecutive
- * good-quality High Stress reads means ~4–6 minutes of sustained signal.
+ * good-quality High Stress reads is ~2 minutes of sustained signal at the
+ * 60-second cadence.
  */
 export const ESCALATION_CONSECUTIVE_READS = 2;
 
@@ -74,7 +96,9 @@ export const POMODORO = {
   DEFAULT_MINUTES: 25,
   MIN_MINUTES: 12,
   MAX_MINUTES: 45,
-  BREAK_MINUTES: 5,
+  /** Selectable break lengths. The user picks; the adaptive logic never overrides it. */
+  BREAK_OPTIONS: [3, 5, 10, 15] as const,
+  DEFAULT_BREAK_MINUTES: 5,
   /** Guided stand-up + breathing sequence after an enforced pause. */
   ENFORCED_BREAK_SECONDS: 60,
 } as const;

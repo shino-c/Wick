@@ -18,6 +18,7 @@ const DURATIONS = [15, 25, 35, 45];
 export default function DeskScreen() {
   const router = useRouter();
   const [minutes, setMinutes] = React.useState<number>(POMODORO.DEFAULT_MINUTES);
+  const [breakMinutes, setBreakMinutes] = React.useState<number>(POMODORO.DEFAULT_BREAK_MINUTES);
   const [soundscape, setSoundscape] = React.useState<SoundscapeId>('rain');
   const [demoMode, setDemoMode] = React.useState(true);
   const [scanCount, setScanCount] = React.useState(0);
@@ -49,8 +50,8 @@ export default function DeskScreen() {
       <Spacer h={2} />
       <Txt v="body" color={colors.inkSoft}>
         Prop your phone facing you like a desk companion. Wick takes a {FACE.BURST_SECONDS}-second
-        pulse reading every {FACE.BURST_INTERVAL_SECONDS / 60} minutes and moves your break to when
-        you actually need it.
+        pulse reading every {FACE.BURST_INTERVAL_SECONDS} seconds and moves your break to when you
+        actually need it.
       </Txt>
 
       <Spacer h={5} />
@@ -120,6 +121,51 @@ export default function DeskScreen() {
 
       <Spacer h={3} />
 
+      {/* ── Break length ─────────────────────────────────────────── */}
+      <Card>
+        <Row style={{ justifyContent: 'space-between' }}>
+          <Txt v="heading">Break length</Txt>
+          <Badge label={`${breakMinutes} min`} fg={colors.brown} bg={colors.yellow} />
+        </Row>
+        <Spacer h={3} />
+        <Row gap={2}>
+          {POMODORO.BREAK_OPTIONS.map((d) => {
+            const selected = breakMinutes === d;
+            return (
+              <Pressable
+                key={d}
+                onPress={() => setBreakMinutes(d)}
+                accessibilityRole="radio"
+                accessibilityState={{ selected }}
+                style={{
+                  flex: 1,
+                  alignItems: 'center',
+                  paddingVertical: spacing(3),
+                  borderRadius: radius.md,
+                  backgroundColor: selected ? colors.yellow : colors.cream,
+                  borderWidth: 1,
+                  borderColor: selected ? colors.yellowDeep : colors.line,
+                }}
+              >
+                <Txt v="heading" color={selected ? colors.brown : colors.inkSoft}>
+                  {d}
+                </Txt>
+                <Txt v="small" color={colors.inkFaint}>
+                  min
+                </Txt>
+              </Pressable>
+            );
+          })}
+        </Row>
+        <Spacer h={3} />
+        <Txt v="small" color={colors.inkFaint}>
+          Wick decides <Txt v="small" color={colors.inkSoft}>when</Txt> you break, based on your
+          stress trend. How long you rest is always your call.
+        </Txt>
+      </Card>
+
+      <Spacer h={3} />
+
       {/* ── Soundscape ───────────────────────────────────────────── */}
       <Card>
         <Txt v="heading">White Noise & Soundscapes</Txt>
@@ -164,8 +210,8 @@ export default function DeskScreen() {
             <Txt v="heading">Demo cadence</Txt>
             <Spacer h={1} />
             <Txt v="small" color={colors.inkSoft}>
-              Samples every 20 seconds instead of {FACE.BURST_INTERVAL_SECONDS / 60} minutes, so the
-              adaptive break and the enforced pause are visible inside a two-minute demo.
+              Samples every 20 seconds instead of {FACE.BURST_INTERVAL_SECONDS}, so the adaptive
+              break and the enforced pause are visible inside a two-minute demo.
             </Txt>
           </View>
           <Switch
@@ -205,9 +251,10 @@ export default function DeskScreen() {
         <Eyebrow color={colors.onNightSoft}>On-device only</Eyebrow>
         <Spacer h={2} />
         <Txt v="small" color={colors.onNightSoft}>
-          No preview is shown during a session, so nobody walking behind you appears on screen. Only
-          a small centred patch of each frame is read, and each frame becomes a single number before
-          it is released. The camera is switched off completely between readings.
+          You see a live crop of your own face while a reading is taken — the room around you is
+          never drawn. Only pixels inside your face are read, each frame becomes a single number
+          before it is released, and if a second person appears the reading is thrown away. The
+          camera is off between readings.
         </Txt>
       </Card>
 
@@ -224,7 +271,12 @@ export default function DeskScreen() {
         onPress={() =>
           router.push({
             pathname: '/session',
-            params: { minutes: String(minutes), soundscape, demoMode: demoMode ? '1' : '0' },
+            params: {
+              minutes: String(minutes),
+              breakMinutes: String(breakMinutes),
+              soundscape,
+              demoMode: demoMode ? '1' : '0',
+            },
           })
         }
       />

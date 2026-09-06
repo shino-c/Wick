@@ -205,25 +205,67 @@ export function Bar({ pct, color = colors.brown, track = colors.line, height = 6
 
 /* ── Screen header used on every stack screen ─────────────────────── */
 
+/**
+ * Screen header. The circular back button and the wide-tracked centred title
+ * follow the treatment on the baseline screen, so every stack screen in the app
+ * has the same chrome rather than two competing header styles.
+ */
 export function NavBar({ title, onBack, right }: { title: string; onBack?: () => void; right?: React.ReactNode }) {
   return (
-    <Row style={{ justifyContent: 'space-between', marginBottom: spacing(4) }}>
+    <View style={styles.navBar}>
       <View style={{ width: 40 }}>
         {onBack && (
-          <Pressable onPress={onBack} hitSlop={12} accessibilityRole="button" accessibilityLabel="Go back">
-            <Txt v="title" color={colors.ink}>
-              ‹
-            </Txt>
+          <Pressable
+            onPress={onBack}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+            style={({ pressed }) => [styles.backButton, pressed && { opacity: 0.7, transform: [{ scale: 0.96 }] }]}
+          >
+            <Text style={styles.backIcon}>‹</Text>
           </Pressable>
         )}
       </View>
-      <Eyebrow color={colors.inkSoft}>{title}</Eyebrow>
+      <Text style={styles.navTitle}>{title.toUpperCase()}</Text>
       <View style={{ width: 40, alignItems: 'flex-end' }}>{right}</View>
-    </Row>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  navBar: {
+    height: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing(2),
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  backIcon: { fontSize: 32, lineHeight: 34, color: colors.ink, fontWeight: '300' },
+  navTitle: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    textAlign: 'center',
+    color: colors.inkSoft,
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 3,
+  },
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,

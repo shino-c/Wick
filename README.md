@@ -88,7 +88,7 @@ Navigation is expo-router; the file tree under `src/app/` *is* the route table. 
 
 | Route | Screen | Owner |
 | --- | --- | --- |
-| `/` → `/baseline` | Onboarding | Shino |
+| `/` → `/baseline` | Onboarding — Shino's UI, wired to Pillar 3 | shared |
 | `/home` | Home dashboard | Shino |
 | `/recovery` | Recovery engine | Shino — **not built yet, tab 404s** |
 | `/desk` | Desk Mode | Pillar 2 |
@@ -97,7 +97,8 @@ Navigation is expo-router; the file tree under `src/app/` *is* the route table. 
 | `/add-friend` | Invite-code friend flow | Pillar 6 |
 | `/calibrate` | Calibration hub (reached from Desk) | Pillar 3 |
 | `/questionnaire`, `/spot-check`, `/breathing` | Baseline, finger-PPG, breathing | Pillar 3 |
-| `/onboarding` | My baseline screen — **duplicates `/baseline`** | see below |
+| `/challenge` | Challenge detail — join/leave, anonymous join count | Pillar 6 |
+| `/new-challenge` | Create a challenge for your circle | Pillar 6 |
 
 Route files are one-liners that re-export from `src/features/**`, so screens stay plain components
 and are testable without a router.
@@ -133,14 +134,21 @@ refreshing `/summary` shows an empty state rather than a stale session.
 | Spec | Status |
 | --- | --- |
 | Front camera with visible on-screen indicator | ✅ Indicator shows camera **on** only during a burst |
-| Interval-sampled rPPG (12 s burst / 3 min) | ✅ `src/camera/config.ts`, camera fully off between bursts |
-| Adaptive Pomodoro | ✅ Break slides ±2–5 min per reading, bounded 12–45 min |
+| Interval-sampled rPPG (12 s burst / 60 s) | ✅ `src/camera/config.ts`, camera fully off between bursts |
+| Adaptive Pomodoro | ✅ Break slides ±2–5 min per reading, bounded 12–45 min; **break length is the user's choice** (3/5/10/15 min) — Wick decides *when*, never how long |
 | Threshold escalation → enforced pause | ✅ Two consecutive *good-quality* High Stress reads; guided breathing; no skip |
 | White Noise & Soundscapes | ✅ Rain / Ocean / Forest / Fan / Silent, generated loops, volume slider |
 | Post-session calibration prompt | ✅ Spot on / Slightly off / Way off → rolling Personal Accuracy |
 | Frames processed on-device and discarded | ✅ Each frame becomes one number inside the frame-output worklet, then is disposed |
-| 3-second setup check | ✅ Restarts on bad framing, so it's three *consecutive* clean seconds |
+| 3-second setup check | ✅ Requires a detected face, then three *consecutive* clean seconds |
+| Face detection | ✅ VisionCamera's built-in `'face'` object output — gates readings, supplies the ROI, drops a burst if a second person appears |
 | Secondary CV cues | ⚠️ **Movement/fidget index only** (see below) |
+
+**Readings are gated on a detected face.** This is not cosmetic. Sensor noise off any surface, once
+it has been through a 0.7–3.5 Hz bandpass, contains oscillations that peak detection will turn into a
+plausible BPM — an earlier version happily reported a heart rate for an empty chair, because the
+setup check tested only brightness. Now: no face, no reading; face present for under 70% of a burst,
+burst discarded; a second face in frame, burst discarded. The user is told which of those happened.
 
 **The one honest gap:** posture angle, face-touching and jaw tension need a real pose/landmark model.
 Rather than fake them, Desk Mode ships a genuine *movement index* derived from the same ROI signal —
@@ -204,7 +212,7 @@ These were explicit requirements, so here is exactly how each is handled.
 | --- | --- |
 | 12 s burst every 180 s | ~7% duty cycle instead of a continuous 25-minute capture |
 | `isActive={false}` between bursts | The camera hardware is genuinely off, not idling on a hidden preview |
-| ROI + pixel stride 4 | ~16× fewer pixels read per frame than a full-frame mean |
+| Face-box ROI + pixel stride 4 | ~16× fewer pixels read per frame than a full-frame mean |
 | 640×480 @ 30 fps format request | Smallest workable format — least power and least heat |
 | Frame → one float, on the camera thread | No bridge traffic per frame, no per-frame React render |
 | `AppState` teardown | Camera stops the moment the app backgrounds |
@@ -224,19 +232,18 @@ even the derived signal has nowhere to be uploaded to. Microphone permission is 
 
 Three layers, all structural rather than policy:
 
-1. **No preview during a session.** `PREVIEW_HIDDEN` in `src/camera/config.ts`. Desk Mode never draws
-   a camera feed — a live view of the room is the single most likely way somebody behind you ends up
-   in a screenshot or seen over your shoulder. You get a status indicator instead: the same
-   information, none of the exposure. The finger spot check is the exception, and there the lens is
-   pressed against a fingertip.
-2. **A small centred ROI.** Only a 36%×34% patch is ever read. The doorway behind you is never sampled,
-   so a passer-by cannot influence the signal even in principle.
-3. **A stability gate.** The setup check rejects a frame whose ROI mean swings wildly, which is what
-   people moving through the frame looks like.
-
-A face-detector plugin that hard-fails a burst when it sees more than one face is the obvious next
-layer. It's deliberately not in the dependency list: ML Kit is a heavy, brittle dependency to add
-under hackathon time pressure, and the three layers above cover the actual risk.
+1. **Preview cropped to your face.** `PREVIEW_MODE` in `src/camera/config.ts`. Desk Mode shows a small
+   circular crop centred on the detected face box — the room around you is clipped away, not blurred
+   over. Nothing outside your face is ever drawn, so a passer-by can't appear on screen or in a
+   screenshot. An earlier version showed no preview at all; that was right about the risk and wrong
+   about the cost, because it left the user with no way to tell whether they were framed.
+2. **Sampling confined to the face box.** Pixels are read only from inside the detected face, inset
+   18% to stay on skin. The doorway behind you is never sampled, so a passer-by cannot influence the
+   signal even in principle.
+3. **A second face voids the burst.** If the detector sees more than one person, the reading is
+   dropped and the user is told why — rather than quietly averaging two people's skin tones.
+4. **The preview only exists while a burst runs.** For the other 48 seconds of each minute there is
+   no camera and no image on screen at all.
 
 ---
 

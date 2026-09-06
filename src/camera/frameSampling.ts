@@ -94,11 +94,28 @@ export function sampleFrame(frame: any, channel: Channel, roi: Roi, stride: numb
 
 /* ── Framing / quality checks (plain JS, run on the JS thread) ─────── */
 
-export type FramingIssue = 'too_dark' | 'too_bright' | 'no_finger' | 'unstable' | null;
+export type FramingIssue =
+  | 'too_dark'
+  | 'too_bright'
+  | 'no_finger'
+  | 'unstable'
+  | 'no_face'
+  | 'multiple_faces'
+  | null;
 
-/** Setup check for face rPPG: enough light, and a reasonably flat, lit subject. */
-export function checkFaceFraming(samples: FrameSample[]): FramingIssue {
+/**
+ * Setup check for face rPPG.
+ *
+ * Face presence is checked FIRST and is not negotiable. An earlier version
+ * tested only brightness and drift, which meant a well-lit wall passed the
+ * check and the session went on to report a heart rate for it. Light is a
+ * quality condition; a face is a correctness one.
+ */
+export function checkFaceFraming(samples: FrameSample[], faceCount: number): FramingIssue {
+  if (faceCount === 0) return 'no_face';
+  if (faceCount > 1) return 'multiple_faces';
   if (samples.length === 0) return 'unstable';
+
   const brightness = mean(samples.map((s) => s.brightness));
   if (brightness < 45) return 'too_dark';
   if (brightness > 235) return 'too_bright';
@@ -126,6 +143,8 @@ export const FRAMING_MESSAGE: Record<Exclude<FramingIssue, null>, string> = {
   too_bright: 'Too bright — try turning away from the window.',
   no_finger: 'Cover the rear camera and flash fully with your index finger.',
   unstable: 'Hold still and centre your face in frame.',
+  no_face: 'Wick cannot see your face — prop the phone so you are in view.',
+  multiple_faces: 'More than one person in frame. Wick only reads you.',
 };
 
 function mean(v: number[]) {

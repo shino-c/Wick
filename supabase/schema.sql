@@ -306,13 +306,31 @@ create table if not exists challenges (
   title text not null,
   subtitle text not null,
   scheduled_for text,
-  category text not null check (category in ('physical', 'social', 'mental'))
+  category text not null check (category in ('physical', 'social', 'mental')),
+  notes text,
+  -- Null for the three seeded challenges; set for anything a member creates.
+  created_by uuid references auth.users on delete cascade,
+  created_at timestamptz default now()
 );
 
+-- Idempotent upgrade for anyone who ran the earlier version of this file.
+alter table challenges add column if not exists notes text;
+alter table challenges add column if not exists created_by uuid references auth.users on delete cascade;
+alter table challenges add column if not exists created_at timestamptz default now();
+
 alter table challenges enable row level security;
+-- Readable if it is a seeded challenge, yours, or created by someone in your
+-- circle. A stranger's challenge is not your business.
 drop policy if exists "challenges readable" on challenges;
 create policy "challenges readable" on challenges for select
-  using (auth.role() = 'authenticated');
+  using (
+    created_by is null
+    or created_by = auth.uid()
+    or exists (
+      select 1 from friendships f
+      where f.user_id = auth.uid() and f.friend_id = challenges.created_by
+    )
+  );
 
 insert into challenges (id, title, subtitle, scheduled_for, category) values
   ('walk-lakeside', 'Group Walk: Lakeside', 'Active recovery · 30 min', 'Tomorrow, 6:00 PM', 'physical'),
@@ -346,7 +364,10 @@ returns table (
   category text,
   joined_count int,
   circle_size int,
-  joined boolean
+  joined boolean,
+  created_by uuid,
+  created_by_me boolean,
+  notes text
 )
 language plpgsql
 security definer
@@ -384,9 +405,18 @@ begin
     exists (
       select 1 from challenge_participants p
       where p.challenge_id = c.id and p.user_id = target_user_id
-    )
+    ),
+    c.created_by,
+    (c.created_by = target_user_id),
+    c.notes
   from challenges c
-  order by c.category;
+  where c.created_by is null
+     or c.created_by = target_user_id
+     or exists (
+       select 1 from friendships f
+       where f.user_id = target_user_id and f.friend_id = c.created_by
+     )
+  order by c.created_at desc nulls last, c.category;
 end;
 $$;
 
@@ -408,6 +438,54 @@ begin
     insert into challenge_participants (challenge_id, user_id)
     values (toggle_challenge.challenge_id, auth.uid());
   end if;
+end;
+$$;
+
+
+create or replace function public.create_challenge(
+  p_title text,
+  p_subtitle text,
+  p_scheduled_for text,
+  p_category text,
+  p_notes text
+)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  new_id text;
+begin
+  if coalesce(trim(p_title), '') = '' then
+    raise exception 'Title is required';
+  end if;
+
+  new_id := 'ch_' || substr(md5(random()::text || auth.uid()::text), 1, 12);
+
+  insert into challenges (id, title, subtitle, scheduled_for, category, notes, created_by)
+  values (new_id, trim(p_title), p_subtitle, p_scheduled_for, p_category, p_notes, auth.uid());
+
+  -- The creator is in by definition.
+  insert into challenge_participants (challenge_id, user_id)
+  values (new_id, auth.uid()) on conflict do nothing;
+
+  return new_id;
+end;
+$$;
+
+
+create or replace function public.delete_challenge(challenge_id text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Seeded challenges have created_by null and can never be deleted by a client.
+  delete from challenges c
+  where c.id = delete_challenge.challenge_id
+    and c.created_by = auth.uid();
 end;
 $$;
 
@@ -469,4 +547,6 @@ grant execute on function public.accept_friend_request(uuid) to authenticated;
 grant execute on function public.get_circle_summary(uuid)  to authenticated;
 grant execute on function public.list_challenges(uuid)     to authenticated;
 grant execute on function public.toggle_challenge(text)    to authenticated;
+grant execute on function public.create_challenge(text, text, text, text, text) to authenticated;
+grant execute on function public.delete_challenge(text)    to authenticated;
 grant execute on function public.send_circle_support(text) to authenticated;
