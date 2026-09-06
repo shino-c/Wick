@@ -20,6 +20,7 @@ import type {
   PpgScan,
   SelfReport,
   StressScoreRow,
+  SupportNudge,
 } from '@/data/types';
 import { PPGService, type PPGResult, type StressClassification } from './ppgService';
 import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
@@ -29,6 +30,37 @@ import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
  * zone" is a raw individual score wearing a disguise, so we suppress instead.
  */
 export const MIN_CIRCLE_SIZE = 3;
+
+/**
+ * How many recent finger spot checks the RMSSD baseline is built from.
+ *
+ * It used to be a cumulative mean over every scan ever taken, which never
+ * forgets: after three hundred scans, a new one moves the baseline by 0.3%.
+ * That is wrong for the thing being measured — resting HRV genuinely drifts
+ * with sleep, illness, fitness and the season, so a baseline anchored to who
+ * you were three months ago slowly stops describing you.
+ *
+ * Twenty is roughly a fortnight of ordinary use: long enough that a single bad
+ * scan cannot move it much, short enough to follow a real change.
+ */
+export const BASELINE_WINDOW = 20;
+
+/**
+ * Median, not mean.
+ *
+ * One motion-artefact scan that slipped through the quality gate can drag a
+ * twenty-sample mean noticeably. The median of the same twenty barely notices
+ * it, and for a roughly symmetric distribution the two agree anyway — so this
+ * costs nothing and removes a whole class of silent corruption.
+ */
+function rollingBaseline(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return Math.round(median * 100) / 100;
+}
 
 /* ── Pillar 3: baseline, scans, self-reports ──────────────────────── */
 
@@ -70,7 +102,8 @@ export async function getBaseline(): Promise<Baseline> {
 export async function saveScan(
   result: PPGResult,
   source: 'finger' | 'face',
-  classification: StressClassification
+  classification: StressClassification,
+  options: { feedsBaseline?: boolean } = {}
 ): Promise<void> {
   const row = {
     source,
@@ -82,7 +115,10 @@ export async function saveScan(
   };
 
   const feedsBaseline =
-    source === 'finger' && result.signalQuality === 'good' && result.hrvRmssd !== null;
+    (options.feedsBaseline ?? true) &&
+    source === 'finger' &&
+    result.signalQuality === 'good' &&
+    result.hrvRmssd !== null;
 
   if (hasSupabase) {
     const userId = await currentUserId();
@@ -94,13 +130,18 @@ export async function saveScan(
       updated_at: new Date().toISOString(),
     };
     if (feedsBaseline) {
-      const [next, count] = PPGService.updateRmssdBaseline(
-        base.rmssdBaseline,
-        base.calibrationScans,
-        result.hrvRmssd!
-      );
-      patch.rmssd_baseline = next;
-      patch.calibration_scans = count;
+      const { data } = await supabase
+        .from('ppg_scans')
+        .select('hrv_rmssd')
+        .eq('user_id', userId)
+        .eq('source', 'finger')
+        .eq('signal_quality', 'good')
+        .not('hrv_rmssd', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(BASELINE_WINDOW);
+      const values = (data ?? []).map((r) => r.hrv_rmssd as number);
+      patch.rmssd_baseline = rollingBaseline(values);
+      patch.calibration_scans = values.length;
     }
     await supabase.from('baselines').upsert(patch);
     return;
@@ -119,13 +160,12 @@ export async function saveScan(
     });
     db.baseline.scanCount += 1;
     if (feedsBaseline) {
-      const [next, count] = PPGService.updateRmssdBaseline(
-        db.baseline.rmssdBaseline,
-        db.baseline.calibrationScans,
-        result.hrvRmssd!
-      );
-      db.baseline.rmssdBaseline = next;
-      db.baseline.calibrationScans = count;
+      const values = db.scans
+        .filter((sc) => sc.source === 'finger' && sc.signalQuality === 'good' && sc.hrvRmssd !== null)
+        .slice(0, BASELINE_WINDOW)
+        .map((sc) => sc.hrvRmssd as number);
+      db.baseline.rmssdBaseline = rollingBaseline(values);
+      db.baseline.calibrationScans = values.length;
     }
     db.baseline.updatedAt = new Date().toISOString();
   });
@@ -397,6 +437,38 @@ export async function getMyInviteCode(): Promise<string> {
   return (await readDb()).inviteCode;
 }
 
+/**
+ * Your display name, as your circle sees it.
+ *
+ * Anonymous sign-in gives everyone a name like 'student_a1b2c3'. That is right
+ * for privacy and wrong for a circle — two people who just invited each other
+ * cannot tell which row is which, and "who is coming to this meetup" becomes
+ * unanswerable. Nothing here is verified or public: it is a label, visible only
+ * to people who already accepted a code from you.
+ */
+export async function getMyUsername(): Promise<string> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase.from('profiles').select('username').eq('id', userId).single();
+    return data?.username ?? 'you';
+  }
+  return (await readDb()).username;
+}
+
+export async function setMyUsername(name: string): Promise<string> {
+  const cleaned = name.trim();
+  if (cleaned.length < 2) throw new Error('Pick a name of at least 2 characters');
+  if (hasSupabase) {
+    const { data, error } = await supabase.rpc('set_username', { new_username: cleaned });
+    if (error) throw new Error(error.message);
+    return data as string;
+  }
+  await writeDb((db) => {
+    db.username = cleaned;
+  });
+  return cleaned;
+}
+
 export async function sendFriendRequestByCode(inviteCode: string): Promise<void> {
   const code = inviteCode.trim().toUpperCase();
   if (!code) throw new Error('Enter an invite code');
@@ -536,11 +608,13 @@ export async function listChallenges(): Promise<ChallengeRow[]> {
       kind: r.kind ?? 'solo',
       location: r.location ?? null,
       capacity: r.capacity ?? null,
+      verifyWith: (r.verify_with ?? null) as ChallengeRow['verifyWith'],
       joinedCount: r.joined_count,
       completedCount: r.completed_count ?? 0,
       circleSize: r.circle_size,
       joined: r.joined,
       completedByMe: r.completed_by_me ?? false,
+      verifiedByMe: r.verified_by_me ?? false,
       createdBy: r.created_by ?? null,
       createdByMe: r.created_by_me ?? false,
       notes: r.notes ?? null,
@@ -581,6 +655,7 @@ export async function createChallenge(input: NewChallenge): Promise<string> {
       p_location: input.location,
       p_capacity: input.capacity,
       p_notes: input.notes,
+      p_verify_with: input.verifyWith,
     });
     if (error) throw error;
     return data as string;
@@ -596,15 +671,19 @@ export async function createChallenge(input: NewChallenge): Promise<string> {
       kind: input.kind,
       location: input.location,
       capacity: input.capacity,
+      verifyWith: input.verifyWith,
       joinedCount: 1,
       completedCount: 0,
       circleSize: db.friends.length + 1,
       joined: true,
       completedByMe: false,
+      verifiedByMe: false,
       createdBy: 'me',
       createdByMe: true,
       notes: input.notes,
-      participants: [{ userId: 'me', username: 'You', completed: false, isMe: true }],
+      participants: [
+        { userId: 'me', username: 'You', completed: false, verified: false, isMe: true },
+      ],
     });
   });
   return id;
@@ -623,6 +702,7 @@ export async function updateChallenge(id: string, input: NewChallenge): Promise<
       p_location: input.location,
       p_capacity: input.capacity,
       p_notes: input.notes,
+      p_verify_with: input.verifyWith,
     });
     if (error) throw error;
     return;
@@ -638,6 +718,7 @@ export async function updateChallenge(id: string, input: NewChallenge): Promise<
       kind: input.kind,
       location: input.location,
       capacity: input.capacity,
+      verifyWith: input.verifyWith,
       notes: input.notes,
     });
   });
@@ -650,11 +731,16 @@ export async function updateChallenge(id: string, input: NewChallenge): Promise<
  * biometric loop, but it cannot verify that four friends walked round a lake,
  * and pretending otherwise would be a worse lie than trusting them.
  */
-export async function completeChallenge(id: string, done: boolean): Promise<void> {
+export async function completeChallenge(
+  id: string,
+  done: boolean,
+  verified = false
+): Promise<void> {
   if (hasSupabase) {
     const { error } = await supabase.rpc('complete_challenge', {
       challenge_id: id,
       p_done: done,
+      p_verified: verified,
     });
     if (error) throw error;
     return;
@@ -663,8 +749,12 @@ export async function completeChallenge(id: string, done: boolean): Promise<void
     const ch = db.challenges.find((c) => c.id === id);
     if (!ch) return;
     const me = ch.participants.find((p) => p.isMe);
-    if (me) me.completed = done;
+    if (me) {
+      me.completed = done;
+      me.verified = done && verified;
+    }
     ch.completedByMe = done;
+    ch.verifiedByMe = done && verified;
     ch.completedCount = ch.participants.filter((p) => p.completed).length;
   });
 }
@@ -694,10 +784,17 @@ export async function toggleChallenge(id: string): Promise<void> {
     }
     ch.joined = !ch.joined;
     if (ch.joined) {
-      ch.participants.push({ userId: 'me', username: 'You', completed: false, isMe: true });
+      ch.participants.push({
+        userId: 'me',
+        username: 'You',
+        completed: false,
+        verified: false,
+        isMe: true,
+      });
     } else {
       ch.participants = ch.participants.filter((p) => !p.isMe);
       ch.completedByMe = false;
+      ch.verifiedByMe = false;
     }
     ch.joinedCount = ch.participants.length;
     ch.completedCount = ch.participants.filter((p) => p.completed).length;
@@ -716,7 +813,92 @@ export async function sendCircleSupport(message: string): Promise<number> {
     if (error) throw error;
     return data ?? 0;
   }
-  return (await readDb()).friends.length;
+  // Demo store: there are no other devices, so the nudge is delivered to this
+  // one. Without it the send half of the loop would be walkable and the receive
+  // half would not, which is exactly the gap this pair of functions closes.
+  const db = await readDb();
+  const reach = db.friends.length;
+  if (reach > 0) {
+    await writeDb((d) => {
+      d.nudges.unshift({
+        id: uid(),
+        body: message,
+        createdAt: new Date().toISOString(),
+        seenAt: null,
+      });
+    });
+  }
+  return reach;
+}
+
+/**
+ * Support that arrived for you.
+ *
+ * The other half of sendCircleSupport, which until now wrote rows nothing ever
+ * read: you could send encouragement and nobody could receive it.
+ *
+ * There is no sender on these, by design and in both directions. The sender was
+ * never told who was struggling; the recipient is never told who reached out.
+ * What survives the anonymity is the only part that actually helps — that
+ * somebody in your circle thought of you.
+ */
+export async function listSupportNudges(limit = 20): Promise<SupportNudge[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('support_nudges')
+      .select('id, body, created_at, seen_at')
+      .eq('recipient_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    return (data ?? []).map((r) => ({
+      id: r.id,
+      body: r.body,
+      createdAt: r.created_at,
+      seenAt: r.seen_at,
+    }));
+  }
+  return (await readDb()).nudges.slice(0, limit);
+}
+
+/** Marks everything currently unseen as seen. */
+export async function markNudgesSeen(): Promise<void> {
+  const now = new Date().toISOString();
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    await supabase
+      .from('support_nudges')
+      .update({ seen_at: now })
+      .eq('recipient_id', userId)
+      .is('seen_at', null);
+    return;
+  }
+  await writeDb((db) => {
+    db.nudges.forEach((n) => {
+      if (!n.seenAt) n.seenAt = now;
+    });
+  });
+}
+
+/**
+ * Leaves a circle, in both directions.
+ *
+ * Symmetrical because a circle is a mutual arrangement — a one-sided version
+ * would leave the other person still seeing someone who has gone. Silent
+ * because a "X removed you" notification turns a quiet boundary into a
+ * confrontation, and that is precisely what keeps people in circles they want
+ * out of. Nothing but the link is deleted; neither side ever had access to the
+ * other's readings in the first place.
+ */
+export async function removeFriend(friendId: string): Promise<void> {
+  if (hasSupabase) {
+    const { error } = await supabase.rpc('remove_friend', { other_user_id: friendId });
+    if (error) throw error;
+    return;
+  }
+  await writeDb((db) => {
+    db.friends = db.friends.filter((f) => f.friendId !== friendId);
+  });
 }
 
 /** True when at least one friend in the circle is currently flagged as overloaded. */

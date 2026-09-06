@@ -5,7 +5,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing, type as typeTokens } from '@/theme';
 import { createChallenge, getChallenge, updateChallenge } from '@/services/repository';
-import type { ChallengeCategory, ChallengeKind } from '@/data/types';
+import type { ChallengeCategory, ChallengeKind, ChallengeVerification } from '@/data/types';
 import {
   combine,
   DAY_PRESETS,
@@ -47,6 +47,32 @@ const KINDS: { id: ChallengeKind; label: string; blurb: string }[] = [
  * number they actually want.
  */
 const CAPACITY_PRESETS = [4, 6, 10];
+
+/**
+ * How a challenge can prove it happened.
+ *
+ * Only offered for solo challenges, because it is only honest there. Wick can
+ * witness you sitting still and breathing; it cannot witness four friends
+ * walking round a lake, and a proxy for that — a step count, a location ping —
+ * would be a measurement of something other than the thing being claimed.
+ */
+const VERIFICATION: { id: ChallengeVerification; label: string; blurb: string }[] = [
+  {
+    id: null,
+    label: 'On your word',
+    blurb: 'People tick it off themselves. Right for anything that happens away from the phone.',
+  },
+  {
+    id: 'breathing',
+    label: 'A breathing check',
+    blurb: 'Finishing the guided breathing completes it, and Wick records what it did to their HRV.',
+  },
+  {
+    id: 'spot_check',
+    label: 'A finger spot check',
+    blurb: 'A 45-second pulse reading completes it. Proves someone actually stopped and sat still.',
+  },
+];
 const DAYS_AHEAD = 14;
 
 /**
@@ -68,6 +94,7 @@ export default function CreateChallengeScreen() {
   const [legacyWhen, setLegacyWhen] = React.useState<string | null>(null);
   const [capacity, setCapacity] = React.useState<number | null>(6);
   const [capacityText, setCapacityText] = React.useState('6');
+  const [verifyWith, setVerifyWith] = React.useState<ChallengeVerification>(null);
   const [busy, setBusy] = React.useState(false);
   const [loading, setLoading] = React.useState(editing);
   const [error, setError] = React.useState<string | null>(null);
@@ -88,6 +115,7 @@ export default function CreateChallengeScreen() {
         setLegacyWhen(parsed.legacy);
         setCapacity(existing.capacity);
         setCapacityText(existing.capacity === null ? '' : String(existing.capacity));
+        setVerifyWith(existing.verifyWith);
       }
       setLoading(false);
     })();
@@ -126,6 +154,9 @@ export default function CreateChallengeScreen() {
         location: kind === 'meetup' ? location.trim() : null,
         capacity,
         notes: notes.trim() || null,
+        // A meetup is never self-verifying: whatever the creator picked while
+        // the form was in solo mode must not survive the switch.
+        verifyWith: kind === 'meetup' ? null : verifyWith,
       };
       if (id) {
         await updateChallenge(id, payload);
@@ -457,6 +488,48 @@ export default function CreateChallengeScreen() {
             : 'Rarely needed for something everyone does in their own space.'}
         </Txt>
       </Card>
+
+      {kind === 'solo' && (
+        <>
+          <Spacer h={3} />
+          <Card>
+            <Eyebrow>How it counts as done</Eyebrow>
+            <Spacer h={3} />
+            {VERIFICATION.map((v) => {
+              const selected = verifyWith === v.id;
+              return (
+                <Pressable
+                  key={String(v.id)}
+                  onPress={() => setVerifyWith(v.id)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  style={{
+                    padding: spacing(3.5),
+                    borderRadius: radius.md,
+                    marginBottom: spacing(2),
+                    backgroundColor: selected ? colors.yellow : colors.cream,
+                    borderWidth: 1,
+                    borderColor: selected ? colors.yellowDeep : colors.line,
+                  }}
+                >
+                  <Txt v="heading" color={selected ? colors.brown : colors.ink}>
+                    {v.label}
+                  </Txt>
+                  <Spacer h={1} />
+                  <Txt v="small" color={selected ? colors.brownSoft : colors.inkFaint}>
+                    {v.blurb}
+                  </Txt>
+                </Pressable>
+              );
+            })}
+            <Spacer h={2} />
+            <Txt v="small" color={colors.inkFaint}>
+              A measured completion shows a small tick. A self-reported one does not. Neither is
+              worth more — they are just different claims, so Wick does not blur them together.
+            </Txt>
+          </Card>
+        </>
+      )}
 
       {error && (
         <>

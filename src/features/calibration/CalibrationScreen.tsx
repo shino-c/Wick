@@ -20,6 +20,7 @@ import {
 import { computeTrendVelocity, type TrendVelocity } from '@/services/trendService';
 import { stressBucket, type FusionResult } from '@/services/fusionService';
 import type { Baseline, PpgScan } from '@/data/types';
+import BottomNavigation from '@/components/bottombar';
 
 export default function CalibrationScreen() {
   const router = useRouter();
@@ -82,8 +83,11 @@ export default function CalibrationScreen() {
   const scansLeft = Math.max(0, BASELINE_MIN_SCANS - scanCount);
 
   return (
-    <Screen>
-      <NavBar title="Calibrate" onBack={() => router.back()} />
+    // Reachable two ways: as the Recovery tab (replace, so there is nothing
+    // behind it) and pushed from Desk Mode. The back arrow only appears when
+    // there is somewhere to go back to.
+    <Screen footer={<BottomNavigation activeTab="Recovery" router={router} />}>
+      <NavBar title="Calibrate" onBack={router.canGoBack() ? () => router.back() : undefined} />
 
       {/* ── Fused read ────────────────────────────────────────────── */}
       {fusion?.fusedScore != null && <FusedCard fusion={fusion} />}

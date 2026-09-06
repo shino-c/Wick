@@ -24,6 +24,12 @@ export interface SimProfile {
 
 export const SIM_PROFILES = {
   relaxed: { bpm: 66, jitterMs: 62, noise: 0.25 },
+  /**
+   * Paced breathing at ~5.5 breaths/min. Respiratory sinus arrhythmia is at its
+   * maximum here, so beat-to-beat interval wander is large and heart rate sits
+   * a little lower — which is exactly what a real breathing segment produces.
+   */
+  breathing: { bpm: 62, jitterMs: 95, noise: 0.25 },
   neutral: { bpm: 74, jitterMs: 38, noise: 0.35 },
   strained: { bpm: 88, jitterMs: 16, noise: 0.5 },
   noisy: { bpm: 78, jitterMs: 30, noise: 6 },

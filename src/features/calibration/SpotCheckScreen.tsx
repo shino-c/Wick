@@ -1,6 +1,6 @@
 import React from 'react';
 import { View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Badge, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Ring, Sparkline } from '@/components/charts';
@@ -11,6 +11,7 @@ import { FRAMING_MESSAGE } from '@/camera/frameSampling';
 import { useFingerScan } from '@/camera/useFingerScan';
 import { BASELINE_MIN_SCANS, PPGService, type StressClassification } from '@/services/ppgService';
 import {
+  completeChallenge,
   getBaseline,
   recomputeFusedScore,
   saveAccuracyFeedback,
@@ -20,6 +21,10 @@ import type { AccuracyVerdict } from '@/data/types';
 
 export default function SpotCheckScreen() {
   const router = useRouter();
+  // Arriving from a challenge that can be proved by a spot check. Completing
+  // the scan completes the challenge, and marks it as measured rather than
+  // self-reported.
+  const { challenge } = useLocalSearchParams<{ challenge?: string }>();
   const scan = useFingerScan('neutral');
   const [baselineRmssd, setBaselineRmssd] = React.useState<number | null>(null);
   const [scanCount, setScanCount] = React.useState(0);
@@ -53,10 +58,15 @@ export default function SpotCheckScreen() {
     (async () => {
       await saveScan(scan.result!, 'finger', c);
       await recomputeFusedScore();
+      // Only a usable reading counts as proof. A discarded scan proves the
+      // person held their finger somewhere, not that they took a break.
+      if (challenge && scan.result!.signalQuality === 'good') {
+        await completeChallenge(challenge, true, true);
+      }
       const b = await getBaseline();
       setScanCount(b.calibrationScans);
     })();
-  }, [baselineRmssd, scan.phase, scan.result]);
+  }, [baselineRmssd, challenge, scan.phase, scan.result]);
 
   const restart = () => {
     saved.current = false;
@@ -80,6 +90,7 @@ export default function SpotCheckScreen() {
       {scan.phase === 'done' && scan.result ? (
         <ResultView
           result={scan.result}
+          forChallenge={Boolean(challenge)}
           classification={classification}
           verdict={verdict}
           onVerdict={recordVerdict}
@@ -225,6 +236,7 @@ function CaptureView({
 
 function ResultView({
   result,
+  forChallenge,
   classification,
   verdict,
   onVerdict,
@@ -232,6 +244,7 @@ function ResultView({
   onDone,
 }: {
   result: NonNullable<ReturnType<typeof useFingerScan>['result']>;
+  forChallenge: boolean;
   classification: StressClassification | null;
   verdict: AccuracyVerdict | null;
   onVerdict: (v: AccuracyVerdict) => void;
@@ -356,6 +369,19 @@ function ResultView({
           </>
         )}
       </Card>
+
+      {forChallenge && (
+        <>
+          <Spacer h={3} />
+          <View
+            style={{ backgroundColor: colors.calmWash, borderRadius: radius.sm, padding: spacing(3) }}
+          >
+            <Txt v="small" color={colors.calm}>
+              ✓✓ Your challenge is marked done, with this reading attached.
+            </Txt>
+          </View>
+        </>
+      )}
 
       <Spacer h={4} />
       <Button label="Done" onPress={onDone} />

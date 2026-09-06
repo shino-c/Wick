@@ -16,7 +16,7 @@ export default function BottomNavigation({
   const tabs: { name: TabName; route: string; activeIcon: string; inactiveIcon: string }[] = [
     {
       name: 'Home',
-      route: '/',
+      route: '/home',
       activeIcon: 'home',
       inactiveIcon: 'home-outline',
     },
@@ -28,7 +28,8 @@ export default function BottomNavigation({
     },
     {
       name: 'Recovery',
-      route: '/recovery',
+      // '/recovery' was never a route. Tapping this did nothing at all.
+      route: '/calibrate',
       activeIcon: 'heart-pulse',
       inactiveIcon: 'heart-pulse',
     },
@@ -40,10 +41,24 @@ export default function BottomNavigation({
     },
   ];
 
-  const handlePress = (route: string) => {
-    if (router) {
-      router.push(route);
-    }
+  /**
+   * `replace`, not `push`.
+   *
+   * A tab bar names the destinations you can be at; a stack names how you got
+   * somewhere. Pushing meant every tap stacked another screen on top of the
+   * last, so Social opened *over* Desk rather than replacing it — three taps
+   * around the bar left three screens on the stack, the back gesture retraced
+   * your tab history, and the bar stopped describing where you were. Replacing
+   * keeps the stack one deep, which is what a tab actually is.
+   *
+   * A real expo-router `(tabs)` group would be better still: it would keep each
+   * tab's own scroll position and its own nested history. That is a change to
+   * the route tree rather than to this component, so it is left alone here.
+   */
+  const handlePress = (route: string, isActive: boolean) => {
+    // Re-tapping the tab you are on should do nothing, not remount the screen.
+    if (!router || isActive) return;
+    router.replace(route);
   };
 
   return (
@@ -54,7 +69,9 @@ export default function BottomNavigation({
         return (
           <Pressable
             key={tab.name}
-            onPress={() => handlePress(tab.route)}
+            onPress={() => handlePress(tab.route, isActive)}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: isActive }}
             style={({ pressed }) => [
               styles.tabItem,
               isActive && styles.activeTabItem,

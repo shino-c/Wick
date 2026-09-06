@@ -3,7 +3,6 @@ import { Pressable, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Badge, Bar, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
-import { DotWeek } from '@/components/charts';
 import { colors, radius, spacing } from '@/theme';
 import {
   acceptFriendRequest,
@@ -12,11 +11,19 @@ import {
   getFriends,
   getIncomingRequests,
   listChallenges,
+  listSupportNudges,
+  markNudgesSeen,
   MIN_CIRCLE_SIZE,
   sendCircleSupport,
   toggleChallenge,
 } from '@/services/repository';
-import type { ChallengeRow, CircleSummary, FriendSummary, IncomingRequest } from '@/data/types';
+import type {
+  ChallengeRow,
+  CircleSummary,
+  FriendSummary,
+  IncomingRequest,
+  SupportNudge,
+} from '@/data/types';
 import BottomNavigation from '@/components/bottombar';
 import { formatSchedule, isPast } from './scheduling';
 
@@ -27,18 +34,21 @@ export default function CirclesScreen() {
   const [requests, setRequests] = React.useState<IncomingRequest[]>([]);
   const [challenges, setChallenges] = React.useState<ChallengeRow[]>([]);
   const [sent, setSent] = React.useState<string | null>(null);
+  const [nudges, setNudges] = React.useState<SupportNudge[]>([]);
 
   const load = React.useCallback(async () => {
-    const [s, f, r, c] = await Promise.all([
+    const [s, f, r, c, n] = await Promise.all([
       getCircleSummary(),
       getFriends(),
       getIncomingRequests(),
       listChallenges(),
+      listSupportNudges(),
     ]);
     setSummary(s);
     setFriends(f);
     setRequests(r);
     setChallenges(c);
+    setNudges(n);
   }, []);
 
   useFocusEffect(
@@ -115,6 +125,74 @@ export default function CirclesScreen() {
         </>
       )}
 
+      {/* ── Support that arrived for you ──────────────────────────── */}
+      {nudges.length > 0 && (
+        <>
+          <Card
+            style={
+              nudges.some((n) => !n.seenAt)
+                ? { backgroundColor: colors.calmWash, borderColor: colors.calm }
+                : undefined
+            }
+          >
+            <Row style={{ justifyContent: 'space-between' }}>
+              <Row gap={2}>
+                <Txt v="body">💛</Txt>
+                <Txt v="heading">From your circle</Txt>
+              </Row>
+              {nudges.some((n) => !n.seenAt) && (
+                <Badge
+                  label={`${nudges.filter((n) => !n.seenAt).length} new`}
+                  fg={colors.calm}
+                  bg={colors.surface}
+                />
+              )}
+            </Row>
+            <Spacer h={3} />
+            {nudges.slice(0, 3).map((n, i) => (
+              <View key={n.id}>
+                <Row style={{ justifyContent: 'space-between' }}>
+                  <Txt v="body" color={n.seenAt ? colors.inkSoft : colors.ink}>
+                    “{n.body}”
+                  </Txt>
+                  <Txt v="small" color={colors.inkFaint}>
+                    {timeAgo(n.createdAt)}
+                  </Txt>
+                </Row>
+                {i < Math.min(nudges.length, 3) - 1 && (
+                  <View
+                    style={{ height: 1, backgroundColor: colors.line, marginVertical: spacing(3) }}
+                  />
+                )}
+              </View>
+            ))}
+            <Spacer h={4} />
+            {/* No sender, in both directions. Whoever sent this was never told
+                who in their circle was struggling, and you are never told who
+                reached out — which is what makes it safe to send and safe to
+                receive. What survives the anonymity is the part that helps. */}
+            <Txt v="small" color={colors.inkFaint}>
+              Someone in your circle sent this. Wick will not tell you who, and it never told them
+              who it was going to.
+            </Txt>
+            {nudges.some((n) => !n.seenAt) && (
+              <>
+                <Spacer h={3} />
+                <Button
+                  label="Thanks — clear these"
+                  variant="soft"
+                  onPress={async () => {
+                    await markNudgesSeen();
+                    setNudges(await listSupportNudges());
+                  }}
+                />
+              </>
+            )}
+          </Card>
+          <Spacer h={3} />
+        </>
+      )}
+
       {/* ── Circles Pulse ─────────────────────────────────────────── */}
       <Card>
         <Row style={{ justifyContent: 'space-between' }}>
@@ -139,8 +217,6 @@ export default function CirclesScreen() {
               <Txt v="body" color={colors.inkSoft}>
                 friends in your circle are in the Red Zone right now.
               </Txt>
-              <Spacer h={4} />
-              <DotWeek tones={weekTones(summary)} />
               <Spacer h={4} />
               <Row style={{ justifyContent: 'space-between' }}>
                 <Eyebrow>Autonomic nervous system capacity</Eyebrow>
@@ -209,11 +285,18 @@ export default function CirclesScreen() {
       {/* ── Shared challenges ─────────────────────────────────────── */}
       <Row style={{ justifyContent: 'space-between' }}>
         <Txt v="heading">Shared Challenges</Txt>
-        <Pressable onPress={() => router.push('/new-challenge')} accessibilityRole="button">
-          <Txt v="small" color={colors.brown}>
-            + New
-          </Txt>
-        </Pressable>
+        <Row gap={4}>
+          <Pressable onPress={() => router.push('/my-challenges')} accessibilityRole="button">
+            <Txt v="small" color={colors.brown}>
+              Yours
+            </Txt>
+          </Pressable>
+          <Pressable onPress={() => router.push('/new-challenge')} accessibilityRole="button">
+            <Txt v="small" color={colors.brown}>
+              + New
+            </Txt>
+          </Pressable>
+        </Row>
       </Row>
       <Spacer h={3} />
 
@@ -296,6 +379,12 @@ export default function CirclesScreen() {
         onPress={() => router.push('/new-challenge')}
       />
       <Spacer h={3} />
+      <Button
+        label="What you have joined"
+        variant="ghost"
+        onPress={() => router.push('/my-challenges')}
+      />
+      <Spacer h={3} />
 
       <Spacer h={2} />
       <Button label="Add a friend" variant="ghost" onPress={() => router.push('/add-friend')} />
@@ -323,15 +412,23 @@ function SuppressedPulse({ friendCount, onAdd }: { friendCount: number; onAdd: (
   );
 }
 
-/** Weekly dot grid. Deterministic from the aggregate — never per-friend data. */
-function weekTones(summary: CircleSummary): string[] {
-  const ratio = summary.totalFriends ? (summary.redZoneCount ?? 0) / summary.totalFriends : 0;
-  return Array.from({ length: 7 }, (_, i) => {
-    const load = ratio * (0.6 + 0.4 * Math.sin((i / 6) * Math.PI));
-    if (load > 0.5) return colors.alert;
-    if (load > 0.25) return colors.warn;
-    return colors.calm;
-  });
+/*
+ * The seven-day dot grid used to live here. It generated a week of colours from
+ * today's single ratio through a sine wave — it read as history and was
+ * decoration, in a card whose whole claim is that the numbers on it are real.
+ * Removed rather than restyled. It comes back when there is a stored daily
+ * aggregate to draw, which needs a server-side rollup that respects the same
+ * k-anonymity floor as the rest of this card.
+ */
+
+/** "3m ago" / "2d ago". Nudges are about recency, not timestamps. */
+function timeAgo(iso: string): string {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
 }
 
 function categoryIcon(category: ChallengeRow['category']) {

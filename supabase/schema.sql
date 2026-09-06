@@ -328,6 +328,21 @@ alter table challenges add column if not exists kind text not null default 'solo
 alter table challenges add column if not exists location text;
 alter table challenges add column if not exists capacity int check (capacity is null or capacity > 0);
 
+-- How completion can be proved, if it can be at all.
+--   'breathing'   -> finish a guided breathing session; Wick sees the HRV change
+--   'spot_check'  -> take a finger spot check inside the challenge window
+--   null          -> nothing to measure. A lakeside walk with four friends is
+--                    not something a phone camera can witness, and inventing a
+--                    proxy for it would be worse than trusting people.
+alter table challenges add column if not exists verify_with text
+  check (verify_with is null or verify_with in ('breathing', 'spot_check'));
+
+-- Whether this person's completion was witnessed by a measurement, rather than
+-- self-reported. Both are valid; they are simply not the same claim, so they
+-- are stored and displayed as different things.
+alter table challenge_participants add column if not exists verified boolean not null default false;
+alter table challenge_participants add column if not exists completed_at timestamptz;
+
 alter table challenges enable row level security;
 -- Readable if it is a seeded challenge, yours, or created by someone in your
 -- circle. A stranger's challenge is not your business.
@@ -392,11 +407,13 @@ returns table (
   kind text,
   location text,
   capacity int,
+  verify_with text,
   joined_count int,
   completed_count int,
   circle_size int,
   joined boolean,
   completed_by_me boolean,
+  verified_by_me boolean,
   created_by uuid,
   created_by_me boolean,
   notes text,
@@ -437,6 +454,7 @@ begin
     c.kind,
     c.location,
     c.capacity,
+    c.verify_with,
     (select count(*)::int from visible_participants vp where vp.challenge_id = c.id),
     (select count(*)::int from visible_participants vp
       where vp.challenge_id = c.id and vp.completed_at is not null),
@@ -449,6 +467,10 @@ begin
       select 1 from challenge_participants p
       where p.challenge_id = c.id and p.user_id = target_user_id and p.completed_at is not null
     ),
+    exists (
+      select 1 from challenge_participants p
+      where p.challenge_id = c.id and p.user_id = target_user_id and p.verified
+    ),
     c.created_by,
     (c.created_by = target_user_id),
     c.notes,
@@ -459,6 +481,7 @@ begin
             'userId', vp.user_id,
             'username', pr.username,
             'completed', vp.completed_at is not null,
+            'verified', vp.verified,
             'isMe', vp.user_id = target_user_id
           )
           order by (vp.user_id = target_user_id) desc, vp.joined_at
@@ -522,7 +545,8 @@ create or replace function public.create_challenge(
   p_kind text,
   p_location text,
   p_capacity int,
-  p_notes text
+  p_notes text,
+  p_verify_with text default null
 )
 returns text
 language plpgsql
@@ -538,9 +562,9 @@ begin
 
   new_id := 'ch_' || substr(md5(random()::text || auth.uid()::text), 1, 12);
 
-  insert into challenges (id, title, subtitle, scheduled_for, category, kind, location, capacity, notes, created_by)
+  insert into challenges (id, title, subtitle, scheduled_for, category, kind, location, capacity, notes, verify_with, created_by)
   values (new_id, trim(p_title), p_subtitle, p_scheduled_for, p_category,
-          coalesce(p_kind, 'solo'), p_location, p_capacity, p_notes, auth.uid());
+          coalesce(p_kind, 'solo'), p_location, p_capacity, p_notes, p_verify_with, auth.uid());
 
   -- The creator is in by definition.
   insert into challenge_participants (challenge_id, user_id)
@@ -560,7 +584,8 @@ create or replace function public.update_challenge(
   p_kind text,
   p_location text,
   p_capacity int,
-  p_notes text
+  p_notes text,
+  p_verify_with text default null
 )
 returns void
 language plpgsql
@@ -576,7 +601,8 @@ begin
     kind = coalesce(p_kind, c.kind),
     location = p_location,
     capacity = p_capacity,
-    notes = p_notes
+    notes = p_notes,
+    verify_with = p_verify_with
   where c.id = update_challenge.challenge_id
     and c.created_by = auth.uid();
 
@@ -590,7 +616,11 @@ $$;
 -- Self-reported. Wick can verify a breathing break from the user's own vitals;
 -- it cannot verify that four friends walked round a lake, and inventing a proof
 -- would be a worse lie than trusting them.
-create or replace function public.complete_challenge(challenge_id text, p_done boolean)
+create or replace function public.complete_challenge(
+  challenge_id text,
+  p_done boolean,
+  p_verified boolean default false
+)
 returns void
 language plpgsql
 security definer
@@ -598,7 +628,11 @@ set search_path = public
 as $$
 begin
   update challenge_participants p
-  set completed_at = case when p_done then now() else null end
+  set completed_at = case when p_done then now() else null end,
+      -- Verification is a property of THIS completion. Un-completing clears it,
+      -- so a verified tick can never be left behind on a challenge the person
+      -- later says they did not do.
+      verified = case when p_done then p_verified else false end
   where p.challenge_id = complete_challenge.challenge_id
     and p.user_id = auth.uid();
 
@@ -637,11 +671,87 @@ create table if not exists support_nudges (
   created_at timestamptz default now()
 );
 
+-- A nudge nobody can mark as read is a notification that never goes away.
+alter table support_nudges add column if not exists seen_at timestamptz;
+
 alter table support_nudges enable row level security;
 
 drop policy if exists "see nudges sent to me" on support_nudges;
 create policy "see nudges sent to me" on support_nudges for select
   using (auth.uid() = recipient_id);
+
+-- Recipients may mark their own nudges seen. They may not write new ones —
+-- only send_circle_support() can, which is what keeps the sender anonymous and
+-- stops anyone from addressing a nudge at a specific person.
+drop policy if exists "mark my nudges seen" on support_nudges;
+create policy "mark my nudges seen" on support_nudges for update
+  using (auth.uid() = recipient_id) with check (auth.uid() = recipient_id);
+
+
+/**
+ * Removes a friendship in BOTH directions.
+ *
+ * Deliberately symmetrical and deliberately silent. A circle is a mutual
+ * arrangement, so a one-sided version would leave the other person still
+ * "seeing" someone who has left. And no notification is sent: telling someone
+ * they were removed turns a quiet boundary into a confrontation, which is
+ * exactly the thing that makes people stay in circles they want out of.
+ *
+ * The removal is not concealed either — the person simply disappears from the
+ * other side's circle list, the same way it works when you stop following
+ * someone. Nothing is deleted beyond the link: no scans, no history, no
+ * challenges, and neither side ever had access to the other's readings anyway.
+ */
+/**
+ * Sets your own display name.
+ *
+ * Every account starts as 'student_a1b2c3', which is fine for privacy and
+ * useless for a circle: two people who invited each other cannot tell which row
+ * is which. A name people choose is what makes "who is coming to this meetup"
+ * answerable. It is not an identity claim and nothing is verified — it is a
+ * label your own friends see, and only they see it.
+ */
+create or replace function public.set_username(new_username text)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  cleaned text;
+begin
+  cleaned := trim(new_username);
+  if length(cleaned) < 2 or length(cleaned) > 24 then
+    raise exception 'Pick a name between 2 and 24 characters';
+  end if;
+
+  update profiles set username = cleaned where id = auth.uid();
+  return cleaned;
+exception
+  when unique_violation then
+    raise exception 'Somebody already uses that name — try another';
+end;
+$$;
+
+
+create or replace function public.remove_friend(other_user_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  delete from friendships
+   where (user_id = auth.uid() and friend_id = other_user_id)
+      or (user_id = other_user_id and friend_id = auth.uid());
+
+  -- Clear any pending request between the two, so removing someone does not
+  -- leave a stale invitation that quietly re-adds them.
+  delete from friend_requests
+   where (requester_id = auth.uid() and recipient_id = other_user_id)
+      or (requester_id = other_user_id and recipient_id = auth.uid());
+end;
+$$;
 
 
 create or replace function public.send_circle_support(body text)
@@ -681,8 +791,10 @@ grant execute on function public.accept_friend_request(uuid) to authenticated;
 grant execute on function public.get_circle_summary(uuid)  to authenticated;
 grant execute on function public.list_challenges(uuid)     to authenticated;
 grant execute on function public.toggle_challenge(text)    to authenticated;
-grant execute on function public.create_challenge(text, text, text, text, text, text, int, text) to authenticated;
-grant execute on function public.update_challenge(text, text, text, text, text, text, text, int, text) to authenticated;
-grant execute on function public.complete_challenge(text, boolean) to authenticated;
+grant execute on function public.create_challenge(text, text, text, text, text, text, int, text, text) to authenticated;
+grant execute on function public.update_challenge(text, text, text, text, text, text, text, int, text, text) to authenticated;
+grant execute on function public.complete_challenge(text, boolean, boolean) to authenticated;
+grant execute on function public.remove_friend(uuid) to authenticated;
+grant execute on function public.set_username(text) to authenticated;
 grant execute on function public.delete_challenge(text)    to authenticated;
 grant execute on function public.send_circle_support(text) to authenticated;

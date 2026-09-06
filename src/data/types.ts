@@ -108,8 +108,22 @@ export interface Participant {
   userId: string;
   username: string;
   completed: boolean;
+  /** True when a measurement witnessed the completion, not just a tap. */
+  verified: boolean;
   isMe: boolean;
 }
+
+/**
+ * How a challenge can prove it was done.
+ *
+ * 'breathing'  — finish a guided breathing session. Wick reads the HRV change
+ *                from the finger sensor, so "I did it" carries evidence.
+ * 'spot_check' — take a finger spot check. Proves you stopped and sat still.
+ * null         — nothing measurable. Four friends walking round a lake is not
+ *                something a phone camera can witness, and a proxy for it would
+ *                be worse than trusting them.
+ */
+export type ChallengeVerification = 'breathing' | 'spot_check' | null;
 
 export interface ChallengeRow {
   id: string;
@@ -122,11 +136,14 @@ export interface ChallengeRow {
   location: string | null;
   /** Max people, null for unlimited. */
   capacity: number | null;
+  verifyWith: ChallengeVerification;
   joinedCount: number;
   completedCount: number;
   circleSize: number;
   joined: boolean;
   completedByMe: boolean;
+  /** Whether YOUR completion was witnessed by a measurement. */
+  verifiedByMe: boolean;
   /** Null for the seeded challenges; set for anything a member created. */
   createdBy: string | null;
   createdByMe: boolean;
@@ -143,4 +160,19 @@ export interface NewChallenge {
   location: string | null;
   capacity: number | null;
   notes: string | null;
+  verifyWith: ChallengeVerification;
+}
+
+/**
+ * A word of support that arrived from your circle.
+ *
+ * There is no sender field, on purpose and in both directions: the sender is
+ * never told who is struggling, and the recipient is never told who reached
+ * out. What survives is that somebody did.
+ */
+export interface SupportNudge {
+  id: string;
+  body: string;
+  createdAt: string;
+  seenAt: string | null;
 }

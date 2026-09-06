@@ -218,7 +218,7 @@ export default function ChallengeDetailScreen() {
                 </Row>
                 {p.completed && (
                   <Txt v="small" color={colors.calm}>
-                    ✓ done
+                    {p.verified ? '✓✓ measured' : '✓ done'}
                   </Txt>
                 )}
               </Row>
@@ -265,17 +265,77 @@ export default function ChallengeDetailScreen() {
               color={colors.calm}
             />
             <Spacer h={4} />
-            <Button
-              label={challenge.completedByMe ? '✓ You did it' : 'Mark as done'}
-              variant={challenge.completedByMe ? 'soft' : 'primary'}
-              onPress={() => run(() => completeChallenge(challenge.id, !challenge.completedByMe))}
-              disabled={busy}
-            />
+            {challenge.verifyWith && !challenge.completedByMe ? (
+              <>
+                <Button
+                  label={
+                    challenge.verifyWith === 'breathing'
+                      ? 'Do the breathing check now'
+                      : 'Take the spot check now'
+                  }
+                  onPress={() =>
+                    router.push(
+                      challenge.verifyWith === 'breathing'
+                        ? { pathname: '/breathing', params: { challenge: challenge.id } }
+                        : { pathname: '/spot-check', params: { challenge: challenge.id } }
+                    )
+                  }
+                  disabled={busy}
+                />
+                <Spacer h={2} />
+                {/* Still offered. A challenge you did on someone else's phone,
+                    or away from yours, is still a challenge you did — refusing
+                    to accept that would just teach people to lie to the app. */}
+                <Button
+                  label="I did it elsewhere"
+                  variant="ghost"
+                  onPress={() => run(() => completeChallenge(challenge.id, true, false))}
+                  disabled={busy}
+                />
+              </>
+            ) : (
+              <Button
+                label={challenge.completedByMe ? '✓ You did it' : 'Mark as done'}
+                variant={challenge.completedByMe ? 'soft' : 'primary'}
+                onPress={() => run(() => completeChallenge(challenge.id, !challenge.completedByMe))}
+                disabled={busy}
+              />
+            )}
+
+            {challenge.completedByMe && (
+              <>
+                <Spacer h={3} />
+                <View
+                  style={{
+                    backgroundColor: challenge.verifiedByMe ? colors.calmWash : colors.yellowWash,
+                    borderRadius: radius.sm,
+                    padding: spacing(3),
+                  }}
+                >
+                  <Txt
+                    v="small"
+                    color={challenge.verifiedByMe ? colors.calm : colors.brownSoft}
+                  >
+                    {challenge.verifiedByMe
+                      ? '✓✓ Measured. A pulse reading was taken while you did this, so this one is not just your word.'
+                      : '✓ Self-reported. Wick is taking your word for it, which is the right thing to do for anything it cannot see.'}
+                  </Txt>
+                </View>
+                <Spacer h={3} />
+                <Button
+                  label="Undo"
+                  variant="ghost"
+                  onPress={() => run(() => completeChallenge(challenge.id, false))}
+                  disabled={busy}
+                />
+              </>
+            )}
+
             <Spacer h={3} />
             <Txt v="small" color={colors.inkFaint}>
-              Wick takes your word for this. It can verify a breathing break from your own vitals,
-              but it cannot verify a walk with friends — and pretending otherwise would be worse
-              than trusting you.
+              {challenge.verifyWith
+                ? 'This one can be measured, so it is. Wick can witness you sitting still and breathing — it cannot witness a walk round a lake, and it does not pretend to.'
+                : 'Wick takes your word for this. It can verify a breathing break from your own vitals, but it cannot verify a walk with friends, and pretending otherwise would be worse than trusting you.'}
             </Txt>
           </Card>
           <Spacer h={3} />

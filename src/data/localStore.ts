@@ -19,6 +19,7 @@ import type {
   PpgScan,
   SelfReport,
   StressScoreRow,
+  SupportNudge,
 } from './types';
 
 const KEY = 'wick.local.v1';
@@ -36,6 +37,7 @@ export interface LocalDb {
   friends: FriendSummary[];
   requests: IncomingRequest[];
   challenges: ChallengeRow[];
+  nudges: SupportNudge[];
 }
 
 export const uid = () =>
@@ -61,6 +63,7 @@ function emptyDb(): LocalDb {
     friends: [],
     requests: [],
     challenges: seedChallenges(),
+    nudges: [],
   };
 }
 
@@ -76,11 +79,13 @@ function seedChallenges(): ChallengeRow[] {
       kind: 'meetup',
       location: 'Lakeside path, main entrance',
       capacity: 6,
+      verifyWith: null,
       joinedCount: 0,
       completedCount: 0,
       circleSize: 1,
       joined: false,
       completedByMe: false,
+      verifiedByMe: false,
       createdBy: null,
       createdByMe: false,
       notes:
@@ -96,11 +101,15 @@ function seedChallenges(): ChallengeRow[] {
       kind: 'solo',
       location: null,
       capacity: null,
+      // A tea break is a recovery break, and a recovery break is exactly the
+      // thing Wick can actually witness.
+      verifyWith: 'breathing',
       joinedCount: 0,
       completedCount: 0,
       circleSize: 1,
       joined: false,
       completedByMe: false,
+      verifiedByMe: false,
       createdBy: null,
       createdByMe: false,
       notes: 'Fifteen minutes, no screens, wherever you are. Phones face-down.',
@@ -115,11 +124,13 @@ function seedChallenges(): ChallengeRow[] {
       kind: 'solo',
       location: null,
       capacity: null,
+      verifyWith: null,
       joinedCount: 0,
       completedCount: 0,
       circleSize: 1,
       joined: false,
       completedByMe: false,
+      verifiedByMe: false,
       createdBy: null,
       createdByMe: false,
       notes: 'Message one person you have not spoken to this week. That is the whole challenge.',
