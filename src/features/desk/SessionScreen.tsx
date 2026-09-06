@@ -3,14 +3,14 @@ import { BackHandler, Pressable, View } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as Haptics from 'expo-haptics';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Badge, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Ring, Sparkline } from '@/components/charts';
 import { BreathingPacer } from '@/components/BreathingPacer';
 import { colors, radius, spacing } from '@/theme';
 import { CaptureCamera } from '@/camera/CaptureCamera';
-import { FACE, PREVIEW_HIDDEN } from '@/camera/config';
+import { FACE, POMODORO, PREVIEW_HIDDEN } from '@/camera/config';
 import { FRAMING_MESSAGE } from '@/camera/frameSampling';
 import { useDeskSession, type Reading } from '@/camera/useDeskSession';
 import {
@@ -20,16 +20,25 @@ import {
   type SoundscapeId,
 } from '@/services/soundscapeService';
 import { saveScan } from '@/services/repository';
-import type { RootStackParamList } from '@/navigation';
+import { stageSessionSummary } from './sessionHandoff';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Session'>;
-
-export default function SessionScreen({ route, navigation }: Props) {
+export default function SessionScreen() {
   useKeepAwake();
-  const { minutes, soundscape: initialSound, demoMode } = route.params;
+  const router = useRouter();
+  const params = useLocalSearchParams<{
+    minutes?: string;
+    soundscape?: string;
+    demoMode?: string;
+  }>();
+
+  // Route params arrive as strings; parse once and defend against a deep link
+  // that arrives with nothing set.
+  const minutes = Number(params.minutes) || POMODORO.DEFAULT_MINUTES;
+  const demoMode = params.demoMode === '1';
+  const initialSound = (params.soundscape as SoundscapeId) ?? 'rain';
 
   const session = useDeskSession({ plannedMinutes: minutes, demoMode });
-  const [sound, setSound] = React.useState<SoundscapeId>(initialSound as SoundscapeId);
+  const [sound, setSound] = React.useState<SoundscapeId>(initialSound);
   const [volume, setVolume] = React.useState(0.6);
   const persisted = React.useRef(0);
   const started = React.useRef(false);
@@ -84,8 +93,9 @@ export default function SessionScreen({ route, navigation }: Props) {
   const finish = React.useCallback(() => {
     const summary = session.end();
     stopSoundscape();
-    navigation.replace('Summary', { summary });
-  }, [navigation, session]);
+    stageSessionSummary(summary);
+    router.replace('/summary');
+  }, [router, session]);
 
   // Hardware back must not be an escape hatch out of an enforced pause.
   React.useEffect(() => {
@@ -121,13 +131,13 @@ export default function SessionScreen({ route, navigation }: Props) {
           grant access in Settings and come back.
         </Txt>
         <Spacer h={6} />
-        <Button label="Back to Desk" variant="night" onPress={() => navigation.goBack()} />
+        <Button label="Back to Desk" variant="night" onPress={() => router.back()} />
       </Screen>
     );
   }
 
   if (session.phase === 'setup') {
-    return <SetupCheck session={session} camera={camera} onCancel={() => navigation.goBack()} />;
+    return <SetupCheck session={session} camera={camera} onCancel={() => router.back()} />;
   }
 
   if (session.phase === 'enforced') {

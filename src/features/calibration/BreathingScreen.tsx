@@ -1,18 +1,16 @@
 import React from 'react';
 import { View } from 'react-native';
 import { useKeepAwake } from 'expo-keep-awake';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useRouter } from 'expo-router';
 
 import { Bar, Button, Eyebrow, NavBar, Screen, Spacer, Txt } from '@/components/base';
 import { BreathingPacer, CYCLE_MS } from '@/components/BreathingPacer';
 import { colors } from '@/theme';
-import type { RootStackParamList } from '@/navigation';
-
-type Props = NativeStackScreenProps<RootStackParamList, 'Breathing'>;
 
 const TARGET_SECONDS = 60;
 
-export default function BreathingScreen({ navigation }: Props) {
+export default function BreathingScreen() {
+  const router = useRouter();
   useKeepAwake();
   const [elapsed, setElapsed] = React.useState(0);
 
@@ -25,7 +23,7 @@ export default function BreathingScreen({ navigation }: Props) {
 
   return (
     <Screen scroll={false}>
-      <NavBar title="1-minute breathing" onBack={() => navigation.goBack()} />
+      <NavBar title="1-minute breathing" onBack={() => router.back()} />
 
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
         <BreathingPacer />
@@ -48,7 +46,7 @@ export default function BreathingScreen({ navigation }: Props) {
       <Button
         label={done ? 'Done' : 'Finish early'}
         variant={done ? 'primary' : 'ghost'}
-        onPress={() => navigation.goBack()}
+        onPress={() => router.back()}
       />
     </Screen>
   );

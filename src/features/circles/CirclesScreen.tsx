@@ -1,7 +1,6 @@
 import React from 'react';
 import { View } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Badge, Bar, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
 import { DotWeek } from '@/components/charts';
@@ -18,12 +17,10 @@ import {
   toggleChallenge,
 } from '@/services/repository';
 import type { ChallengeRow, CircleSummary, FriendSummary, IncomingRequest } from '@/data/types';
-import type { RootStackParamList } from '@/navigation';
-
-type Nav = NativeStackNavigationProp<RootStackParamList>;
+import BottomNavigation from '@/components/bottombar';
 
 export default function CirclesScreen() {
-  const navigation = useNavigation<Nav>();
+  const router = useRouter();
   const [summary, setSummary] = React.useState<CircleSummary | null>(null);
   const [friends, setFriends] = React.useState<FriendSummary[]>([]);
   const [requests, setRequests] = React.useState<IncomingRequest[]>([]);
@@ -43,7 +40,11 @@ export default function CirclesScreen() {
     setChallenges(c);
   }, []);
 
-  React.useEffect(() => navigation.addListener('focus', load), [navigation, load]);
+  useFocusEffect(
+    React.useCallback(() => {
+      load();
+    }, [load])
+  );
 
   const support = async (message: string) => {
     const reached = await sendCircleSupport(message);
@@ -60,7 +61,7 @@ export default function CirclesScreen() {
   };
 
   return (
-    <Screen>
+    <Screen footer={<BottomNavigation activeTab="Social" router={router} />}>
       <Row style={{ justifyContent: 'space-between' }}>
         <Txt v="title">Wick ✳</Txt>
         <Eyebrow>Circles</Eyebrow>
@@ -116,7 +117,7 @@ export default function CirclesScreen() {
         <Spacer h={3} />
 
         {summary?.suppressed ? (
-          <SuppressedPulse friendCount={friends.length} onAdd={() => navigation.navigate('AddFriend')} />
+          <SuppressedPulse friendCount={friends.length} onAdd={() => router.push('/add-friend')} />
         ) : (
           summary && (
             <>
@@ -240,7 +241,7 @@ export default function CirclesScreen() {
       ))}
 
       <Spacer h={2} />
-      <Button label="Add a friend" variant="ghost" onPress={() => navigation.navigate('AddFriend')} />
+      <Button label="Add a friend" variant="ghost" onPress={() => router.push('/add-friend')} />
       <Spacer h={3} />
     </Screen>
   );

@@ -1,6 +1,6 @@
 import React from 'react';
 import { View } from 'react-native';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useRouter } from 'expo-router';
 
 import { Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Sparkline } from '@/components/charts';
@@ -12,12 +12,13 @@ import {
   saveSession,
 } from '@/services/repository';
 import type { AccuracyVerdict } from '@/data/types';
-import type { RootStackParamList } from '@/navigation';
+import { takeSessionSummary } from './sessionHandoff';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Summary'>;
-
-export default function SummaryScreen({ route, navigation }: Props) {
-  const { summary } = route.params;
+export default function SummaryScreen() {
+  const router = useRouter();
+  // Read once on mount: the handoff slot is consumed, so a refresh or deep link
+  // lands on the empty state below rather than a stale session.
+  const [summary] = React.useState(takeSessionSummary);
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   const [verdict, setVerdict] = React.useState<AccuracyVerdict | null>(null);
   const [accuracy, setAccuracy] = React.useState<{ pct: number | null; samples: number }>({
@@ -26,6 +27,7 @@ export default function SummaryScreen({ route, navigation }: Props) {
   });
 
   React.useEffect(() => {
+    if (!summary) return;
     (async () => {
       const id = await saveSession({
         startedAt: summary.startedAt,
@@ -48,6 +50,22 @@ export default function SummaryScreen({ route, navigation }: Props) {
     await saveAccuracyFeedback(v, { sessionId });
     setAccuracy(await personalAccuracy());
   };
+
+  if (!summary) {
+    return (
+      <Screen>
+        <NavBar title="Completed session" />
+        <Spacer h={6} />
+        <Txt v="title">No session to show</Txt>
+        <Spacer h={2} />
+        <Txt v="body" color={colors.inkSoft}>
+          This summary is generated at the end of a focus session and isn't kept afterwards.
+        </Txt>
+        <Spacer h={5} />
+        <Button label="Back to Desk" onPress={() => router.replace('/desk')} />
+      </Screen>
+    );
+  }
 
   const curve = summary.readings
     .filter((r) => r.deviationPct !== null)
@@ -198,7 +216,7 @@ export default function SummaryScreen({ route, navigation }: Props) {
       <Spacer h={5} />
       <Button
         label="Back to Desk"
-        onPress={() => navigation.reset({ index: 0, routes: [{ name: 'Tabs' }] })}
+        onPress={() => router.replace('/desk')}
       />
       <Spacer h={3} />
     </Screen>

@@ -1,7 +1,6 @@
 import React from 'react';
 import { Pressable, Switch, View } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Badge, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Sparkline } from '@/components/charts';
@@ -12,14 +11,12 @@ import { cameraAvailable } from '@/camera/CaptureCamera';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import { getBaseline, listScans } from '@/services/repository';
 import type { PpgScan } from '@/data/types';
-import type { RootStackParamList } from '@/navigation';
-
-type Nav = NativeStackNavigationProp<RootStackParamList>;
+import BottomNavigation from '@/components/bottombar';
 
 const DURATIONS = [15, 25, 35, 45];
 
 export default function DeskScreen() {
-  const navigation = useNavigation<Nav>();
+  const router = useRouter();
   const [minutes, setMinutes] = React.useState<number>(POMODORO.DEFAULT_MINUTES);
   const [soundscape, setSoundscape] = React.useState<SoundscapeId>('rain');
   const [demoMode, setDemoMode] = React.useState(true);
@@ -32,12 +29,16 @@ export default function DeskScreen() {
     setRecent(s.filter((x) => x.source === 'face' && x.deviationPct !== null));
   }, []);
 
-  React.useEffect(() => navigation.addListener('focus', load), [navigation, load]);
+  useFocusEffect(
+    React.useCallback(() => {
+      load();
+    }, [load])
+  );
 
   const baselineReady = scanCount >= BASELINE_MIN_SCANS;
 
   return (
-    <Screen>
+    <Screen footer={<BottomNavigation activeTab="Desk" router={router} />}>
       <Row style={{ justifyContent: 'space-between' }}>
         <Txt v="title">Wick ✳</Txt>
         <Eyebrow>Desk Mode</Eyebrow>
@@ -67,7 +68,7 @@ export default function DeskScreen() {
             <Button
               label="Do a spot check"
               variant="soft"
-              onPress={() => navigation.navigate('SpotCheck')}
+              onPress={() => router.push('/spot-check')}
             />
           </Card>
           <Spacer h={3} />
@@ -210,10 +211,22 @@ export default function DeskScreen() {
         </Txt>
       </Card>
 
+      <Spacer h={3} />
+      <Button
+        label="Calibration & baseline"
+        variant="ghost"
+        onPress={() => router.push('/calibrate')}
+      />
+
       <Spacer h={5} />
       <Button
         label={cameraAvailable ? 'Start Focus Session' : 'Start Focus Session (simulated)'}
-        onPress={() => navigation.navigate('Session', { minutes, soundscape, demoMode })}
+        onPress={() =>
+          router.push({
+            pathname: '/session',
+            params: { minutes: String(minutes), soundscape, demoMode: demoMode ? '1' : '0' },
+          })
+        }
       />
       <Spacer h={3} />
     </Screen>

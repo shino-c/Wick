@@ -1,6 +1,6 @@
 import React from 'react';
 import { View } from 'react-native';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useRouter } from 'expo-router';
 
 import { Badge, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Ring, Sparkline } from '@/components/charts';
@@ -17,11 +17,9 @@ import {
   saveScan,
 } from '@/services/repository';
 import type { AccuracyVerdict } from '@/data/types';
-import type { RootStackParamList } from '@/navigation';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'SpotCheck'>;
-
-export default function SpotCheckScreen({ navigation }: Props) {
+export default function SpotCheckScreen() {
+  const router = useRouter();
   const scan = useFingerScan('neutral');
   const [baselineRmssd, setBaselineRmssd] = React.useState<number | null>(null);
   const [scanCount, setScanCount] = React.useState(0);
@@ -66,7 +64,7 @@ export default function SpotCheckScreen({ navigation }: Props) {
 
   return (
     <Screen>
-      <NavBar title="Finger spot check" onBack={() => navigation.goBack()} />
+      <NavBar title="Finger spot check" onBack={() => router.back()} />
 
       {/* The camera lives here, hidden behind the ring, and is only active
           while framing or capturing — never idling in the background. */}
@@ -89,7 +87,7 @@ export default function SpotCheckScreen({ navigation }: Props) {
           verdict={verdict}
           onVerdict={recordVerdict}
           onRestart={restart}
-          onDone={() => navigation.goBack()}
+          onDone={() => router.back()}
         />
       ) : (
         <CaptureView scan={scan} scansLeft={scansLeft} onStart={restart} />

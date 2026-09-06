@@ -1,17 +1,15 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useRouter } from 'expo-router';
 
 import { Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing } from '@/theme';
 import { ITEMS, LIKERT, scoreQuestionnaire } from './questionnaire';
 import { recomputeFusedScore, saveSelfReport } from '@/services/repository';
 import { stressBucket } from '@/services/fusionService';
-import type { RootStackParamList } from '@/navigation';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Questionnaire'>;
-
-export default function QuestionnaireScreen({ navigation }: Props) {
+export default function QuestionnaireScreen() {
+  const router = useRouter();
   const [answers, setAnswers] = React.useState<Record<string, number>>({});
   const [saving, setSaving] = React.useState(false);
 
@@ -27,12 +25,12 @@ export default function QuestionnaireScreen({ navigation }: Props) {
     // should move the moment it lands rather than at the next scan.
     await recomputeFusedScore();
     setSaving(false);
-    navigation.goBack();
+    router.back();
   };
 
   return (
     <Screen>
-      <NavBar title="Baseline assessment" onBack={() => navigation.goBack()} />
+      <NavBar title="Baseline assessment" onBack={() => router.back()} />
 
       <Txt v="title">How has your week been?</Txt>
       <Spacer h={2} />

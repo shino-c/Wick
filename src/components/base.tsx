@@ -42,11 +42,14 @@ export function Screen({
   scroll = true,
   dark = false,
   padded = true,
+  footer,
 }: {
   children: React.ReactNode;
   scroll?: boolean;
   dark?: boolean;
   padded?: boolean;
+  /** Pinned below the scroll area — where the shared tab bar goes. */
+  footer?: React.ReactNode;
 }) {
   const bg = dark ? colors.night : colors.cream;
   const inner = padded ? { padding: spacing(5), paddingBottom: spacing(12) } : undefined;
@@ -63,6 +66,7 @@ export function Screen({
       ) : (
         <View style={[{ flex: 1 }, inner]}>{children}</View>
       )}
+      {footer}
     </SafeAreaView>
   );
 }

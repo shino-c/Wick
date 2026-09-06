@@ -1,17 +1,15 @@
 import React from 'react';
 import { Share, TextInput, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useRouter } from 'expo-router';
 
 import { Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing, type as typeTokens } from '@/theme';
 import { getFriends, getMyInviteCode, sendFriendRequestByCode } from '@/services/repository';
 import type { FriendSummary } from '@/data/types';
-import type { RootStackParamList } from '@/navigation';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'AddFriend'>;
-
-export default function AddFriendScreen({ navigation }: Props) {
+export default function AddFriendScreen() {
+  const router = useRouter();
   const [myCode, setMyCode] = React.useState('');
   const [entered, setEntered] = React.useState('');
   const [friends, setFriends] = React.useState<FriendSummary[]>([]);
@@ -41,7 +39,7 @@ export default function AddFriendScreen({ navigation }: Props) {
 
   return (
     <Screen>
-      <NavBar title="Add a friend" onBack={() => navigation.goBack()} />
+      <NavBar title="Add a friend" onBack={() => router.back()} />
 
       <Txt v="title">Your circle, by invitation</Txt>
       <Spacer h={2} />

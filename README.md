@@ -6,7 +6,7 @@ This repo currently contains **Pillar 2 (Desk Mode)**, **Pillar 3 (Calibration &
 and **Pillar 6 (Circles)** — Weiru's scope. Pillars 1, 4 and 5 (Passive Load Engine, the fused Total
 Score, Recovery Engine) are Shino's; see [Handoff points](#handoff-points-for-shino) for where they plug in.
 
-Stack: **React Native (Expo SDK 57) + Supabase**, TypeScript.
+Stack: **React Native (Expo SDK 57) + expo-router + Supabase**, TypeScript.
 Design: [Figma](https://www.figma.com/design/nf1GnV3taHAzKsXJrElETy/CodeNection)
 
 ---
@@ -15,7 +15,8 @@ Design: [Figma](https://www.figma.com/design/nf1GnV3taHAzKsXJrElETy/CodeNection)
 
 ```bash
 npm install
-npm start           # dev client
+npm start           # Expo Go / web — simulated biometrics
+npm run start:dev   # dev client — real camera
 ```
 
 **Wick runs with zero configuration.** With no `.env` and no native camera, it falls back to a local
@@ -52,11 +53,11 @@ code (VisionCamera 5 runs on Nitro modules). Expo Go cannot load them, so you ne
 build** on a physical phone:
 
 ```bash
-npx expo prebuild --clean
-npm run android          # or: npm run ios   (macOS + Xcode)
+npm run prebuild
+npm run build:android    # or: npm run build:ios   (macOS + Xcode)
 ```
 
-Then `npm start` and open the app you just installed, not Expo Go.
+Then `npm run start:dev` and open the app you just installed, not Expo Go.
 
 Everything else — schema, services, all UI — is framework-agnostic and works without this.
 Android is the easier target: you need a Mac and a paid Apple account to put a dev build on an iPhone.
@@ -72,10 +73,39 @@ plugin props. Don't add `react-native-vision-camera` to the `plugins` array — 
 | `npm run verify:ppg` | Checks the SciPy port against synthetic pulses of known BPM. **Run this before trusting the enforced-break lock.** |
 | `npm run gen:sounds` | Regenerates the soundscape WAVs (already committed). |
 | `npm run typecheck` | `tsc --noEmit`. |
-| `npm run start:go` | Expo Go (SDK 57), forced simulation. Fine for UI work. |
+| `npm run start:dev` | Dev-client mode, for a build with the camera native modules. |
+| `npm run web` | Runs in a browser. Camera paths simulate; everything else works. |
 
 Set `EXPO_PUBLIC_WICK_FORCE_SIMULATION=1` in `.env` to force simulated biometrics even on a dev build —
 useful for practising the demo.
+
+---
+
+## Routes
+
+Navigation is expo-router; the file tree under `src/app/` *is* the route table. The four tabs in
+`src/components/bottombar.tsx` match the Figma.
+
+| Route | Screen | Owner |
+| --- | --- | --- |
+| `/` → `/baseline` | Onboarding | Shino |
+| `/home` | Home dashboard | Shino |
+| `/recovery` | Recovery engine | Shino — **not built yet, tab 404s** |
+| `/desk` | Desk Mode | Pillar 2 |
+| `/session`, `/summary` | Active session, post-session summary | Pillar 2 |
+| `/social` | Circles | Pillar 6 |
+| `/add-friend` | Invite-code friend flow | Pillar 6 |
+| `/calibrate` | Calibration hub (reached from Desk) | Pillar 3 |
+| `/questionnaire`, `/spot-check`, `/breathing` | Baseline, finger-PPG, breathing | Pillar 3 |
+| `/onboarding` | My baseline screen — **duplicates `/baseline`** | see below |
+
+Route files are one-liners that re-export from `src/features/**`, so screens stay plain components
+and are testable without a router.
+
+`/session` → `/summary` passes a `SessionSummary` object through
+`src/features/desk/sessionHandoff.ts` rather than URL params: the summary contains an array of
+readings, which would be lossy and fragile as a query string. The slot is consumed on read, so
+refreshing `/summary` shows an empty state rather than a stale session.
 
 ---
 
@@ -287,6 +317,7 @@ demoable insight in its own right — *"your body reads calm, but you're reporti
 
 ```
 src/
+  app/             expo-router route table — thin re-exports of the screens below
   camera/          Capture policy, frame sampling, the two capture hooks, simulator
     config.ts        Burst cadence, ROI, escalation + Pomodoro constants — start here
     frameSampling.ts The ONLY code that touches pixels
@@ -300,6 +331,8 @@ src/
     repository.ts    Supabase-or-local routing. Screens only ever call this.
   features/
     onboarding/  calibration/  desk/  circles/
+  screens/         Shino's baseline + home
+  components/bottombar.tsx, topbar.tsx   Shino's shared chrome
   data/            Types + the offline demo store
   components/      Themed primitives, charts, breathing pacer
   theme/           Colours, type scale, spacing — nothing hardcodes a hex

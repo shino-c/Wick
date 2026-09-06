@@ -1,9 +1,8 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { useFocusEffect, useRouter } from 'expo-router';
 
-import { Badge, Bar, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
+import { Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Sparkline } from '@/components/charts';
 import { colors, radius, spacing, stressColor } from '@/theme';
 import { QUICK_FLAGS } from './questionnaire';
@@ -20,12 +19,9 @@ import {
 import { computeTrendVelocity, type TrendVelocity } from '@/services/trendService';
 import { stressBucket, type FusionResult } from '@/services/fusionService';
 import type { Baseline, PpgScan } from '@/data/types';
-import type { RootStackParamList } from '@/navigation';
-
-type Nav = NativeStackNavigationProp<RootStackParamList>;
 
 export default function CalibrationScreen() {
-  const navigation = useNavigation<Nav>();
+  const router = useRouter();
   const [baseline, setBaseline] = React.useState<Baseline | null>(null);
   const [scans, setScans] = React.useState<PpgScan[]>([]);
   const [trend, setTrend] = React.useState<TrendVelocity | null>(null);
@@ -61,7 +57,11 @@ export default function CalibrationScreen() {
     }
   }, []);
 
-  React.useEffect(() => navigation.addListener('focus', load), [navigation, load]);
+  useFocusEffect(
+    React.useCallback(() => {
+      load();
+    }, [load])
+  );
 
   const quickFlag = async (score: number) => {
     setFlagged(score);
@@ -76,11 +76,7 @@ export default function CalibrationScreen() {
 
   return (
     <Screen>
-      <Row style={{ justifyContent: 'space-between' }}>
-        <Txt v="title">Wick ✳</Txt>
-        <Eyebrow>Calibrate</Eyebrow>
-      </Row>
-      <Spacer h={5} />
+      <NavBar title="Calibrate" onBack={() => router.back()} />
 
       {/* ── Fused read ────────────────────────────────────────────── */}
       {fusion?.fusedScore != null && <FusedCard fusion={fusion} />}
@@ -146,7 +142,7 @@ export default function CalibrationScreen() {
             label="Recalibrate"
             variant="ghost"
             style={{ height: 38, paddingHorizontal: spacing(3) }}
-            onPress={() => navigation.navigate('Questionnaire')}
+            onPress={() => router.push('/questionnaire')}
           />
         </Row>
       </Card>
@@ -180,7 +176,7 @@ export default function CalibrationScreen() {
           color={scansLeft > 0 ? colors.warn : colors.calm}
         />
         <Spacer h={3} />
-        <Button label="Start Spot Check" variant="soft" onPress={() => navigation.navigate('SpotCheck')} />
+        <Button label="Start Spot Check" variant="soft" onPress={() => router.push('/spot-check')} />
       </Card>
 
       <Spacer h={3} />
@@ -218,7 +214,7 @@ export default function CalibrationScreen() {
             label="Start"
             variant="soft"
             style={{ height: 40, paddingHorizontal: spacing(5) }}
-            onPress={() => navigation.navigate('Breathing')}
+            onPress={() => router.push('/breathing')}
           />
         </Row>
       </Card>

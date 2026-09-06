@@ -1,7 +1,7 @@
 import React from 'react';
 import { View } from 'react-native';
 import Slider from '@react-native-community/slider';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import { Badge, Bar, Button, Card, Eyebrow, NavBar, Row, Screen, Spacer, Txt } from '@/components/base';
 import { colors, radius, spacing } from '@/theme';
@@ -9,11 +9,9 @@ import { sliderLabel } from '@/features/calibration/questionnaire';
 import { getBaseline, latestSelfReport, saveSelfReport } from '@/services/repository';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import { markOnboarded } from '@/lib/bootstrap';
-import type { RootStackParamList } from '@/navigation';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Onboarding'>;
-
-export default function OnboardingScreen({ navigation }: Props) {
+export default function OnboardingScreen() {
+  const router = useRouter();
   const [feeling, setFeeling] = React.useState(45);
   const [questionnaireScore, setQuestionnaireScore] = React.useState<number | null>(null);
   const [scanCount, setScanCount] = React.useState(0);
@@ -25,7 +23,11 @@ export default function OnboardingScreen({ navigation }: Props) {
     if (self?.rawAnswers) setQuestionnaireScore(self.score);
   }, []);
 
-  React.useEffect(() => navigation.addListener('focus', refresh), [navigation, refresh]);
+  useFocusEffect(
+    React.useCallback(() => {
+      refresh();
+    }, [refresh])
+  );
 
   const scansLeft = Math.max(0, BASELINE_MIN_SCANS - scanCount);
 
@@ -36,7 +38,7 @@ export default function OnboardingScreen({ navigation }: Props) {
     await saveSelfReport(Math.round(feeling), null);
     await markOnboarded();
     setSaving(false);
-    navigation.reset({ index: 0, routes: [{ name: 'Tabs' }] });
+    router.replace('/home');
   };
 
   return (
@@ -98,7 +100,7 @@ export default function OnboardingScreen({ navigation }: Props) {
             label={questionnaireScore === null ? 'Start' : 'Redo'}
             variant="ghost"
             style={{ height: 38, paddingHorizontal: spacing(4) }}
-            onPress={() => navigation.navigate('Questionnaire', { firstRun: true })}
+            onPress={() => router.push('/questionnaire')}
           />
         </Row>
       </Card>
@@ -133,7 +135,7 @@ export default function OnboardingScreen({ navigation }: Props) {
         <Button
           label="Start Spot Check"
           variant="soft"
-          onPress={() => navigation.navigate('SpotCheck', { firstRun: true })}
+          onPress={() => router.push('/spot-check')}
         />
       </Card>
 
