@@ -59,6 +59,28 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
+-- Allow login by username: looks up the email for a given username so the
+-- client can call signInWithPassword({ email }). SECURITY DEFINER because
+-- the caller is unauthenticated at login time. Only returns email, nothing else.
+create or replace function public.get_email_for_username(lookup_username text)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  found_email text;
+begin
+  select au.email into found_email
+  from public.profiles p
+  join auth.users au on au.id = p.id
+  where lower(p.username) = lower(lookup_username)
+  limit 1;
+
+  return found_email;
+end;
+$$;
+
 
 -- ── Pillar 3: Calibration & Ground Truth ────────────────────────────────────
 
