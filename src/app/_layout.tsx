@@ -69,6 +69,8 @@ export default function RootLayout() {
         <Stack.Screen name="home" options={{ animation: 'none' }} />
         <Stack.Screen name="desk" options={{ animation: 'none' }} />
         <Stack.Screen name="social" options={{ animation: 'none' }} />
+        <Stack.Screen name="recovery" options={{ animation: 'none' }} />
+        <Stack.Screen name="bubblepop" options={{ animation: 'slide_from_right' }} />
 
         {/* A focus session must not be swipeable-away mid-reading, and the
             enforced pause depends on it. */}

@@ -95,6 +95,45 @@ const SOUNDSCAPES = {
   },
 };
 
+function bubblePop(n) {
+  const out = new Float64Array(n);
+  const duration = Math.min(n, Math.floor(SR * 0.12));
+
+  const pitchVariance = 1.0;
+
+  for (let i = 0; i < duration; i++) {
+    const t = i / SR;
+
+    let freq;
+
+    if (t <= 0.04) {
+      const p = t / 0.04;
+      freq =
+        420 * pitchVariance *
+        Math.pow(840 / 420, p);
+    } else {
+      const p = (t - 0.04) / 0.08;
+      freq =
+        840 * pitchVariance *
+        Math.pow(200 / 840, p);
+    }
+
+    const tone = Math.sin(2 * Math.PI * freq * t);
+
+    // Web Audio exponential gain:
+    // 0.25 -> 0.001 over 120 ms.
+    const envelope = 0.25 * Math.exp(
+      Math.log(0.001 / 0.25) * (t / 0.12)
+    );
+
+    out[i] = tone * envelope;
+  }
+
+  return out;
+}
+
+
+
 function normalise(buf, peak = 0.72) {
   let max = 0;
   for (const v of buf) max = Math.max(max, Math.abs(v));
@@ -145,4 +184,6 @@ for (const [name, make] of Object.entries(SOUNDSCAPES)) {
   writeWav(file, makeSeamless(normalise(make(n))));
   console.log(`  ${name.padEnd(7)} -> assets/sounds/${name}.wav  (${(fs.statSync(file).size / 1024).toFixed(0)} KB)`);
 }
+writeWav(path.join(OUT, 'bubble-pop.wav'), normalise(bubblePop(Math.floor(SR * 0.16)), 0.6));
+console.log(`  bubble-pop -> assets/sounds/bubble-pop.wav  (${(fs.statSync(path.join(OUT, 'bubble-pop.wav')).size / 1024).toFixed(0)} KB)`);
 console.log('\nSoundscapes ready.');

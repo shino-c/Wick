@@ -1,22 +1,32 @@
 import React, { useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
+  ActivityIndicator,
+  Modal,
   Pressable,
   ScrollView,
   StatusBar,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
 
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter } from 'expo-router';
 import Slider from '@react-native-community/slider';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { colors } from '@/theme';
 import { ITEMS } from '@/features/calibration/questionnaire';
-import { BASELINE_MIN_SCANS } from '@/services/ppgService';
-import { getBaseline, latestSelfReport, saveSelfReport } from '@/services/repository';
 import { markOnboarded } from '@/lib/bootstrap';
+import { BASELINE_MIN_SCANS } from '@/services/ppgService';
+import {
+  addWorkloadItem,
+  getBaseline,
+  getCalendarConnections,
+  latestSelfReport,
+  listWorkloadItems,
+  saveSelfReport,
+  // syncCalendar,
+} from '@/services/repository';
+import { colors } from '@/theme';
 
 // Palette comes from src/theme — the values there are the Figma swatches
 // (#FFFBEB, #FDF1A9, #6B5038, #3D3A34). Keeping a second hardcoded set here is
@@ -40,12 +50,29 @@ export default function BaselineScreen() {
   const [questionnaireDone, setQuestionnaireDone] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Calendar sync state
+  const [calendarModalVisible, setCalendarModalVisible] = useState(false);
+  const [syncingProvider, setSyncingProvider] = useState<'google' | 'outlook' | null>(null);
+  const [connectedProvider, setConnectedProvider] = useState<'google' | 'outlook' | null>(null);
+  const [syncedItemsCount, setSyncedItemsCount] = useState(0);
+
   // Re-read on focus so returning from the questionnaire or a spot check shows
   // the updated state rather than a stale "not started".
   const refresh = React.useCallback(async () => {
-    const [baseline, self] = await Promise.all([getBaseline(), latestSelfReport()]);
+    const [baseline, self, connections, items] = await Promise.all([
+      getBaseline(),
+      latestSelfReport(),
+      getCalendarConnections(),
+      listWorkloadItems(),
+    ]);
     setScanCount(baseline.calibrationScans);
     setQuestionnaireDone(Boolean(self?.rawAnswers));
+
+    const activeConn = connections.find((c) => c.connected);
+    if (activeConn) {
+      setConnectedProvider(activeConn.provider);
+    }
+    setSyncedItemsCount(items.length);
   }, []);
 
   useFocusEffect(
@@ -55,8 +82,10 @@ export default function BaselineScreen() {
   );
 
   const scansLeft = Math.max(0, BASELINE_MIN_SCANS - scanCount);
+  const baselineReady = questionnaireDone && scansLeft === 0 && connectedProvider !== null;
 
   const handleContinue = async () => {
+    if (!baselineReady) return;
     setSaving(true);
     // The slider is itself a self-report, so recording it means the first
     // dashboard read already has a real signal behind it.
@@ -64,6 +93,53 @@ export default function BaselineScreen() {
     await markOnboarded();
     setSaving(false);
     router.push('/home');
+  };
+
+  const handleSync = async (provider: 'google' | 'outlook') => {
+    setSyncingProvider(provider);
+    try {
+      // Demo-only calendar data. Keep the real device sync below for restoring
+      // the production flow after the presentation.
+      const monday = new Date();
+      monday.setHours(0, 0, 0, 0);
+      monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+      const demoEvents = [
+        { title: 'Deep Work Session', day: 0, hour: 9, duration: 2, category: 'academic' as const, priority: 'high' as const },
+        { title: 'Team Stand-up', day: 1, hour: 10, duration: 1, category: 'social' as const, priority: 'medium' as const },
+        { title: 'Library Research', day: 2, hour: 14, duration: 2.5, category: 'academic' as const, priority: 'medium' as const },
+        { title: 'Evening Run', day: 3, hour: 18, duration: 1, category: 'physical' as const, priority: 'low' as const },
+        { title: 'Project Presentation', day: 4, hour: 11, duration: 1.5, category: 'academic' as const, priority: 'high' as const },
+      ];
+      const existingItems = await listWorkloadItems();
+      if (!existingItems.some((item) => item.source === provider && item.title === demoEvents[0].title)) {
+        for (const event of demoEvents) {
+          const start = new Date(monday);
+          start.setDate(monday.getDate() + event.day);
+          start.setHours(event.hour, 0, 0, 0);
+          const end = new Date(start.getTime() + event.duration * 60 * 60 * 1000);
+          await addWorkloadItem({
+            title: event.title,
+            category: event.category,
+            estimatedHours: event.duration,
+            priority: event.priority,
+            source: provider,
+            scheduledStart: start.toISOString(),
+            scheduledEnd: end.toISOString(),
+          });
+        }
+      }
+      const res = { addedCount: existingItems.filter((item) => item.source === provider).length || demoEvents.length };
+
+      // Real device-calendar sync (restore this for production):
+      // const res = await syncCalendar(provider);
+      setConnectedProvider(provider);
+      setSyncedItemsCount(res.addedCount);
+      setCalendarModalVisible(false);
+    } catch (e) {
+      console.warn('Calendar sync error', e);
+    } finally {
+      setSyncingProvider(null);
+    }
   };
 
   const getStressState = () => {
@@ -297,27 +373,46 @@ export default function BaselineScreen() {
             </View>
 
             <View style={styles.calendarText}>
-              <Text style={styles.calendarTitle}>Sync Your Calendar</Text>
+              <View style={styles.calendarTitleRow}>
+                <Text style={styles.calendarTitle}>Sync Your Calendar</Text>
+                {connectedProvider && (
+                  <View style={styles.connectedPill}>
+                    <Text style={styles.connectedPillText}>
+                      {connectedProvider === 'google' ? 'Google' : 'Outlook'} Active
+                    </Text>
+                  </View>
+                )}
+              </View>
 
               <Text style={styles.calendarDescription}>
-                We'll quietly scan your daily agenda to automatically schedule
-                brief, nourishing breathing sessions in your free windows.
+                {connectedProvider
+                  ? `${syncedItemsCount} calendar events mapped into your load schedule. You can sync again from this screen.`
+                  : "We'll quietly scan your daily agenda to automatically schedule brief, nourishing breathing sessions in your free windows."}
               </Text>
             </View>
 
-            <Pressable
-              onPress={() => {}}
-              style={({ pressed }) => [
-                styles.yellowButton,
-                styles.connectButton,
-                pressed && styles.pressedButton,
-              ]}
-            >
-              <Text style={styles.lockIcon}>▣</Text>
-              <Text style={styles.yellowButtonText}>
-                Connect Calendar
-              </Text>
-            </Pressable>
+            {connectedProvider ? (
+              <Pressable
+                onPress={() => setCalendarModalVisible(true)}
+                style={({ pressed }) => [styles.yellowButton, pressed && styles.pressedButton]}
+              >
+                <Text style={styles.yellowButtonText}>Re-sync Calendar</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={() => setCalendarModalVisible(true)}
+                style={({ pressed }) => [
+                  styles.yellowButton,
+                  styles.connectButton,
+                  pressed && styles.pressedButton,
+                ]}
+              >
+                <Text style={styles.lockIcon}>▣</Text>
+                <Text style={styles.yellowButtonText}>
+                  Connect Calendar
+                </Text>
+              </Pressable>
+            )}
           </View>
 
           {/* Bottom spacing for fixed button */}
@@ -328,14 +423,15 @@ export default function BaselineScreen() {
         <View style={styles.bottomContainer}>
           <Pressable
             onPress={handleContinue}
-            disabled={saving}
+            disabled={saving || !baselineReady}
             style={({ pressed }) => [
               styles.continueButton,
+              !baselineReady && styles.disabledContinueButton,
               pressed && styles.pressedContinue,
             ]}
           >
             <Text style={styles.continueText}>
-              {saving ? 'Saving…' : 'Continue to Dashboard'}
+              {saving ? 'Saving…' : baselineReady ? 'Continue to Dashboard' : 'Complete all baseline steps'}
             </Text>
 
             <Text style={styles.arrow}>→</Text>
@@ -343,6 +439,85 @@ export default function BaselineScreen() {
 
           <View style={styles.homeIndicator} />
         </View>
+
+        {/* Calendar Connect Modal */}
+        <Modal
+          visible={calendarModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setCalendarModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Connect Your Calendar</Text>
+                <Pressable
+                  onPress={() => setCalendarModalVisible(false)}
+                  style={({ pressed }) => [styles.modalClose, pressed && styles.pressed]}
+                >
+                  <Text style={styles.modalCloseText}>✕</Text>
+                </Pressable>
+              </View>
+
+              <Text style={styles.modalSubtitle}>
+                Link your student calendar to automatically build your categorized load map and weekly workload capacity:
+              </Text>
+
+              {/* Google Calendar Option */}
+              <Pressable
+                disabled={syncingProvider !== null}
+                onPress={() => handleSync('google')}
+                style={({ pressed }) => [
+                  styles.providerOption,
+                  connectedProvider === 'google' && styles.providerActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <View style={[styles.providerIconContainer, { backgroundColor: '#EBF4FF' }]}>
+                  <Text style={{ fontSize: 22 }}>🗓️</Text>
+                </View>
+                <View style={styles.providerInfo}>
+                  <Text style={styles.providerName}>Google Calendar</Text>
+                  <Text style={styles.providerDesc}>Lectures, lab prep, study blocks</Text>
+                </View>
+                {syncingProvider === 'google' ? (
+                  <ActivityIndicator size="small" color={COLORS.brown} />
+                ) : connectedProvider === 'google' ? (
+                  <Text style={styles.providerCheck}>✓</Text>
+                ) : (
+                  <Text style={styles.providerArrow}>→</Text>
+                )}
+              </Pressable>
+
+              {/* Outlook Calendar Option */}
+              <Pressable
+                disabled={syncingProvider !== null}
+                onPress={() => handleSync('outlook')}
+                style={({ pressed }) => [
+                  styles.providerOption,
+                  connectedProvider === 'outlook' && styles.providerActive,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <View style={[styles.providerIconContainer, { backgroundColor: '#EFF6FF' }]}>
+                  <Text style={{ fontSize: 22 }}>📅</Text>
+                </View>
+                <View style={styles.providerInfo}>
+                  <Text style={styles.providerName}>Microsoft Outlook</Text>
+                  <Text style={styles.providerDesc}>Office 365, seminars, office hours</Text>
+                </View>
+                {syncingProvider === 'outlook' ? (
+                  <ActivityIndicator size="small" color={COLORS.brown} />
+                ) : connectedProvider === 'outlook' ? (
+                  <Text style={styles.providerCheck}>✓</Text>
+                ) : (
+                  <Text style={styles.providerArrow}>→</Text>
+                )}
+              </Pressable>
+
+            </View>
+          </View>
+        </Modal>
       </View>
     </SafeAreaView>
   );
@@ -412,10 +587,51 @@ const styles = StyleSheet.create({
   lockIcon: { color: '#3D2E1E', fontSize: 16 },
   bottomContainer: { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 24, paddingTop: 18, paddingBottom: 12, backgroundColor: COLORS.background },
   continueButton: { width: '100%', height: 56, borderRadius: 30, backgroundColor: COLORS.brown, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, shadowColor: '#50371E', shadowOpacity: 0.35, shadowRadius: 10, shadowOffset: { width: 0, height: 6 }, elevation: 5 },
+  disabledContinueButton: { opacity: 0.45 },
   continueText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
   arrow: { color: '#FFFFFF', fontSize: 22 },
   homeIndicator: { alignSelf: 'center', width: 128, height: 4, borderRadius: 4, backgroundColor: '#C8C1B7', marginTop: 14 },
   pressed: { opacity: 0.7, transform: [{ scale: 0.96 }] },
   pressedButton: { backgroundColor: '#FEEA85', transform: [{ scale: 0.98 }] },
   pressedContinue: { backgroundColor: '#523E2C', transform: [{ scale: 0.98 }] },
+  calendarTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  connectedPill: { backgroundColor: '#DCFCE7', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 12 },
+  connectedPillText: { color: '#16A34A', fontSize: 11, fontWeight: '700' },
+  connectedActionsRow: { flexDirection: 'row', gap: 10 },
+  connectedButtonHalf: { flex: 1 },
+  secondaryButton: { flex: 1, height: 48, borderRadius: 16, backgroundColor: '#FAF6E8', borderWidth: 1, borderColor: '#EDE8E1', alignItems: 'center', justifyContent: 'center' },
+  secondaryButtonText: { color: COLORS.brown, fontSize: 14, fontWeight: '700' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalCard: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 36 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  modalTitle: { color: COLORS.text, fontSize: 20, fontWeight: '700' },
+  modalSubtitle: { color: COLORS.muted, fontSize: 14, lineHeight: 20, marginBottom: 20 },
+  modalClose: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F5F2EC', alignItems: 'center', justifyContent: 'center' },
+  modalCloseText: { color: COLORS.muted, fontSize: 15, fontWeight: '700' },
+  providerOption: { flexDirection: 'row', alignItems: 'center', padding: 14, borderRadius: 18, borderWidth: 1.5, borderColor: '#EDE7D6', backgroundColor: '#FAFAF8', marginBottom: 12 },
+  providerActive: { borderColor: COLORS.green, backgroundColor: '#F2F9F5' },
+  providerIconContainer: { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 14 },
+  providerInfo: { flex: 1 },
+  providerName: { color: COLORS.text, fontSize: 16, fontWeight: '700' },
+  providerDesc: { color: COLORS.muted, fontSize: 12, marginTop: 2 },
+  providerCheck: { color: '#16A34A', fontSize: 18, fontWeight: '800' },
+  providerArrow: { color: COLORS.muted, fontSize: 18 },
+  manualEntryLink: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingTop: 14 },
+  manualEntryLinkText: { color: COLORS.brown, fontSize: 14, fontWeight: '600' },
+  inputLabel: { color: COLORS.muted, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 6, marginTop: 12 },
+  textInput: { height: 48, borderRadius: 14, borderWidth: 1, borderColor: '#EDE7D6', paddingHorizontal: 14, color: COLORS.text, fontSize: 15, backgroundColor: '#FAFAF8' },
+  categoryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  categoryChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, backgroundColor: '#F5F2EC', borderWidth: 1, borderColor: '#EAE5DB' },
+  categoryChipSelected: { backgroundColor: COLORS.yellow, borderColor: '#ECCB49' },
+  categoryChipText: { color: '#6E6A61', fontSize: 12, fontWeight: '600' },
+  categoryChipTextSelected: { color: '#3D2E1E', fontWeight: '700' },
+  rowTwoCols: { flexDirection: 'row', alignItems: 'center' },
+  priorityGroup: { flexDirection: 'row', height: 48, borderRadius: 14, borderWidth: 1, borderColor: '#EDE7D6', overflow: 'hidden' },
+  priorityButton: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FAFAF8' },
+  priorityButtonSelected: { backgroundColor: COLORS.brown },
+  priorityText: { color: COLORS.muted, fontSize: 11, fontWeight: '700' },
+  priorityTextSelected: { color: '#FFFFFF', fontWeight: '800' },
+  saveTaskButton: { height: 50, borderRadius: 25, backgroundColor: COLORS.brown, alignItems: 'center', justifyContent: 'center', marginTop: 22 },
+  saveTaskButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  disabledButton: { opacity: 0.5 },
 });

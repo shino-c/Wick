@@ -847,5 +847,64 @@ grant execute on function public.complete_challenge(text, boolean, boolean) to a
 grant execute on function public.remove_friend(uuid) to authenticated;
 grant execute on function public.set_username(text) to authenticated;
 grant execute on function public.cancel_challenge(text, boolean) to authenticated;
-grant execute on function public.delete_challenge(text)    to authenticated;
 grant execute on function public.send_circle_support(text) to authenticated;
+
+-- â”€â”€ Pillar 5: recovery records â”€â”€
+-- Coordinates are intentionally absent. A recovery action records only its
+-- verified outcome, never a route, place, or location history.
+create table if not exists recovery_days (
+  user_id uuid not null references auth.users on delete cascade,
+  recovery_date date not null,
+  completed_plan_ids text[] not null default '{}',
+  game_completed boolean not null default false,
+  game_minutes integer not null default 0,
+  outdoor_completed boolean not null default false,
+  recovery_event_id text,
+  recovery_event_start timestamptz,
+  recovery_pct integer not null default 0 check (recovery_pct between 0 and 100),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, recovery_date)
+);
+
+alter table recovery_days enable row level security;
+drop policy if exists "own recovery days" on recovery_days;
+create policy "own recovery days" on recovery_days for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ── Pillar 1: Calendar Sync & Workload Capacity ─────────────────────────────
+
+create table if not exists calendar_connections (
+  user_id uuid not null references auth.users on delete cascade,
+  provider text not null check (provider in ('google', 'outlook')),
+  connected boolean not null default true,
+  account_email text,
+  last_synced_at timestamptz default now(),
+  created_at timestamptz default now(),
+  primary key (user_id, provider)
+);
+
+alter table calendar_connections enable row level security;
+drop policy if exists "own calendar connections" on calendar_connections;
+create policy "own calendar connections" on calendar_connections for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists workload_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  title text not null,
+  category text not null check (category in ('academic', 'social', 'physical', 'errands', 'mental')),
+  estimated_hours double precision not null default 1.0,
+  priority text not null default 'medium' check (priority in ('low', 'medium', 'high')),
+  source text not null default 'manual' check (source in ('google', 'outlook', 'manual')),
+  status text not null default 'scheduled' check (status in ('scheduled', 'deferred', 'completed')),
+  scheduled_start timestamptz,
+  scheduled_end timestamptz,
+  created_at timestamptz default now()
+);
+
+create index if not exists workload_items_user_time on workload_items (user_id, status, scheduled_start);
+
+alter table workload_items enable row level security;
+drop policy if exists "own workload items" on workload_items;
+create policy "own workload items" on workload_items for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);

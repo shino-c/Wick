@@ -5,25 +5,50 @@
  * functions. Adding the backend later (or losing it mid-demo) changes nothing
  * above this line.
  */
-import { hasSupabase, supabase, currentUserId } from '@/lib/supabaseClient';
 import { readDb, uid, writeDb } from '@/data/localStore';
 import type {
-  AccuracyVerdict,
-  Baseline,
-  ChallengeRow,
-  CircleSummary,
-  NewChallenge,
-  Participant,
-  FocusSessionRow,
-  FriendSummary,
-  IncomingRequest,
-  PpgScan,
-  SelfReport,
-  StressScoreRow,
-  SupportNudge,
+    AccuracyVerdict,
+    Baseline,
+    ChallengeRow,
+    CircleSummary,
+    FocusSessionRow,
+    FriendSummary,
+    IncomingRequest,
+    NewChallenge,
+    Participant,
+    PpgScan,
+    SelfReport,
+    StressScoreRow,
+    SupportNudge,
+    WorkloadItem,
+    CalendarConnection,
+    WorkloadAnalysis,
+    RankedTask,
+    DailyStressPoint,
+    WeeklyStressAnalysis,
 } from '@/data/types';
+import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
+import {
+  ageHours,
+  fuseStressScore,
+  clampBiometricScore,
+  calculateDomainDriver,
+  type FusionResult,
+} from './fusionService';
 import { PPGService, type PPGResult, type StressClassification } from './ppgService';
-import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
+import {
+    addWorkloadItem,
+    analyzeWorkload,
+    batchDeferWorkloadItems,
+    completeWorkloadItem,
+    deferWorkloadItem,
+    getCalendarConnections,
+    listWorkloadItems,
+    restoreWorkloadItem,
+    syncCalendar,
+    getRankedTasks,
+    getDailyLoads,
+} from './workloadService';
 
 /**
  * Smallest circle we will aggregate. Below this, "2 of 2 friends are in the red
@@ -275,6 +300,25 @@ export async function latestSelfReport(): Promise<SelfReport | null> {
   return (await readDb()).selfReports[0] ?? null;
 }
 
+export async function listSelfReports(limit = 20): Promise<SelfReport[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('self_reports')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    return (data ?? []).map((r) => ({
+      id: r.id,
+      score: r.score,
+      rawAnswers: r.raw_answers,
+      createdAt: r.created_at,
+    }));
+  }
+  return (await readDb()).selfReports.slice(0, limit);
+}
+
 /**
  * Whether the full questionnaire has ever been completed.
  *
@@ -306,7 +350,11 @@ export async function hasQuestionnaireAnswers(): Promise<boolean> {
  * rather than a placeholder value that would fake agreement.
  */
 export async function recomputeFusedScore(loadScore?: number): Promise<FusionResult> {
-  const [scans, self] = await Promise.all([listScans(20), latestSelfReport()]);
+  const [scans, self, workloadItems] = await Promise.all([
+    listScans(20),
+    latestSelfReport(),
+    listWorkloadItems(),
+  ]);
   const usable = scans.filter((s) => s.signalQuality === 'good' && s.deviationPct !== null);
   // A 45-second finger scan under torch light and a 40-second face reading in
   // room light are not equally trustworthy, and taking whichever happened to be
@@ -316,13 +364,19 @@ export async function recomputeFusedScore(loadScore?: number): Promise<FusionRes
   const bio =
     usable.find((s) => s.source === 'finger' && ageHours(s.createdAt) < 12) ?? usable[0];
 
+  let effectiveLoadScore = loadScore;
+  if (effectiveLoadScore === undefined && workloadItems.length > 0) {
+    const analysis = analyzeWorkload(workloadItems);
+    effectiveLoadScore = analysis.totalCapacityPct;
+  }
+
   const fusion = fuseStressScore({
     biometric:
       bio && bio.deviationPct !== null
-        ? { score: PPGService.biometricScore(bio.deviationPct)!, ageHours: ageHours(bio.createdAt) }
+        ? { score: clampBiometricScore(bio.deviationPct)!, ageHours: ageHours(bio.createdAt) }
         : undefined,
     selfReport: self ? { score: self.score, ageHours: ageHours(self.createdAt) } : undefined,
-    load: loadScore !== undefined ? { score: loadScore, ageHours: 0 } : undefined,
+    load: effectiveLoadScore !== undefined ? { score: effectiveLoadScore, ageHours: 0 } : undefined,
   });
 
   if (fusion.fusedScore === null) return fusion;
@@ -331,9 +385,9 @@ export async function recomputeFusedScore(loadScore?: number): Promise<FusionRes
     fused_score: Math.round(fusion.fusedScore * 100) / 100,
     confidence: fusion.confidence,
     signals_used: fusion.signalsUsed,
-    biometric_score: bio?.deviationPct != null ? PPGService.biometricScore(bio.deviationPct) : null,
+    biometric_score: bio?.deviationPct != null ? clampBiometricScore(bio.deviationPct) : null,
     self_report_score: self?.score ?? null,
-    load_score: loadScore ?? null,
+    load_score: effectiveLoadScore ?? null,
   };
 
   if (hasSupabase) {
@@ -377,6 +431,106 @@ export async function listStressScores(limit = 30): Promise<StressScoreRow[]> {
     }));
   }
   return (await readDb()).stressScores.slice(0, limit);
+}
+
+export async function getWeeklyStressAnalysis(
+  workloadItemsOverride?: WorkloadItem[]
+): Promise<WeeklyStressAnalysis> {
+  const [scans, selfReports, storedWorkloadItems] = await Promise.all([
+    listScans(40),
+    listSelfReports(20),
+    workloadItemsOverride ? Promise.resolve(workloadItemsOverride) : listWorkloadItems(),
+  ]);
+
+  const workloadItems = storedWorkloadItems;
+  const workloadAnalysis = analyzeWorkload(workloadItems);
+  const dailyLoads = getDailyLoads(workloadItems);
+  const driver = calculateDomainDriver(workloadAnalysis.categoryBreakdown);
+
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  const points: DailyStressPoint[] = dailyLoads.map((dl) => {
+    // 1. Biometric for this date:
+    const dayScans = scans.filter(
+      (s) => s.createdAt.startsWith(dl.fullDate) && s.signalQuality === 'good' && s.deviationPct !== null
+    );
+    const dayBio =
+      dayScans.length > 0
+        ? clampBiometricScore(
+            dayScans.reduce((a, s) => a + (s.deviationPct ?? 0), 0) / dayScans.length
+          )
+        : null;
+
+    // 2. Self-report for this date:
+    const daySelfReport = selfReports.find((sr) => sr.createdAt.startsWith(dl.fullDate));
+    const daySelf = daySelfReport ? daySelfReport.score : null;
+
+    // 3. Load score for this date (from scheduled hours vs standard 6h focus baseline)
+    const dayLoad = Math.min(100, Math.round((dl.hours / 6) * 100));
+
+    // Daily fused calculation
+    let dailyStress: number;
+    if (dayBio !== null && daySelf !== null) {
+      dailyStress = Math.round(dayBio * 0.4 + daySelf * 0.3 + dayLoad * 0.3);
+    } else if (dayBio !== null) {
+      dailyStress = Math.round(dayBio * 0.5 + dayLoad * 0.5);
+    } else if (daySelf !== null) {
+      dailyStress = Math.round(daySelf * 0.4 + dayLoad * 0.6);
+    } else {
+      // With no biometric or self-report for a day, show only the observed
+      // schedule load. Do not manufacture a personal stress reading.
+      dailyStress = dayLoad;
+    }
+
+    return {
+      dayIndex: dl.dayIndex,
+      dayLabel: dl.dayLabel,
+      fullDate: dl.fullDate,
+      stressScore: dailyStress,
+      biometricScore: dayBio,
+      selfReportScore: daySelf,
+      loadScore: dayLoad,
+      isPeak: false,
+      isToday: dl.fullDate === todayStr,
+    };
+  });
+
+  // Find peak day
+  let maxScore = -1;
+  let peakIndex = 0;
+
+  points.forEach((p, idx) => {
+    if (p.stressScore > maxScore) {
+      maxScore = p.stressScore;
+      peakIndex = idx;
+    }
+  });
+
+  if (points[peakIndex]) {
+    points[peakIndex].isPeak = true;
+  }
+
+  const dayNamesLong = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const peakFullName = dayNamesLong[peakIndex] || 'Wednesday';
+
+  // Overall fused score
+  const overallFusion = await recomputeFusedScore(workloadAnalysis.totalCapacityPct);
+
+  return {
+    points,
+    peakDay: peakFullName,
+    peakScore: Math.max(0, maxScore),
+    domainDriver: driver.domain,
+    driverPercentage: driver.percentage,
+    insight: maxScore > 0
+      ? `${peakFullName} is your highest-load day. ${driver.insight}`
+      : 'No workload or stress signals yet. Sync a calendar or add a task to begin.',
+    fusedScore: overallFusion.fusedScore ?? 0,
+    confidence: overallFusion.confidence,
+    biometricScore: overallFusion.biometricScore,
+    selfReportScore: overallFusion.selfReportScore,
+    loadScore: overallFusion.loadScore,
+  };
 }
 
 /* ── Pillar 2: sessions + calibration feedback ───────────────────── */
@@ -985,3 +1139,9 @@ export async function circleNeedsSupport(): Promise<boolean> {
   const summary = await getCircleSummary();
   return !summary.suppressed && (summary.redZoneCount ?? 0) > 0;
 }
+
+/* ── Pillar 1: Workload & Calendar Sync ─────────────────────────── */
+export {
+  addWorkloadItem, analyzeWorkload, batchDeferWorkloadItems, completeWorkloadItem, deferWorkloadItem, getCalendarConnections, getRankedTasks, listWorkloadItems, restoreWorkloadItem, syncCalendar
+};
+

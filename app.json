@@ -24,7 +24,7 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "permissions": ["android.permission.CAMERA"],
+      "permissions": ["android.permission.CAMERA", "android.permission.ACCESS_COARSE_LOCATION", "android.permission.ACCESS_FINE_LOCATION"],
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.READ_MEDIA_IMAGES",
@@ -39,6 +39,24 @@
     "plugins": [
       "expo-router",
       "expo-font",
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Wick reads your calendar to understand workload and can add a recovery block when you ask it to."
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Wick uses your step count to verify an outdoor recovery walk."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Wick uses your location only while you explicitly verify an outdoor recovery action. Your coordinates are never stored."
+        }
+      ],
       [
         "expo-splash-screen",
         {

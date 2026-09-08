@@ -58,6 +58,9 @@ export default function CalibrationScreen() {
         spread: 0,
         signalsUsed: scores[0].signalsUsed,
         note: '',
+        biometricScore: null,
+        selfReportScore: null,
+        loadScore: null,
       });
     }
   }, []);

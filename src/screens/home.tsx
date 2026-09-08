@@ -1,24 +1,46 @@
-import React, { useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  Pressable,
-  ScrollView,
-  StatusBar,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
-import Svg, { Path, Circle, Line, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { MaterialIcons } from '@expo/vector-icons';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
+import {
+    ActivityIndicator,
+    Modal,
+    Pressable,
+    ScrollView,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
+} from 'react-native';
+import { Screen } from "../components/base";
+import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-native-svg';
 
-import { colors } from '@/theme';
-import TopNavigation from '@/components/topbar';
 import BottomNavigation from '@/components/bottombar';
+import TopNavigation from '@/components/topbar';
+import type {
+    WeeklyStressAnalysis,
+    WorkloadAnalysis,
+    WorkloadCategory,
+  WorkloadItem,
+  WorkloadPriority,
+  WorkloadStatus,
+} from '@/data/types';
+import {
+    addWorkloadItem,
+    // completeWorkloadItem,
+    // batchDeferWorkloadItems,
+    // deferWorkloadItem,
+    // getCalendarConnections,
+    getWeeklyStressAnalysis,
+    // listWorkloadItems,
+    recomputeFusedScore,
+    // syncCalendar,
+} from '@/services/repository';
+import { analyzeWorkload, getRankedTasks } from '@/services/workloadService';
+import { colors } from '@/theme';
+import { getMondayOfWeek, seedCalendarItems } from '@/data/localStore';
 
-// Anchored to src/theme, which carries the Figma swatches. The few values
-// below that aren't in the token set (warning washes, error) stay literal until
-// they're needed on a second screen.
+// Anchored to src/theme, which carries the Figma swatches.
 const COLORS = {
   background: colors.cream,
   surface: colors.surface,
@@ -33,31 +55,264 @@ const COLORS = {
   warningBorder: colors.yellowDeep,
   warningText: '#854D0E',
   warningSubtext: '#713F12',
+  green: colors.calm,
 };
+
+const CATEGORIES: WorkloadCategory[] = [
+  'academic',
+  'social',
+  'physical',
+  'errands',
+  'mental',
+];
+
+const CATEGORY_COLORS: Record<WorkloadCategory, string> = {
+  academic: '#F87171',
+  social: '#BAE6FD',
+  physical: '#BBF7D0',
+  errands: '#FDE2E4',
+  mental: '#E9D5FF',
+};
+
+const CIRCUMFERENCE = 2 * Math.PI * 48; // ~301.59
+
+const legacyPreviewAnalysis: WorkloadAnalysis = {
+  totalCapacityPct: 90,
+  weeklyHours: 36,
+  capacityMaxHours: 40,
+  spikingCategory: 'academic',
+  isOverloaded: true,
+  categoryBreakdown: {
+    academic: {
+      category: 'academic',
+      name: 'Academic',
+      emoji: '📚',
+      hours: 13.5,
+      percentage: 35,
+      taskCount: 4,
+      topDescription: 'Thesis & Lab prep',
+      items: [],
+    },
+    social: {
+      category: 'social',
+      name: 'Social & Community',
+      emoji: '🌱',
+      hours: 7.5,
+      percentage: 20,
+      taskCount: 2,
+      topDescription: 'Coffee & birthdays',
+      items: [],
+    },
+    physical: {
+      category: 'physical',
+      name: 'Physical Health',
+      emoji: '🏃',
+      hours: 5.5,
+      percentage: 15,
+      taskCount: 2,
+      topDescription: 'Morning run & gym',
+      items: [],
+    },
+    errands: {
+      category: 'errands',
+      name: 'Others & Errands',
+      emoji: '🛒',
+      hours: 6.5,
+      percentage: 15,
+      taskCount: 3,
+      topDescription: 'Laundry, Groceries',
+      items: [],
+    },
+    mental: {
+      category: 'mental',
+      name: 'Mental/Downtime',
+      emoji: '🧘',
+      hours: 3.0,
+      percentage: 5,
+      taskCount: 2,
+      topDescription: 'Breathing, reading',
+      items: [],
+    },
+  },
+  recommendedDeferrals: [],
+};
+
+const defaultAnalysis = analyzeWorkload([]);
 
 export default function Home() {
   const router = useRouter();
-  const [deferredTasks, setDeferredTasks] = useState<string[]>([]);
 
-  const deferTask = (task: string) => {
-    setDeferredTasks((prev) =>
-      prev.includes(task) ? prev : [...prev, task],
-    );
+  const [analysis, setAnalysis] = useState<WorkloadAnalysis>(defaultAnalysis);
+  const [weeklyStress, setWeeklyStress] = useState<WeeklyStressAnalysis | null>(null);
+  const [selectedStressIndex, setSelectedStressIndex] = useState<number | null>(null);
+  const [rankedTasks, setRankedTasks] = useState<ReturnType<typeof getRankedTasks>>([]);
+  const [mockWorkloadItems, setMockWorkloadItems] = useState<WorkloadItem[]>(() => seedCalendarItems('google'));
+  const [deferredSuccessMsg, setDeferredSuccessMsg] = useState<string | null>(null);
+
+  // Manual Task modal state
+  const [taskModalVisible, setTaskModalVisible] = useState(false);
+  const [manualTitle, setManualTitle] = useState('');
+  const [manualCategory, setManualCategory] = useState<WorkloadCategory>('academic');
+  const [manualHours, setManualHours] = useState('1.5');
+  const [manualPriority, setManualPriority] = useState<WorkloadPriority>('medium');
+  const [manualDate, setManualDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [manualTime, setManualTime] = useState(() => new Date().toTimeString().slice(0, 5));
+  const [savingTask, setSavingTask] = useState(false);
+
+  // Demo mode intentionally ignores cached real calendar rows.
+  const loadWorkload = useCallback(async () => {
+    try {
+      const items = mockWorkloadItems;
+      // Real workload read (restore this when the demo should use the database):
+      // const items = await listWorkloadItems();
+      const weekStart = getMondayOfWeek();
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekEnd.getDate() + 7);
+      const currentWeekItems = items.filter((item) => {
+        if (!item.scheduledStart) return false;
+        const start = new Date(item.scheduledStart);
+        return start >= weekStart && start < weekEnd;
+      });
+      const computed = analyzeWorkload(currentWeekItems);
+      setAnalysis(computed);
+      setRankedTasks(getRankedTasks(currentWeekItems));
+      setWeeklyStress(await getWeeklyStressAnalysis(currentWeekItems));
+      // Recompute stress fusion with this continuous load score
+      await recomputeFusedScore(computed.totalCapacityPct);
+    } catch (e) {
+      console.warn('Failed to load workload analysis:', e);
+    }
+  }, [mockWorkloadItems]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadWorkload();
+      // Production calendar refresh, retained for restoring the live flow:
+      // const refreshConnectedCalendar = async () => {
+      //   const connections = await getCalendarConnections();
+      //   await Promise.all(connections.filter((connection) => connection.connected).map(async (connection) => {
+      //     try { await syncCalendar(connection.provider); } catch { /* permission/account may have changed */ }
+      //   }));
+      //   await loadWorkload();
+      // };
+      // const timer = setInterval(refreshConnectedCalendar, 60 * 1000);
+      // return () => clearInterval(timer);
+    }, [loadWorkload])
+  );
+
+  // Defer individual task
+  const handleDefer = async (id: string) => {
+    setMockWorkloadItems((items) => items.map((item) => item.id === id ? { ...item, status: 'deferred' } : item));
+    // Real database mutation (restore with real workload reads):
+    // await deferWorkloadItem(id);
+    const updated = mockWorkloadItems.map((item) => item.id === id ? { ...item, status: 'deferred' as const } : item);
+    const computed = analyzeWorkload(updated);
+    setAnalysis(computed);
+    setDeferredSuccessMsg('✓ Task deferred — workload capacity updated');
+    await recomputeFusedScore(computed.totalCapacityPct);
   };
 
-  const isDeferred = (task: string) => deferredTasks.includes(task);
+  const handleComplete = async (id: string) => {
+    const target = mockWorkloadItems.find((item) => item.id === id);
+    const nextStatus: WorkloadStatus = target?.status === 'completed' ? 'scheduled' : 'completed';
+    setMockWorkloadItems((items) => items.map((item) => item.id === id ? { ...item, status: nextStatus } : item));
+    // Real database mutation when real task data is enabled:
+    // await completeWorkloadItem(id);
+    const updated = mockWorkloadItems.map((item) => item.id === id ? { ...item, status: nextStatus } : item);
+    const currentWeekItems = updated.filter((item) => item.scheduledStart && new Date(item.scheduledStart) >= getMondayOfWeek());
+    const computed = analyzeWorkload(currentWeekItems);
+    setAnalysis(computed);
+    setRankedTasks(getRankedTasks(currentWeekItems));
+    setWeeklyStress(await getWeeklyStressAnalysis(currentWeekItems));
+    await recomputeFusedScore(computed.totalCapacityPct);
+  };
+
+  // Smart Rebalance: defer all flagged candidates in one tap
+  const handleSmartRebalance = async () => {
+    const ids = analysis.recommendedDeferrals.map((r) => r.id);
+    if (ids.length > 0) {
+      setMockWorkloadItems((items) => items.map((item) => ids.includes(item.id) ? { ...item, status: 'deferred' } : item));
+      // Real database mutation (restore with real workload reads):
+      // await batchDeferWorkloadItems(ids);
+      const updated = mockWorkloadItems.map((item) => ids.includes(item.id) ? { ...item, status: 'deferred' as const } : item);
+      const computed = analyzeWorkload(updated);
+      setAnalysis(computed);
+      setDeferredSuccessMsg(
+        `✓ Smart Rebalance applied: capacity reduced to ${computed.totalCapacityPct}%`
+      );
+      await recomputeFusedScore(computed.totalCapacityPct);
+    }
+  };
+
+  // Add manual task/errand
+  const handleSaveTask = async () => {
+    if (!manualTitle.trim()) return;
+    setSavingTask(true);
+    try {
+      const hours = parseFloat(manualHours) || 1.0;
+      const newTask = await addWorkloadItem({
+        title: manualTitle.trim(),
+        category: manualCategory,
+        estimatedHours: hours,
+        priority: manualPriority,
+        source: 'manual',
+        scheduledStart: new Date(`${manualDate}T${manualTime}:00`).toISOString(),
+        scheduledEnd: new Date(new Date(`${manualDate}T${manualTime}:00`).getTime() + hours * 60 * 60 * 1000).toISOString(),
+      });
+      setMockWorkloadItems((items) => [newTask, ...items]);
+      setManualTitle('');
+      setManualHours('1.5');
+      setManualDate(new Date().toISOString().slice(0, 10));
+      setManualTime(new Date().toTimeString().slice(0, 5));
+      setTaskModalVisible(false);
+      await loadWorkload();
+    } catch (e) {
+      console.warn('Failed to add manual task:', e);
+    } finally {
+      setSavingTask(false);
+    }
+  };
+
+  // Compute dynamic SVG donut arcs based on actual percentages
+  const donutArcs = useMemo(() => {
+    return CATEGORIES.reduce<{ category: WorkloadCategory; color: string; strokeDasharray: string; strokeDashoffset: number; percentage: number }[]>((arcs, cat) => {
+      const summary = analysis.categoryBreakdown[cat];
+      const pct = summary ? summary.percentage : 0;
+      const arcLength = (pct / 100) * CIRCUMFERENCE;
+      const cumulativeOffset = arcs.reduce((sum, arc) => sum + (arc.percentage / 100) * CIRCUMFERENCE, 0);
+      arcs.push({
+        category: cat,
+        color: CATEGORY_COLORS[cat],
+        strokeDasharray: `${arcLength} ${CIRCUMFERENCE - arcLength}`,
+        strokeDashoffset: -cumulativeOffset,
+        percentage: pct,
+      });
+      return arcs;
+    }, []);
+  }, [analysis]);
+
+  const stressChart = useMemo(() => {
+    const points = weeklyStress?.points ?? [];
+    if (points.length === 0) return { line: '', area: '', coordinates: [] as { x: number; y: number }[] };
+    const coordinates = points.map((point, index) => ({
+      x: 20 + (index * 345) / Math.max(1, points.length - 1),
+      y: 100 - (Math.min(100, Math.max(0, point.stressScore)) * 0.8),
+    }));
+    const line = coordinates.map((p, index) => `${index === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+    return { line, area: `${line} L 365 100 L 20 100 Z`, coordinates };
+  }, [weeklyStress]);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
+    <Screen
+        scroll={false}
+      padded={false}
 
-      <View style={styles.container}>
-        {/* Top Navigation Bar */}
-        <TopNavigation
-          onNotificationPress={() => {
-            // Add notification screen handler here later
-          }}
-        />
+        header={<TopNavigation />}
+        footer={<BottomNavigation activeTab="Home" router={router} />}
+      >
+        <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
+
+        <View style={styles.container}>
 
         {/* Main Scroll Content */}
         <ScrollView
@@ -90,43 +345,33 @@ export default function Home() {
                 <Line x1="10" y1="100" x2="370" y2="100" stroke="#f2eede" strokeWidth="1" />
 
                 {/* Gradient Fill */}
-                <Path
-                  d="M 20 85 C 50 82, 60 70, 80 68 C 110 65, 120 22, 140 16 C 160 12, 180 50, 200 55 C 230 62, 240 75, 260 78 C 290 82, 300 92, 320 90 C 340 88, 355 85, 365 85 L 365 100 L 20 100 Z"
-                  fill="url(#stressGradient)"
-                />
+                {stressChart.area && <Path d={stressChart.area} fill="url(#stressGradient)" />}
 
                 {/* Smooth Curve */}
-                <Path
-                  d="M 20 85 C 50 82, 60 70, 80 68 C 110 65, 120 22, 140 16 C 160 12, 180 50, 200 55 C 230 62, 240 75, 260 78 C 290 82, 300 92, 320 90 C 340 88, 355 85, 365 85"
+                {stressChart.line && <Path
+                  d={stressChart.line}
                   stroke="#7c5730"
                   strokeWidth="2.5"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   fill="none"
-                />
-
-                {/* Peak Point on Wednesday */}
-                <Circle cx="140" cy="16" r="6" fill="#ba1a1a" stroke="#ffffff" strokeWidth="2.5" />
-
-                {/* Node Points */}
-                <Circle cx="20" cy="85" r="3" fill="#81756c" />
-                <Circle cx="80" cy="68" r="3" fill="#81756c" />
-                <Circle cx="200" cy="55" r="3" fill="#81756c" />
-                <Circle cx="260" cy="78" r="3" fill="#81756c" />
-                <Circle cx="320" cy="90" r="3" fill="#81756c" />
-                <Circle cx="365" cy="85" r="3" fill="#81756c" />
+                />}
+                {weeklyStress?.points.map((point, index) => {
+                  const coordinate = stressChart.coordinates?.[index];
+                  return coordinate ? <Circle key={point.fullDate} cx={coordinate.x} cy={coordinate.y} r={selectedStressIndex === index || point.isPeak ? 6 : 3} fill={point.isPeak ? '#ba1a1a' : '#81756c'} stroke={selectedStressIndex === index || point.isPeak ? '#ffffff' : undefined} strokeWidth={selectedStressIndex === index || point.isPeak ? 2.5 : undefined} onPress={() => setSelectedStressIndex(index)} accessibilityLabel={`${point.dayLabel}: ${Math.round(point.stressScore)} percent stress`} /> : null;
+                })}
               </Svg>
 
-              <View style={styles.daysRow}>
-                <Text style={styles.dayText}>M</Text>
-                <Text style={styles.dayText}>T</Text>
-                <View style={styles.activeDayBadge}>
-                  <Text style={styles.activeDayText}>W</Text>
+              {selectedStressIndex !== null && weeklyStress?.points[selectedStressIndex] && (
+                <View style={styles.chartValueBubble}>
+                  <Text style={styles.chartValueText}>
+                    {weeklyStress.points[selectedStressIndex].dayLabel}: {Math.round(weeklyStress.points[selectedStressIndex].stressScore)}% stress
+                  </Text>
                 </View>
-                <Text style={styles.dayText}>T</Text>
-                <Text style={styles.dayText}>F</Text>
-                <Text style={styles.dayText}>S</Text>
-                <Text style={styles.dayText}>S</Text>
+              )}
+
+              <View style={styles.daysRow}>
+                {(weeklyStress?.points ?? []).map((point) => point.isToday ? <View key={point.fullDate} style={styles.activeDayBadge}><Text style={styles.activeDayText}>{point.dayLabel}</Text></View> : <Text key={point.fullDate} style={styles.dayText}>{point.dayLabel}</Text>)}
               </View>
             </View>
 
@@ -138,7 +383,7 @@ export default function Home() {
               <View style={styles.insightContent}>
                 <Text style={styles.insightTitle}>Early Warning Insight</Text>
                 <Text style={styles.insightText}>
-                  Wednesday load spiked severely. Ensure your schedule tomorrow supports active restoration blocks.
+                  {weeklyStress?.insight ?? 'Add a calendar or task to start your stress forecast.'}
                 </Text>
               </View>
             </View>
@@ -148,30 +393,48 @@ export default function Home() {
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.sectionLabel}>WEEKLY CAPACITY</Text>
-              <View style={styles.nearLimitBadge}>
-                <Text style={styles.nearLimitText}>Near Limit</Text>
+              <View
+                style={[
+                  styles.nearLimitBadge,
+                  !analysis.isOverloaded && { backgroundColor: '#DCFCE7' },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.nearLimitText,
+                    !analysis.isOverloaded && { color: '#16A34A' },
+                  ]}
+                >
+                  {analysis.isOverloaded ? 'Near Limit' : 'Balanced'}
+                </Text>
               </View>
             </View>
 
             <View style={styles.capacityContainer}>
               <View style={styles.capacityCircleWrapper}>
                 <Svg height="144" width="144" viewBox="0 0 120 120" style={{ transform: [{ rotate: '-90deg' }] }}>
-                  {/* Background Circle */}
+                  {/* Background Track */}
                   <Circle cx="60" cy="60" r="48" fill="none" stroke="#F3F4F6" strokeWidth="12" />
-                  {/* Academic 35% */}
-                  <Circle cx="60" cy="60" r="48" fill="none" stroke="#F87171" strokeWidth="12" strokeDasharray="105.56 196.04" strokeDashoffset="0" />
-                  {/* Social 20% */}
-                  <Circle cx="60" cy="60" r="48" fill="none" stroke="#BAE6FD" strokeWidth="12" strokeDasharray="60.32 241.28" strokeDashoffset="-105.56" />
-                  {/* Physical 15% */}
-                  <Circle cx="60" cy="60" r="48" fill="none" stroke="#BBF7D0" strokeWidth="12" strokeDasharray="45.24 256.36" strokeDashoffset="-165.88" />
-                  {/* Others 15% */}
-                  <Circle cx="60" cy="60" r="48" fill="none" stroke="#FDE2E4" strokeWidth="12" strokeDasharray="45.24 256.36" strokeDashoffset="-211.12" />
-                  {/* Mental 5% */}
-                  <Circle cx="60" cy="60" r="48" fill="none" stroke="#E9D5FF" strokeWidth="12" strokeDasharray="15.08 286.52" strokeDashoffset="-256.36" />
+                  {/* Dynamic Category Arcs */}
+                  {donutArcs.map((arc) =>
+                    arc.percentage > 0 ? (
+                      <Circle
+                        key={arc.category}
+                        cx="60"
+                        cy="60"
+                        r="48"
+                        fill="none"
+                        stroke={arc.color}
+                        strokeWidth="12"
+                        strokeDasharray={arc.strokeDasharray}
+                        strokeDashoffset={arc.strokeDashoffset}
+                      />
+                    ) : null
+                  )}
                 </Svg>
                 <View style={styles.capacityOverlay}>
                   <View style={styles.capacityNumberRow}>
-                    <Text style={styles.capacityNumber}>90</Text>
+                    <Text style={styles.capacityNumber}>{analysis.totalCapacityPct}</Text>
                     <Text style={styles.capacityPercent}>%</Text>
                   </View>
                   <Text style={styles.capacityLabel}>Capacity</Text>
@@ -179,53 +442,62 @@ export default function Home() {
               </View>
             </View>
 
-            {/* Capacity Overload Warning */}
-            <View style={styles.capacityWarning}>
-              <MaterialIcons name="warning" size={20} color="#CA8A04" style={{ marginRight: 10, marginTop: 2 }} />
-              <View style={styles.warningContent}>
-                <Text style={styles.warningTitle}>Overload Warning (90% capacity)</Text>
-                <Text style={styles.warningText}>
-                  You're nearing your weekly limit. Deferring 2 non-essential tasks will help avoid burnout.
-                </Text>
+            {/* Capacity Overload Warning or Balance Status */}
+            {analysis.isOverloaded ? (
+              <View style={styles.capacityWarning}>
+                <MaterialIcons name="warning" size={20} color="#CA8A04" style={{ marginRight: 10, marginTop: 2 }} />
+                <View style={styles.warningContent}>
+                  <Text style={styles.warningTitle}>Overload Warning ({analysis.totalCapacityPct}% capacity)</Text>
+                  <Text style={styles.warningText}>
+                    You&apos;re nearing your weekly limit ({analysis.weeklyHours}h scheduled). Deferring{' '}
+                    {analysis.recommendedDeferrals.length > 0 ? analysis.recommendedDeferrals.length : 2}{' '}
+                    non-essential tasks will help avoid burnout.
+                  </Text>
+                </View>
               </View>
-            </View>
+            ) : (
+              <View style={[styles.capacityWarning, { backgroundColor: '#EFF6EB', borderColor: '#BBF7D0' }]}>
+                <MaterialIcons name="check-circle" size={20} color="#16A34A" style={{ marginRight: 10, marginTop: 2 }} />
+                <View style={styles.warningContent}>
+                  <Text style={[styles.warningTitle, { color: '#166534' }]}>Schedule Balanced ({analysis.totalCapacityPct}% capacity)</Text>
+                  <Text style={[styles.warningText, { color: '#15803D' }]}>
+                    Your scheduled load ({analysis.weeklyHours}h) is within sustainable limits. Good space for rest!
+                  </Text>
+                </View>
+              </View>
+            )}
 
             <View style={styles.capacitySection}>
-              {/* Segmented Progress Bar */}
+              {/* Dynamic Segmented Progress Bar */}
               <View style={styles.capacityBar}>
-                <View style={[styles.capacitySegment, { width: '35%', backgroundColor: '#F87171' }]} />
-                <View style={[styles.capacitySegment, { width: '20%', backgroundColor: '#BAE6FD' }]} />
-                <View style={[styles.capacitySegment, { width: '15%', backgroundColor: '#BBF7D0' }]} />
-                <View style={[styles.capacitySegment, { width: '15%', backgroundColor: '#FDE2E4' }]} />
-                <View style={[styles.capacitySegment, { width: '5%', backgroundColor: '#E9D5FF' }]} />
+                {CATEGORIES.map((cat) => {
+                  const pct = analysis.categoryBreakdown[cat]?.percentage ?? 0;
+                  if (pct === 0) return null;
+                  return (
+                    <View
+                      key={cat}
+                      style={[
+                        styles.capacitySegment,
+                        { width: `${pct}%`, backgroundColor: CATEGORY_COLORS[cat] },
+                      ]}
+                    />
+                  );
+                })}
               </View>
 
               {/* Category Percentages Legend */}
               <View style={styles.legendContainer}>
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: '#F87171' }]} />
-                  <Text style={styles.legendText}>Academic (35%)</Text>
-                </View>
-
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: '#BAE6FD' }]} />
-                  <Text style={styles.legendText}>Social (20%)</Text>
-                </View>
-
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: '#BBF7D0' }]} />
-                  <Text style={styles.legendText}>Physical (15%)</Text>
-                </View>
-
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: '#FDE2E4' }]} />
-                  <Text style={styles.legendText}>Others (15%)</Text>
-                </View>
-
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: '#E9D5FF' }]} />
-                  <Text style={styles.legendText}>Mental (5%)</Text>
-                </View>
+                {CATEGORIES.map((cat) => {
+                  const item = analysis.categoryBreakdown[cat];
+                  return (
+                    <View key={cat} style={styles.legendItem}>
+                      <View style={[styles.legendDot, { backgroundColor: CATEGORY_COLORS[cat] }]} />
+                      <Text style={styles.legendText}>
+                        {item.name} ({item.percentage}%)
+                      </Text>
+                    </View>
+                  );
+                })}
               </View>
             </View>
           </View>
@@ -234,8 +506,11 @@ export default function Home() {
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Categorized Load Map</Text>
-              <Pressable onPress={() => {}} style={({ pressed }) => [pressed && styles.pressed]}>
-                <Text style={styles.editText}>Edit ›</Text>
+              <Pressable
+                onPress={() => setTaskModalVisible(true)}
+                style={({ pressed }) => [pressed && styles.pressed]}
+              >
+                <Text style={styles.editText}>+ Add Task ›</Text>
               </Pressable>
             </View>
 
@@ -243,8 +518,8 @@ export default function Home() {
               <CategoryCard
                 emoji="📚"
                 title="Academic"
-                description="Thesis & Lab prep"
-                badge="4 Tasks"
+                description={analysis.categoryBreakdown.academic.topDescription}
+                badge={`${analysis.categoryBreakdown.academic.taskCount} Tasks`}
                 background="#FFEAEA"
                 border="#FECDD3"
                 badgeBackground="#FFE4E6"
@@ -253,8 +528,8 @@ export default function Home() {
               <CategoryCard
                 emoji="🌱"
                 title="Social & Community"
-                description="Coffee & birthdays"
-                badge="2 Events"
+                description={analysis.categoryBreakdown.social.topDescription}
+                badge={`${analysis.categoryBreakdown.social.taskCount} Events`}
                 background="#E0F2FE"
                 border="#BAE6FD"
                 badgeBackground="#BAE6FD"
@@ -263,8 +538,8 @@ export default function Home() {
               <CategoryCard
                 emoji="🏃"
                 title="Physical Health"
-                description="Morning run & gym"
-                badge="Active"
+                description={analysis.categoryBreakdown.physical.topDescription}
+                badge={analysis.categoryBreakdown.physical.taskCount > 0 ? 'Active' : 'Rest'}
                 background="#DCFCE7"
                 border="#BBF7D0"
                 badgeBackground="#BBF7D0"
@@ -273,89 +548,250 @@ export default function Home() {
               <CategoryCard
                 emoji="🧘"
                 title="Mental/Downtime"
-                description="Breathing, reading"
-                badge="1 Session"
+                description={analysis.categoryBreakdown.mental.topDescription}
+                badge={`${analysis.categoryBreakdown.mental.taskCount} Session${analysis.categoryBreakdown.mental.taskCount === 1 ? '' : 's'}`}
                 background="#F3E8FF"
                 border="#E9D5FF"
                 badgeBackground="#E9D5FF"
                 badgeColor="#9333EA"
               />
 
-              {/* Full Width Category */}
+              {/* Full Width Category: Errands */}
               <View style={[styles.categoryFull, { backgroundColor: '#FDF2F4', borderColor: '#FBCFE8' }]}>
                 <View style={styles.otherLeft}>
                   <Text style={styles.categoryEmoji}>🛒</Text>
                   <View style={{ marginLeft: 10 }}>
                     <Text style={styles.categoryTitle}>Others & Errands</Text>
-                    <Text style={styles.categoryDescription}>Laundry, Groceries</Text>
+                    <Text style={styles.categoryDescription}>
+                      {analysis.categoryBreakdown.errands.topDescription}
+                    </Text>
                   </View>
                 </View>
                 <View style={styles.otherBadge}>
-                  <Text style={styles.otherBadgeText}>3 Left</Text>
+                  <Text style={styles.otherBadgeText}>
+                    {analysis.categoryBreakdown.errands.taskCount} Left
+                  </Text>
                 </View>
               </View>
             </View>
+          </View>
+
+          {/* 4. Ranked tasks: priority first, then time. */}
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+                <Text style={styles.cardTitle}>This Week Tasks</Text>
+              <Pressable onPress={() => setTaskModalVisible(true)}><Text style={styles.editText}>+ Add Task ›</Text></Pressable>
+            </View>
+            {rankedTasks.length === 0 ? (
+              <Text style={styles.loadDescription}>No tasks yet. Add one manually, or sync a device calendar to build your live load map.</Text>
+            ) : rankedTasks.map((task) => (
+                <Pressable key={task.id} onPress={() => handleComplete(task.id)} style={({ pressed }) => [styles.rankedTaskRow, pressed && styles.pressed]}>
+                <Text style={styles.rankNumber}>#{task.rank}</Text>
+                <View style={{ flex: 1 }}><Text style={[styles.rankedTaskTitle, task.status === 'completed' && styles.completedTaskText]}>{task.title}</Text><Text style={[styles.rankedTaskMeta, task.status === 'completed' && styles.completedTaskText]}>{task.timeFormatted}</Text></View>
+                <Text style={[styles.priorityPill, task.priority === 'low' ? styles.priorityLow : task.priority === 'medium' ? styles.priorityMedium : styles.priorityHigh]}>{task.priority}</Text>
+                </Pressable>
+            ))}
           </View>
 
           {/* 4. Load Balancer */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Load Balancer</Text>
-              <View style={styles.spikeBadge}>
-                <Text style={styles.spikeText}>SPIKE DETECTED</Text>
+              <View
+                style={[
+                  styles.spikeBadge,
+                  !analysis.spikingCategory && { backgroundColor: '#DCFCE7' },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.spikeText,
+                    !analysis.spikingCategory && { color: '#16A34A' },
+                  ]}
+                >
+                  {analysis.spikingCategory ? 'SPIKE DETECTED' : 'STABLE'}
+                </Text>
               </View>
             </View>
 
             <Text style={styles.loadDescription}>
-              Academic is spiking. Defer these lower-priority tasks to balance your week:
+              {analysis.spikingCategory
+                ? `${analysis.categoryBreakdown[analysis.spikingCategory]?.name} is spiking. Defer these lower-priority tasks to balance your week:`
+                : analysis.totalCapacityPct >= 80
+                ? 'Your schedule is near capacity. Defer lower-priority tasks to recover headroom:'
+                : `Your schedule is well balanced at ${analysis.totalCapacityPct}% capacity. No urgent deferrals needed.`}
             </Text>
 
-            {!isDeferred('clean') && (
+            {analysis.recommendedDeferrals.map((task) => (
               <TaskRow
-                emoji="🧹"
-                title="Deep Clean Kitchen"
-                subtitle="Errands • Medium priority"
-                onDefer={() => deferTask('clean')}
+                key={task.id}
+                emoji={
+                  task.category === 'errands'
+                    ? '🧹'
+                    : task.category === 'academic'
+                    ? '🗂️'
+                    : '📋'
+                }
+                title={task.title}
+                subtitle={`${task.category.charAt(0).toUpperCase() + task.category.slice(1)} • ${task.priority} priority • ${task.estimatedHours}h`}
+                status={task.status}
+                onDefer={() => handleDefer(task.id)}
+                onComplete={() => handleComplete(task.id)}
               />
-            )}
+            ))}
 
-            {!isDeferred('desk') && (
-              <TaskRow
-                emoji="🗂️"
-                title="Organize Desk Files"
-                subtitle="Academic • Low priority"
-                onDefer={() => deferTask('desk')}
-              />
-            )}
-
-            {deferredTasks.length === 2 && (
+            {deferredSuccessMsg && (
               <View style={styles.allDeferred}>
-                <Text style={styles.allDeferredText}>✓ Tasks deferred successfully</Text>
+                <Text style={styles.allDeferredText}>{deferredSuccessMsg}</Text>
               </View>
             )}
 
-            <Pressable
-              onPress={() => {
-                deferTask('clean');
-                deferTask('desk');
-              }}
-              style={({ pressed }) => [
-                styles.rebalanceButton,
-                pressed && styles.pressedRebalance,
-              ]}
-            >
-              <MaterialIcons name="settings" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.rebalanceText}>Apply Smart Rebalance</Text>
-            </Pressable>
+            {analysis.recommendedDeferrals.length > 0 && (
+              <Pressable
+                onPress={handleSmartRebalance}
+                style={({ pressed }) => [
+                  styles.rebalanceButton,
+                  pressed && styles.pressedRebalance,
+                ]}
+              >
+                <MaterialIcons name="settings" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.rebalanceText}>Apply Smart Rebalance</Text>
+              </Pressable>
+            )}
           </View>
 
           <View style={{ height: 40 }} />
         </ScrollView>
+        </View>
 
-        {/* Bottom Navigation Bar */}
-        <BottomNavigation activeTab="Home" router={router} />
-      </View>
-    </SafeAreaView>
+        {/* Manual Task / Errand Entry Modal */}
+        <Modal
+          visible={taskModalVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setTaskModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Add Task or Errand</Text>
+                <Pressable
+                  onPress={() => setTaskModalVisible(false)}
+                  style={({ pressed }) => [styles.modalClose, pressed && styles.pressed]}
+                >
+                  <Text style={styles.modalCloseText}>✕</Text>
+                </Pressable>
+              </View>
+
+              {/* Task Title */}
+              <Text style={styles.inputLabel}>TITLE</Text>
+              <TextInput
+                style={styles.textInput}
+                placeholder="e.g. Deep Clean Kitchen, Thesis Writing"
+                placeholderTextColor="#9A968C"
+                value={manualTitle}
+                onChangeText={setManualTitle}
+              />
+
+              {/* Category selector */}
+              <Text style={styles.inputLabel}>CATEGORY</Text>
+              <View style={styles.categoryChips}>
+                {CATEGORIES.map((cat) => (
+                  <Pressable
+                    key={cat}
+                    onPress={() => setManualCategory(cat)}
+                    style={[
+                      styles.categoryChip,
+                      manualCategory === cat && styles.categoryChipSelected,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.categoryChipText,
+                        manualCategory === cat && styles.categoryChipTextSelected,
+                      ]}
+                    >
+                      {cat === 'academic' && '📚 Academic'}
+                      {cat === 'social' && '🌱 Social'}
+                      {cat === 'physical' && '🏃 Physical'}
+                      {cat === 'errands' && '🛒 Errands'}
+                      {cat === 'mental' && '🧘 Mental'}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {/* Duration / Hours & Priority */}
+              <View style={styles.rowTwoCols}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>ESTIMATED HOURS</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    placeholder="1.5"
+                    placeholderTextColor="#9A968C"
+                    keyboardType="decimal-pad"
+                    value={manualHours}
+                    onChangeText={setManualHours}
+                  />
+                </View>
+
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.inputLabel}>PRIORITY</Text>
+                  <View style={styles.priorityGroup}>
+                    {(['low', 'medium', 'high'] as WorkloadPriority[]).map((p) => (
+                      <Pressable
+                        key={p}
+                        onPress={() => setManualPriority(p)}
+                        style={[
+                          styles.priorityButton,
+                          manualPriority === p && styles.priorityButtonSelected,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.priorityText,
+                            manualPriority === p && styles.priorityTextSelected,
+                          ]}
+                        >
+                          {p.toUpperCase()}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              </View>
+
+              <View style={styles.scheduleFields}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>DAY</Text>
+                  <TextInput style={styles.textInput} placeholder="YYYY-MM-DD" placeholderTextColor="#9A968C" value={manualDate} onChangeText={setManualDate} />
+                </View>
+                <View style={{ width: 110, marginLeft: 12 }}>
+                  <Text style={styles.inputLabel}>TIME</Text>
+                  <TextInput style={styles.textInput} placeholder="09:00" placeholderTextColor="#9A968C" value={manualTime} onChangeText={setManualTime} />
+                </View>
+              </View>
+
+              {/* Submit Button */}
+              <Pressable
+                disabled={savingTask || !manualTitle.trim()}
+                onPress={handleSaveTask}
+                style={({ pressed }) => [
+                  styles.saveTaskButton,
+                  (!manualTitle.trim() || savingTask) && styles.disabledButton,
+                  pressed && styles.pressedRebalance,
+                ]}
+              >
+                {savingTask ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.saveTaskButtonText}>Save to Workload</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+      </Screen>
   );
 }
 
@@ -398,24 +834,28 @@ function TaskRow({
   emoji,
   title,
   subtitle,
+  status,
   onDefer,
+  onComplete,
 }: {
   emoji: string;
   title: string;
   subtitle: string;
+  status: WorkloadItem['status'];
   onDefer: () => void;
+  onComplete: () => void;
 }) {
   return (
     <View style={styles.taskRow}>
-      <View style={styles.taskLeft}>
+      <Pressable onPress={onComplete} style={({ pressed }) => [styles.taskLeft, pressed && styles.pressed]}>
         <View style={styles.taskIcon}>
           <Text style={styles.taskEmoji}>{emoji}</Text>
         </View>
         <View style={styles.taskText}>
-          <Text style={styles.taskTitle}>{title}</Text>
-          <Text style={styles.taskSubtitle}>{subtitle}</Text>
+          <Text style={[styles.taskTitle, status === 'completed' && styles.completedTaskText]}>{title}</Text>
+          <Text style={[styles.taskSubtitle, status === 'completed' && styles.completedTaskText]}>{subtitle}</Text>
         </View>
-      </View>
+      </Pressable>
       <Pressable
         onPress={onDefer}
         style={({ pressed }) => [styles.deferButton, pressed && styles.pressed]}
@@ -449,6 +889,8 @@ const styles = StyleSheet.create({
   adaptiveBadge: { paddingHorizontal: 12, paddingVertical: 4, borderRadius: 20, backgroundColor: '#FFF3BA' },
   adaptiveText: { color: COLORS.primaryContainer, fontSize: 11, fontWeight: '500' },
   chartContainer: { height: 160, marginTop: 4, marginBottom: 12 },
+  chartValueBubble: { alignSelf: 'center', marginTop: -2, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, backgroundColor: '#FFF3BA' },
+  chartValueText: { color: COLORS.primary, fontSize: 11, fontWeight: '700' },
   daysRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 8, marginTop: 8 },
   dayText: { width: 24, textAlign: 'center', color: COLORS.outline, fontSize: 11, fontWeight: '500' },
   activeDayBadge: { width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255, 218, 214, 0.5)', alignItems: 'center', justifyContent: 'center' },
@@ -479,7 +921,7 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center' },
   legendDot: { width: 10, height: 10, borderRadius: 5, marginRight: 6 },
   legendText: { fontSize: 12, fontWeight: '500', color: '#4B5563' },
-  editText: { color: COLORS.primary, fontSize: 11, fontWeight: '600' },
+  editText: { color: COLORS.primary, fontSize: 12, fontWeight: '700' },
   categoryGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
   categoryCard: { width: '48.5%', minHeight: 145, borderRadius: 16, borderWidth: 1, padding: 14, marginBottom: 10, justifyContent: 'space-between' },
   categoryTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -493,7 +935,7 @@ const styles = StyleSheet.create({
   otherLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   otherBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 13, backgroundColor: '#FFE4E6' },
   otherBadgeText: { color: '#E11D48', fontSize: 10, fontWeight: '700' },
-  loadDescription: { color: '#4F453D', fontSize: 12, lineHeight: 18, marginBottom: 14 },
+  loadDescription: { color: '#4F453D', fontSize: 13, lineHeight: 19, marginBottom: 14 },
   spikeBadge: { paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, backgroundColor: '#FEF3C7' },
   spikeText: { color: '#D97706', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   taskRow: { minHeight: 72, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
@@ -501,14 +943,46 @@ const styles = StyleSheet.create({
   taskIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#FEF9C3', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
   taskEmoji: { fontSize: 20 },
   taskText: { flex: 1 },
-  taskTitle: { color: COLORS.textDark, fontSize: 12, fontWeight: '500' },
-  taskSubtitle: { marginTop: 3, color: '#737373', fontSize: 10 },
-  deferButton: { paddingHorizontal: 13, paddingVertical: 7, borderRadius: 20, backgroundColor: '#FEF08A', flexDirection: 'row', alignItems: 'center' },
-  deferText: { color: '#713F12', fontSize: 11, fontWeight: '700' },
+  taskTitle: { color: COLORS.textDark, fontSize: 13, fontWeight: '600' },
+  taskSubtitle: { marginTop: 3, color: '#737373', fontSize: 11 },
+  deferButton: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#FEF08A', flexDirection: 'row', alignItems: 'center' },
+  deferText: { color: '#713F12', fontSize: 12, fontWeight: '700' },
   allDeferred: { padding: 12, marginBottom: 12, borderRadius: 14, backgroundColor: '#EFF6EB' },
   allDeferredText: { color: '#6A994E', fontSize: 12, fontWeight: '600', textAlign: 'center' },
   rebalanceButton: { height: 48, borderRadius: 24, backgroundColor: COLORS.primaryContainer, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', shadowColor: '#6B5036', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 3 },
-  rebalanceText: { color: '#FFFFFF', fontSize: 14, fontWeight: '500' },
+  rebalanceText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalCard: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 36 },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  modalTitle: { color: COLORS.text, fontSize: 20, fontWeight: '700' },
+  modalClose: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F5F2EC', alignItems: 'center', justifyContent: 'center' },
+  modalCloseText: { color: COLORS.outline, fontSize: 15, fontWeight: '700' },
+  inputLabel: { color: COLORS.outline, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 6, marginTop: 12 },
+  textInput: { height: 48, borderRadius: 14, borderWidth: 1, borderColor: '#EDE7D6', paddingHorizontal: 14, color: COLORS.text, fontSize: 15, backgroundColor: '#FAFAF8' },
+  categoryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  categoryChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, backgroundColor: '#F5F2EC', borderWidth: 1, borderColor: '#EAE5DB' },
+  categoryChipSelected: { backgroundColor: '#FDF1A9', borderColor: '#ECCB49' },
+  categoryChipText: { color: '#6E6A61', fontSize: 12, fontWeight: '600' },
+  categoryChipTextSelected: { color: '#3D2E1E', fontWeight: '700' },
+  rowTwoCols: { flexDirection: 'row', alignItems: 'center' },
+  scheduleFields: { flexDirection: 'row', alignItems: 'center', marginTop: 6, marginBottom: 2 },
+  priorityGroup: { flexDirection: 'row', height: 48, borderRadius: 14, borderWidth: 1, borderColor: '#EDE7D6', overflow: 'hidden' },
+  priorityButton: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FAFAF8' },
+  priorityButtonSelected: { backgroundColor: COLORS.primary },
+  priorityText: { color: COLORS.outline, fontSize: 11, fontWeight: '700' },
+  priorityTextSelected: { color: '#FFFFFF', fontWeight: '800' },
+  saveTaskButton: { height: 50, borderRadius: 25, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center', marginTop: 22 },
+  saveTaskButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  disabledButton: { opacity: 0.5 },
   pressed: { opacity: 0.7, transform: [{ scale: 0.96 }] },
+  rankedTaskRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F2EEE8' },
+  rankNumber: { color: COLORS.outline, fontWeight: '700', width: 28 },
+  rankedTaskTitle: { color: COLORS.text, fontWeight: '700', fontSize: 14 },
+  rankedTaskMeta: { color: COLORS.outline, fontSize: 12, marginTop: 2 },
+  completedTaskText: { textDecorationLine: 'line-through', opacity: 0.55 },
+  priorityPill: { overflow: 'hidden', color: '#8A5A16', backgroundColor: '#FEF3C7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
+  priorityLow: { backgroundColor: '#DCFCE7', color: '#15803D' },
+  priorityMedium: { backgroundColor: '#FEF3C7', color: '#A16207' },
+  priorityHigh: { backgroundColor: '#FEE2E2', color: '#B91C1C' },
   pressedRebalance: { opacity: 0.9, transform: [{ scale: 0.98 }] },
 });

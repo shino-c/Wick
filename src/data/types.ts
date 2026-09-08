@@ -180,3 +180,96 @@ export interface SupportNudge {
   createdAt: string;
   seenAt: string | null;
 }
+
+/* ── Pillar 1: Workload, Calendar Sync & Load Balancer ───────────── */
+
+export type WorkloadCategory = 'academic' | 'social' | 'physical' | 'errands' | 'mental';
+export type WorkloadPriority = 'low' | 'medium' | 'high';
+export type WorkloadSource = 'google' | 'outlook' | 'manual';
+export type WorkloadStatus = 'scheduled' | 'deferred' | 'completed';
+
+export interface WorkloadItem {
+  id: string;
+  title: string;
+  category: WorkloadCategory;
+  estimatedHours: number;
+  priority: WorkloadPriority;
+  source: WorkloadSource;
+  status: WorkloadStatus;
+  scheduledStart: string | null;
+  scheduledEnd: string | null;
+  createdAt: string;
+}
+
+export interface CalendarConnection {
+  provider: 'google' | 'outlook';
+  connected: boolean;
+  accountEmail: string | null;
+  lastSyncedAt: string;
+}
+
+export interface CategoryLoadSummary {
+  category: WorkloadCategory;
+  name: string;
+  emoji: string;
+  hours: number;
+  percentage: number;
+  taskCount: number;
+  topDescription: string;
+  items: WorkloadItem[];
+}
+
+export interface WorkloadAnalysis {
+  totalCapacityPct: number;
+  weeklyHours: number;
+  capacityMaxHours: number;
+  categoryBreakdown: Record<WorkloadCategory, CategoryLoadSummary>;
+  spikingCategory: WorkloadCategory | null;
+  isOverloaded: boolean;
+  recommendedDeferrals: WorkloadItem[];
+}
+
+export interface RankedTask extends WorkloadItem {
+  rank: number;
+  dayName: string;
+  timeFormatted: string;
+}
+
+export interface DailyStressPoint {
+  dayIndex: number; // 0..6
+  dayLabel: string; // 'M', 'T', 'W', 'T', 'F', 'S', 'S'
+  fullDate: string; // YYYY-MM-DD
+  stressScore: number;
+  biometricScore: number | null;
+  selfReportScore: number | null;
+  loadScore: number;
+  isPeak: boolean;
+  isToday: boolean;
+}
+
+export interface WeeklyStressAnalysis {
+  points: DailyStressPoint[];
+  peakDay: string;
+  peakScore: number;
+  domainDriver: string;
+  driverPercentage: number;
+  insight: string;
+  fusedScore: number;
+  confidence: 'Low' | 'Medium' | 'High';
+  biometricScore: number | null;
+  selfReportScore: number | null;
+  loadScore: number | null;
+}
+
+export interface RecoveryDay {
+  date: string;
+  completedPlanIds: string[];
+  gameCompleted: boolean;
+  gameMinutes: number;
+  outdoorCompleted: boolean;
+  /** The device-calendar event Wick reserved for today's recovery, when available. */
+  recoveryEventId?: string | null;
+  recoveryEventStart?: string | null;
+  recoveryPct: number;
+  updatedAt: string;
+}
