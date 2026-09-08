@@ -1,6 +1,6 @@
 import { MaterialIcons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Modal,
@@ -27,10 +27,11 @@ import type {
 } from '@/data/types';
 import {
     addWorkloadItem,
-    // completeWorkloadItem,
-    // batchDeferWorkloadItems,
-    // deferWorkloadItem,
+  batchDeferWorkloadItems,
+  completeWorkloadItem,
+  deferWorkloadItem,
     // getCalendarConnections,
+    buildWeeklyStressAnalysis,
     getWeeklyStressAnalysis,
     // listWorkloadItems,
     recomputeFusedScore,
@@ -144,6 +145,7 @@ export default function Home() {
 
   const [analysis, setAnalysis] = useState<WorkloadAnalysis>(defaultAnalysis);
   const [weeklyStress, setWeeklyStress] = useState<WeeklyStressAnalysis | null>(null);
+  const stressRequestRef = useRef(0);
   const [selectedStressIndex, setSelectedStressIndex] = useState<number | null>(null);
   const [rankedTasks, setRankedTasks] = useState<ReturnType<typeof getRankedTasks>>([]);
   const [mockWorkloadItems, setMockWorkloadItems] = useState<WorkloadItem[]>(() => seedCalendarItems('google'));
@@ -176,9 +178,19 @@ export default function Home() {
       const computed = analyzeWorkload(currentWeekItems);
       setAnalysis(computed);
       setRankedTasks(getRankedTasks(currentWeekItems));
-      setWeeklyStress(await getWeeklyStressAnalysis(currentWeekItems));
-      // Recompute stress fusion with this continuous load score
-      await recomputeFusedScore(computed.totalCapacityPct);
+      // Draw the schedule forecast now. Signal history is optional enrichment,
+      // so it must never hold the chart hostage to a database round trip.
+      setWeeklyStress(buildWeeklyStressAnalysis(currentWeekItems));
+      const stressRequest = ++stressRequestRef.current;
+      void getWeeklyStressAnalysis(currentWeekItems)
+        .then((value) => {
+          if (stressRequest === stressRequestRef.current) setWeeklyStress(value);
+        })
+        .catch((e) => console.warn('Failed to enrich weekly stress analysis:', e));
+      // Persist fusion after the UI is ready; do not block first paint.
+      void recomputeFusedScore(computed.totalCapacityPct).catch((e) => {
+        console.warn('Failed to recompute fused score:', e);
+      });
     } catch (e) {
       console.warn('Failed to load workload analysis:', e);
     }
@@ -223,8 +235,16 @@ export default function Home() {
     const computed = analyzeWorkload(currentWeekItems);
     setAnalysis(computed);
     setRankedTasks(getRankedTasks(currentWeekItems));
-    setWeeklyStress(await getWeeklyStressAnalysis(currentWeekItems));
-    await recomputeFusedScore(computed.totalCapacityPct);
+    setWeeklyStress(buildWeeklyStressAnalysis(currentWeekItems));
+    const stressRequest = ++stressRequestRef.current;
+    void getWeeklyStressAnalysis(currentWeekItems)
+      .then((value) => {
+        if (stressRequest === stressRequestRef.current) setWeeklyStress(value);
+      })
+      .catch((e) => console.warn('Failed to enrich weekly stress analysis:', e));
+    void recomputeFusedScore(computed.totalCapacityPct).catch((e) => {
+      console.warn('Failed to recompute fused score:', e);
+    });
   };
 
   // Smart Rebalance: defer all flagged candidates in one tap

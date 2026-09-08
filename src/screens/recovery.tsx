@@ -56,6 +56,18 @@ const RECOVERY_THRESHOLD = 70;
 const demoCapacity = (gameMinutes: number) =>
   Math.min(100, DEMO_INITIAL_CAPACITY + gameMinutes * 5);
 
+/** A joined recovery challenge is worth the same 5% as the other recovery actions. */
+const applyJoinedChallengeCredit = (day: RecoveryDay, joinedChallenge: ChallengeRow | null): RecoveryDay => {
+  if (!joinedChallenge?.joined || day.completedPlanIds.includes("challenge")) return day;
+
+  return {
+    ...day,
+    completedPlanIds: [...day.completedPlanIds, "challenge"],
+    recoveryPct: Math.min(100, day.recoveryPct + 5),
+    updatedAt: new Date().toISOString(),
+  };
+};
+
 const formatTime = (date: Date) =>
   date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
@@ -280,7 +292,7 @@ export default function RecoveryScreen() {
           const slotStart = findRecoverySlot(workload, now);
 
           if (!demoInitialized.current) {
-            const mockDay: RecoveryDay = {
+            const mockDay = applyJoinedChallengeCredit({
               ...realToday,
               // Demo capacity is independent from the backend calculation.
               recoveryPct: persistedGameCapacity,
@@ -288,7 +300,7 @@ export default function RecoveryScreen() {
               completedPlanIds: realToday.completedPlanIds ?? [],
               outdoorCompleted: realToday.outdoorCompleted,
               updatedAt: now.toISOString(),
-            };
+            }, joinedChallenge);
             setRecoveryDay(mockDay);
             setRecoveryWeek(createMockWeek(now, realTodayCompleted));
             setWalkStarted(false);
@@ -317,19 +329,15 @@ export default function RecoveryScreen() {
           } : currentDay);
           if (joinedChallenge?.joined) {
             setRecoveryDay((currentDay) => {
-              if (!currentDay || currentDay.completedPlanIds.includes("challenge")) return currentDay;
-              const recoveryPct = Math.min(100, currentDay.recoveryPct + 5);
+              if (!currentDay) return currentDay;
+              const creditedDay = applyJoinedChallengeCredit(currentDay, joinedChallenge);
+              if (creditedDay === currentDay) return currentDay;
               setRecoveryWeek((currentWeek) => currentWeek.map((day, index) => (
-                index === currentDayIndex && recoveryPct >= RECOVERY_THRESHOLD
+                index === currentDayIndex && creditedDay.recoveryPct >= RECOVERY_THRESHOLD
                   ? { ...day, recoveryPct: 80, completedPlanIds: ["mock-rest"] }
                   : day
               )));
-              return {
-                ...currentDay,
-                completedPlanIds: [...currentDay.completedPlanIds, "challenge"],
-                recoveryPct,
-                updatedAt: new Date().toISOString(),
-              };
+              return creditedDay;
             });
           }
           setRecoveryWeek((currentWeek) => currentWeek.map((day, index) => (

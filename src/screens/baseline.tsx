@@ -24,8 +24,9 @@ import {
   latestSelfReport,
   listWorkloadItems,
   saveSelfReport,
-  // syncCalendar,
 } from '@/services/repository';
+
+import { cloneMockWorkloadItems } from '@/data/workloadMock';
 import { colors } from '@/theme';
 
 // Palette comes from src/theme — the values there are the Figma swatches
@@ -98,37 +99,25 @@ export default function BaselineScreen() {
   const handleSync = async (provider: 'google' | 'outlook') => {
     setSyncingProvider(provider);
     try {
-      // Demo-only calendar data. Keep the real device sync below for restoring
-      // the production flow after the presentation.
-      const monday = new Date();
-      monday.setHours(0, 0, 0, 0);
-      monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
-      const demoEvents = [
-        { title: 'Deep Work Session', day: 0, hour: 9, duration: 2, category: 'academic' as const, priority: 'high' as const },
-        { title: 'Team Stand-up', day: 1, hour: 10, duration: 1, category: 'social' as const, priority: 'medium' as const },
-        { title: 'Library Research', day: 2, hour: 14, duration: 2.5, category: 'academic' as const, priority: 'medium' as const },
-        { title: 'Evening Run', day: 3, hour: 18, duration: 1, category: 'physical' as const, priority: 'low' as const },
-        { title: 'Project Presentation', day: 4, hour: 11, duration: 1.5, category: 'academic' as const, priority: 'high' as const },
-      ];
+      const mockCalendarItems = cloneMockWorkloadItems().map((item) => ({
+        ...item,
+        source: provider,
+      }));
       const existingItems = await listWorkloadItems();
-      if (!existingItems.some((item) => item.source === provider && item.title === demoEvents[0].title)) {
-        for (const event of demoEvents) {
-          const start = new Date(monday);
-          start.setDate(monday.getDate() + event.day);
-          start.setHours(event.hour, 0, 0, 0);
-          const end = new Date(start.getTime() + event.duration * 60 * 60 * 1000);
+      if (!existingItems.some((item) => item.source === provider)) {
+        for (const item of mockCalendarItems) {
           await addWorkloadItem({
-            title: event.title,
-            category: event.category,
-            estimatedHours: event.duration,
-            priority: event.priority,
-            source: provider,
-            scheduledStart: start.toISOString(),
-            scheduledEnd: end.toISOString(),
+            title: item.title,
+            category: item.category,
+            estimatedHours: item.estimatedHours,
+            priority: item.priority,
+            source: item.source,
+            scheduledStart: item.scheduledStart,
+            scheduledEnd: item.scheduledEnd,
           });
         }
       }
-      const res = { addedCount: existingItems.filter((item) => item.source === provider).length || demoEvents.length };
+      const res = { addedCount: existingItems.filter((item) => item.source === provider).length || mockCalendarItems.length };
 
       // Real device-calendar sync (restore this for production):
       // const res = await syncCalendar(provider);
@@ -367,8 +356,8 @@ export default function BaselineScreen() {
               <View style={styles.circleTwo} />
 
               <View style={styles.illustrationIcons}>
-                <Text style={styles.calendarIcon}>▣</Text>
-                <Text style={styles.leafIcon}>♧</Text>
+                <Text style={styles.calendarIcon}>🗓️</Text>
+                <Text style={styles.leafIcon}>🍃</Text>
               </View>
             </View>
 
@@ -407,7 +396,7 @@ export default function BaselineScreen() {
                   pressed && styles.pressedButton,
                 ]}
               >
-                <Text style={styles.lockIcon}>▣</Text>
+                <Text style={styles.lockIcon}>🔒</Text>
                 <Text style={styles.yellowButtonText}>
                   Connect Calendar
                 </Text>

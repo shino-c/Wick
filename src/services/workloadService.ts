@@ -18,7 +18,7 @@
 import * as Calendar from 'expo-calendar';
 import { Platform } from 'react-native';
 
-import { readDb, uid, writeDb, getMondayOfWeek } from '@/data/localStore';
+import { readDb, uid, writeDb, getLocalDateKey, getMondayOfWeek } from '@/data/localStore';
 import type {
   CalendarConnection,
   CategoryLoadSummary,
@@ -572,12 +572,12 @@ export function getDailyLoads(items: WorkloadItem[], baseDate: Date = new Date()
   for (let i = 0; i < 7; i++) {
     const d = new Date(monday);
     d.setDate(d.getDate() + i);
-    const dateStr = d.toISOString().split('T')[0];
+    const dateStr = getLocalDateKey(d);
 
     // Find items scheduled for this day
     const dayItems = scheduled.filter((item) => {
       if (!item.scheduledStart) return false;
-      const itemDate = new Date(item.scheduledStart).toISOString().split('T')[0];
+      const itemDate = getLocalDateKey(new Date(item.scheduledStart));
       return itemDate === dateStr;
     });
 

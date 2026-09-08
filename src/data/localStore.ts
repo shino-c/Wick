@@ -185,6 +185,13 @@ export function getMondayOfWeek(d: Date = new Date()): Date {
   return date;
 }
 
+export function getLocalDateKey(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export function seedCalendarItems(provider: 'google' | 'outlook'): WorkloadItem[] {
   const monday = getMondayOfWeek();
   const makeDate = (dayOffset: number, hour: number) => {

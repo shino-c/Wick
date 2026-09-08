@@ -5,7 +5,7 @@
  * functions. Adding the backend later (or losing it mid-demo) changes nothing
  * above this line.
  */
-import { readDb, uid, writeDb } from '@/data/localStore';
+import { getLocalDateKey, readDb, uid, writeDb } from '@/data/localStore';
 import type {
     AccuracyVerdict,
     Baseline,
@@ -433,21 +433,21 @@ export async function listStressScores(limit = 30): Promise<StressScoreRow[]> {
   return (await readDb()).stressScores.slice(0, limit);
 }
 
-export async function getWeeklyStressAnalysis(
-  workloadItemsOverride?: WorkloadItem[]
-): Promise<WeeklyStressAnalysis> {
-  const [scans, selfReports, storedWorkloadItems] = await Promise.all([
-    listScans(40),
-    listSelfReports(20),
-    workloadItemsOverride ? Promise.resolve(workloadItemsOverride) : listWorkloadItems(),
-  ]);
-
-  const workloadItems = storedWorkloadItems;
+/**
+ * Builds the chart data without I/O so screens can render the weekly forecast
+ * immediately from the workload items they already have. Passing recent signals
+ * enriches the same forecast once those reads complete.
+ */
+export function buildWeeklyStressAnalysis(
+  workloadItems: WorkloadItem[],
+  scans: PpgScan[] = [],
+  selfReports: SelfReport[] = []
+): WeeklyStressAnalysis {
   const workloadAnalysis = analyzeWorkload(workloadItems);
   const dailyLoads = getDailyLoads(workloadItems);
   const driver = calculateDomainDriver(workloadAnalysis.categoryBreakdown);
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateKey(new Date());
 
   const points: DailyStressPoint[] = dailyLoads.map((dl) => {
     // 1. Biometric for this date:
@@ -513,8 +513,17 @@ export async function getWeeklyStressAnalysis(
   const dayNamesLong = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   const peakFullName = dayNamesLong[peakIndex] || 'Wednesday';
 
-  // Overall fused score
-  const overallFusion = await recomputeFusedScore(workloadAnalysis.totalCapacityPct);
+  const usableScans = scans.filter((s) => s.signalQuality === 'good' && s.deviationPct !== null);
+  const latestBiometric =
+    usableScans.find((s) => s.source === 'finger' && ageHours(s.createdAt) < 12) ?? usableScans[0];
+  const latestSelf = selfReports[0];
+  const overallFusion = fuseStressScore({
+    biometric: latestBiometric?.deviationPct != null
+      ? { score: clampBiometricScore(latestBiometric.deviationPct)!, ageHours: ageHours(latestBiometric.createdAt) }
+      : undefined,
+    selfReport: latestSelf ? { score: latestSelf.score, ageHours: ageHours(latestSelf.createdAt) } : undefined,
+    load: { score: workloadAnalysis.totalCapacityPct, ageHours: 0 },
+  });
 
   return {
     points,
@@ -527,10 +536,22 @@ export async function getWeeklyStressAnalysis(
       : 'No workload or stress signals yet. Sync a calendar or add a task to begin.',
     fusedScore: overallFusion.fusedScore ?? 0,
     confidence: overallFusion.confidence,
-    biometricScore: overallFusion.biometricScore,
-    selfReportScore: overallFusion.selfReportScore,
-    loadScore: overallFusion.loadScore,
+    biometricScore: latestBiometric?.deviationPct != null ? clampBiometricScore(latestBiometric.deviationPct) : null,
+    selfReportScore: latestSelf?.score ?? null,
+    loadScore: workloadAnalysis.totalCapacityPct,
   };
+}
+
+export async function getWeeklyStressAnalysis(
+  workloadItemsOverride?: WorkloadItem[]
+): Promise<WeeklyStressAnalysis> {
+  const [scans, selfReports, workloadItems] = await Promise.all([
+    listScans(40),
+    listSelfReports(20),
+    workloadItemsOverride ? Promise.resolve(workloadItemsOverride) : listWorkloadItems(),
+  ]);
+
+  return buildWeeklyStressAnalysis(workloadItems, scans, selfReports);
 }
 
 /* ── Pillar 2: sessions + calibration feedback ───────────────────── */
