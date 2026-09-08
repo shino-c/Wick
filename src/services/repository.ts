@@ -11,6 +11,7 @@ import type {
     Baseline,
     ChallengeRow,
     CircleSummary,
+    DailyStressPoint,
     FocusSessionRow,
     FriendSummary,
     IncomingRequest,
@@ -20,22 +21,18 @@ import type {
     SelfReport,
     StressScoreRow,
     SupportNudge,
-    WorkloadItem,
-    CalendarConnection,
-    WorkloadAnalysis,
-    RankedTask,
-    DailyStressPoint,
     WeeklyStressAnalysis,
+    WorkloadItem
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
 import {
-  ageHours,
-  fuseStressScore,
-  clampBiometricScore,
-  calculateDomainDriver,
-  type FusionResult,
+    ageHours,
+    calculateDomainDriver,
+    clampBiometricScore,
+    fuseStressScore,
+    type FusionResult,
 } from './fusionService';
-import { PPGService, type PPGResult, type StressClassification } from './ppgService';
+import { type PPGResult, type StressClassification } from './ppgService';
 import {
     addWorkloadItem,
     analyzeWorkload,
@@ -43,11 +40,11 @@ import {
     completeWorkloadItem,
     deferWorkloadItem,
     getCalendarConnections,
+    getDailyLoads,
+    getRankedTasks,
     listWorkloadItems,
     restoreWorkloadItem,
     syncCalendar,
-    getRankedTasks,
-    getDailyLoads,
 } from './workloadService';
 
 /**
@@ -1163,6 +1160,6 @@ export async function circleNeedsSupport(): Promise<boolean> {
 
 /* ── Pillar 1: Workload & Calendar Sync ─────────────────────────── */
 export {
-  addWorkloadItem, analyzeWorkload, batchDeferWorkloadItems, completeWorkloadItem, deferWorkloadItem, getCalendarConnections, getRankedTasks, listWorkloadItems, restoreWorkloadItem, syncCalendar
+    addWorkloadItem, analyzeWorkload, batchDeferWorkloadItems, completeWorkloadItem, deferWorkloadItem, getCalendarConnections, getRankedTasks, listWorkloadItems, restoreWorkloadItem, syncCalendar
 };
 

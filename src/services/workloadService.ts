@@ -18,15 +18,15 @@
 import * as Calendar from 'expo-calendar';
 import { Platform } from 'react-native';
 
-import { readDb, uid, writeDb, getLocalDateKey, getMondayOfWeek } from '@/data/localStore';
+import { getLocalDateKey, getMondayOfWeek, readDb, uid, writeDb } from '@/data/localStore';
 import type {
   CalendarConnection,
   CategoryLoadSummary,
+  RankedTask,
   WorkloadAnalysis,
   WorkloadCategory,
   WorkloadItem,
   WorkloadPriority,
-  RankedTask,
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
 
