@@ -10,16 +10,20 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {
-  Baseline,
-  CalibrationFeedbackRow,
-  ChallengeRow,
-  FocusSessionRow,
-  FriendSummary,
-  IncomingRequest,
-  PpgScan,
-  SelfReport,
-  StressScoreRow,
-  SupportNudge,
+    Baseline,
+    CalendarConnection,
+    CalibrationFeedbackRow,
+    ChallengeRow,
+    FocusSessionRow,
+    FriendSummary,
+    IncomingRequest,
+    PpgScan,
+    SelfReport,
+    StressScoreRow,
+    SupportNudge,
+    TaskAnalysis,
+    WeeklyCapacityAnalysis,
+    WorkloadItem,
 } from './types';
 
 const KEY = 'wick.local.v1';
@@ -38,6 +42,10 @@ export interface LocalDb {
   requests: IncomingRequest[];
   challenges: ChallengeRow[];
   nudges: SupportNudge[];
+  taskAnalyses: TaskAnalysis[];
+  weeklyCapacities: WeeklyCapacityAnalysis[];
+  workloadItems: WorkloadItem[];
+  calendarConnections: CalendarConnection[];
 }
 
 export const uid = () =>
@@ -64,6 +72,10 @@ function emptyDb(): LocalDb {
     requests: [],
     challenges: seedChallenges(),
     nudges: [],
+    taskAnalyses: [],
+    weeklyCapacities: [],
+    workloadItems: [],
+    calendarConnections: [],
   };
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -12,9 +12,9 @@ import {
 } from 'react-native';
 
 import { useRouter } from 'expo-router';
-import Svg, { Circle, Path } from 'react-native-svg';
+import Svg, { Path, Circle } from 'react-native-svg';
 
-import { hasSupabase, supabase } from '@/lib/supabaseClient';
+import { supabase, hasSupabase } from '@/lib/supabaseClient';
 import { colors, font, radius, shadow, spacing } from '@/theme';
 
 /* ─── validation helpers ────────────────────────────────────────────────── */
@@ -55,6 +55,17 @@ function WickMark({ size = 24 }: { size?: number }) {
 export default function LoginScreen() {
   const router = useRouter();
 
+  // Redirect already‑signed‑in users straight to the baseline step.
+  useEffect(() => {
+    async function checkAuth() {
+      const { data } = await supabase.auth.getUser();
+      if (data.user) {
+        router.replace('/baseline');
+      }
+    }
+    checkAuth();
+  }, [router]);
+
   // The user can type either their email or username.
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
@@ -78,18 +89,6 @@ export default function LoginScreen() {
 
   /* ── resolve username → email ─────────────────────────────────────────── */
 
-  /**
-   * If the user typed something that looks like an email we use it directly.
-   * Otherwise we treat it as a username and query the profiles table to
-   * find the matching email from auth.users (via a lightweight RPC or
-   * direct select — profiles is readable by authenticated, but at login
-   * the user is NOT authenticated yet, so we use the supabase client with
-   * the anon key and rely on a small public RPC function).
-   *
-   * Fallback: if the profile lookup fails (e.g. the function doesn't exist
-   * yet, or the user mis-typed) we just try to use the raw identifier as
-   * email so Supabase returns its own "Invalid login credentials" error.
-   */
   async function resolveEmail(raw: string): Promise<string> {
     const trimmed = raw.trim().toLowerCase();
 
@@ -97,8 +96,6 @@ export default function LoginScreen() {
     if (EMAIL_RE.test(trimmed)) return trimmed;
 
     // Try to look up the email by username via the profiles table.
-    // We call a small RPC: get_email_for_username(username text) → text.
-    // If it doesn't exist we fall through and let Supabase reject the login.
     try {
       const { data, error } = await supabase.rpc('get_email_for_username', {
         lookup_username: trimmed,
@@ -129,16 +126,8 @@ export default function LoginScreen() {
     setLoading(true);
     setServerError(null);
 
-
     try {
       const email = await resolveEmail(identifier);
-
-      console.log('SUPABASE URL:', process.env.EXPO_PUBLIC_SUPABASE_URL);
-      console.log(
-        'SUPABASE KEY EXISTS:',
-        Boolean(process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY),
-      );
-      console.log('hasSupabase:', hasSupabase);
 
       const { error } = await supabase.auth.signInWithPassword({
         email,
@@ -417,4 +406,3 @@ const styles = StyleSheet.create({
     color: colors.brown,
   },
 });
-

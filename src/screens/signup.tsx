@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -12,9 +12,9 @@ import {
 } from 'react-native';
 
 import { useRouter } from 'expo-router';
-import Svg, { Circle, Path } from 'react-native-svg';
+import Svg, { Path, Circle } from 'react-native-svg';
 
-import { hasSupabase, supabase } from '@/lib/supabaseClient';
+import { supabase, hasSupabase } from '@/lib/supabaseClient';
 import { colors, font, radius, shadow, spacing } from '@/theme';
 
 /* ─── validation helpers ────────────────────────────────────────────────── */
@@ -110,73 +110,58 @@ export default function SignupScreen() {
   /* ── submit ────────────────────────────────────────────────────────────── */
 
   const handleSignup = async () => {
-  setTouched({
-    username: true,
-    email: true,
-    password: true,
-    confirmPassword: true,
-  });
+    // Touch all fields so errors become visible.
+    setTouched({ username: true, email: true, password: true, confirmPassword: true });
+    if (hasAnyError) return;
 
-  if (hasAnyError) return;
+    if (!hasSupabase) {
+      setServerError(
+        'Supabase is not configured. Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY to your .env file.',
+      );
+      return;
+    }
 
-  if (!hasSupabase) {
-    setServerError(
-      'Supabase is not configured. Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY to your .env file.',
-    );
-    return;
-  }
+    setLoading(true);
+    setServerError(null);
 
-  setLoading(true);
-  setServerError(null);
-
-  try {
-    const { data, error } = await supabase.auth.signUp({
-      email: email.trim().toLowerCase(),
-      password,
-      options: {
-        data: {
-          username: username.trim(),
+    try {
+      // 1. Sign up. The `username` goes into raw_user_meta_data so the
+      //    handle_new_user() database trigger picks it up and inserts it
+      //    into the profiles table automatically.
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim().toLowerCase(),
+        password,
+        options: {
+          data: { username: username.trim() },
         },
-      },
-    });
+      });
 
-    if (error) throw error;
+      if (error) throw error;
 
-    // Supabase can automatically create a session when email confirmation
-    // is disabled. We don't want a newly registered user to enter the app
-    // automatically, so explicitly sign them out before going to login.
-    if (data.session) {
-      await supabase.auth.signOut();
+      // If email confirmation is required, Supabase returns a user but
+      // no session. In that case we inform the user to check their email.
+      if (data.user && !data.session) {
+        setServerError(
+          'A confirmation email has been sent. Please verify your email and then log in.',
+        );
+        setLoading(false);
+        return;
+      }
+
+      // Success — go to baseline.
+      router.replace('/baseline');
+    } catch (err: any) {
+      const msg = err?.message ?? 'Sign up failed. Please try again.';
+      // Make common Supabase error messages friendlier.
+      if (msg.includes('already registered') || msg.includes('already been registered')) {
+        setServerError('An account with this email already exists. Try logging in instead.');
+      } else {
+        setServerError(msg);
+      }
+    } finally {
+      setLoading(false);
     }
-
-    // If email confirmation is enabled, the user needs to verify their
-    // email before logging in. Otherwise, they can log in immediately.
-    if (data.user && !data.session) {
-      setServerError(
-        'Account created successfully. Please confirm your email, then log in.',
-      );
-    }
-
-    // Always send the user to the login screen after successful signup.
-    router.replace('/login');
-  } catch (err: any) {
-    const msg = err?.message ?? 'Sign up failed. Please try again.';
-
-    if (
-      msg.includes('already registered') ||
-      msg.includes('already been registered')
-    ) {
-      setServerError(
-        'An account with this email already exists. Try logging in instead.',
-      );
-    } else {
-      setServerError(msg);
-    }
-  } finally {
-    setLoading(false);
-  }
-};
-
+  };
 
   /* ── render ─────────────────────────────────────────────────────────────── */
 

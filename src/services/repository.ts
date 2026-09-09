@@ -5,25 +5,35 @@
  * functions. Adding the backend later (or losing it mid-demo) changes nothing
  * above this line.
  */
-import { hasSupabase, supabase, currentUserId } from '@/lib/supabaseClient';
 import { readDb, uid, writeDb } from '@/data/localStore';
 import type {
   AccuracyVerdict,
   Baseline,
+  CalendarConnection,
   ChallengeRow,
   CircleSummary,
-  NewChallenge,
-  Participant,
   FocusSessionRow,
   FriendSummary,
   IncomingRequest,
+  NewChallenge,
+  Participant,
   PpgScan,
   SelfReport,
   StressScoreRow,
   SupportNudge,
+  TaskAnalysis,
+  WeeklyCapacityAnalysis
 } from '@/data/types';
-import { PPGService, type PPGResult, type StressClassification } from './ppgService';
+import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
+import {
+  addEventToDeviceCalendar,
+  deleteEventFromDeviceCalendar,
+  syncCalendarEvents,
+} from '@/services/calendarSync';
 import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
+import { PPGService, type PPGResult, type StressClassification } from './ppgService';
+
+export { type LoadBalanceSuggestion, type TaskAnalysis, type WeeklyCapacityAnalysis } from '@/data/types';
 
 /**
  * Smallest circle we will aggregate. Below this, "2 of 2 friends are in the red
@@ -985,3 +995,541 @@ export async function circleNeedsSupport(): Promise<boolean> {
   const summary = await getCircleSummary();
   return !summary.suppressed && (summary.redZoneCount ?? 0) > 0;
 }
+
+/* ── Pillar 1: Calendar Sync & Workload ───────────────────────────────────── */
+
+export async function getCalendarConnections(): Promise<CalendarConnection[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('calendar_connections')
+      .select('provider, connected, account_email, last_synced_at')
+      .eq('user_id', userId);
+    return (data ?? []).map((r: any) => ({
+      provider: r.provider,
+      connected: r.connected,
+      accountEmail: r.account_email,
+      lastSyncedAt: r.last_synced_at,
+    }));
+  }
+  return [];
+}
+
+export async function saveCalendarConnection(
+  provider: 'google' | 'outlook',
+  connected: boolean,
+  accountEmail?: string
+): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return;
+    await supabase.from('calendar_connections').upsert({
+      user_id: userId,
+      provider,
+      connected,
+      account_email: accountEmail,
+      last_synced_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,provider' });
+    return;
+  }
+}
+
+export async function getWorkloadItems(status?: string): Promise<TaskAnalysis[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    let query = supabase
+      .from('workload_items')
+      .select('*')
+      .eq('user_id', userId)
+      .order('scheduled_start', { ascending: true });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data } = await query;
+    return (data ?? []).map((r: any) => ({
+      id: r.id,
+      title: r.title,
+      category: r.category,
+      priority: r.priority,
+      estimated_duration_hours: r.estimated_hours,
+      scheduled_date: r.scheduled_start ? new Date(r.scheduled_start).toISOString().split('T')[0] : '',
+      scheduled_start_time: r.scheduled_start ? new Date(r.scheduled_start).toISOString().split('T')[1].slice(0, 5) : undefined,
+      scheduled_end_time: r.scheduled_end ? new Date(r.scheduled_end).toISOString().split('T')[1].slice(0, 5) : undefined,
+      capacity_hours: r.estimated_hours,
+      rank: 0,
+      status: r.status,
+      calendar_event_id: r.calendar_event_id,
+      calendar_provider: r.source === 'google' || r.source === 'outlook' ? r.source : undefined,
+      createdAt: r.created_at,
+    }));
+  }
+  return [];
+}
+
+export async function createWorkloadItem(item: Omit<TaskAnalysis, 'id' | 'createdAt'>): Promise<string> {
+  const id = uid();
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return id;
+
+    const scheduledStart = item.scheduled_date ? new Date(`${item.scheduled_date}T${item.scheduled_start_time || '00:00'}`).toISOString() : new Date().toISOString();
+    const scheduledEnd = item.scheduled_date ? new Date(`${item.scheduled_date}T${item.scheduled_end_time || '23:59'}`).toISOString() : new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from('workload_items')
+      .insert({
+        user_id: userId,
+        title: item.title,
+        category: item.category,
+        estimated_hours: item.estimated_duration_hours,
+        priority: item.priority,
+        source: item.calendar_provider || 'manual',
+        status: item.status || 'scheduled',
+        scheduled_start: scheduledStart,
+        scheduled_end: scheduledEnd,
+        calendar_event_id: item.calendar_event_id,
+      })
+      .select('id')
+      .single();
+
+    if (error) throw error;
+    return data?.id ?? id;
+  }
+  return id;
+}
+
+export async function updateWorkloadItem(id: string, updates: Partial<TaskAnalysis>): Promise<void> {
+  if (hasSupabase) {
+    const patch: any = {};
+    if (updates.title) patch.title = updates.title;
+    if (updates.category) patch.category = updates.category;
+    if (updates.priority) patch.priority = updates.priority;
+    if (updates.estimated_duration_hours) patch.estimated_hours = updates.estimated_duration_hours;
+    if (updates.status) patch.status = updates.status;
+
+    if (updates.scheduled_date || updates.scheduled_start_time) {
+      const existing = await getWorkloadItemById(id);
+      if (existing) {
+        const date = updates.scheduled_date || existing.scheduled_date;
+        const start = updates.scheduled_start_time || existing.scheduled_start_time || '00:00';
+        patch.scheduled_start = new Date(`${date}T${start}`).toISOString();
+      }
+    }
+
+    if (updates.scheduled_date || updates.scheduled_end_time) {
+      const existing = await getWorkloadItemById(id);
+      if (existing) {
+        const date = updates.scheduled_date || existing.scheduled_date;
+        const end = updates.scheduled_end_time || existing.scheduled_end_time || '23:59';
+        patch.scheduled_end = new Date(`${date}T${end}`).toISOString();
+      }
+    }
+
+    if (updates.calendar_event_id) patch.calendar_event_id = updates.calendar_event_id;
+
+    const { error } = await supabase.from('workload_items').update(patch).eq('id', id);
+    if (error) throw error;
+  }
+}
+
+export async function deleteWorkloadItem(id: string): Promise<void> {
+  if (hasSupabase) {
+    const { error } = await supabase.from('workload_items').delete().eq('id', id);
+    if (error) throw error;
+  }
+}
+
+async function getWorkloadItemById(id: string): Promise<TaskAnalysis | null> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('workload_items')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (!data) return null;
+    return {
+      id: data.id,
+      title: data.title,
+      category: data.category,
+      priority: data.priority,
+      estimated_duration_hours: data.estimated_hours,
+      scheduled_date: new Date(data.scheduled_start).toISOString().split('T')[0],
+      scheduled_start_time: new Date(data.scheduled_start).toISOString().split('T')[1].slice(0, 5),
+      scheduled_end_time: data.scheduled_end ? new Date(data.scheduled_end).toISOString().split('T')[1].slice(0, 5) : undefined,
+      capacity_hours: data.estimated_hours,
+      rank: 0,
+      status: data.status,
+      calendar_event_id: data.calendar_event_id,
+      calendar_provider: data.source === 'google' || data.source === 'outlook' ? data.source : undefined,
+      createdAt: data.created_at,
+    };
+  }
+  return null;
+}
+
+export async function saveTaskAnalysis(analysis: TaskAnalysis): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      await supabase.from('ai_task_analysis').upsert({
+        user_id: userId,
+        week_start: analysis.week_start || new Date().toISOString().split('T')[0],
+        title: analysis.title,
+        category: analysis.category,
+        priority: analysis.priority,
+        estimated_duration_hours: analysis.estimated_duration_hours,
+        scheduled_date: analysis.scheduled_date,
+        scheduled_start_time: analysis.scheduled_start_time,
+        scheduled_end_time: analysis.scheduled_end_time,
+        capacity_hours: analysis.capacity_hours,
+        rank: analysis.rank,
+        ai_reasoning: analysis.ai_reasoning,
+        stress_score: analysis.stress_score,
+        status: analysis.status || 'pending',
+        calendar_event_id: analysis.calendar_event_id,
+        calendar_provider: analysis.calendar_provider,
+      }, { onConflict: 'id' });
+    }
+  }
+  await writeDb((db) => {
+    db.taskAnalyses = db.taskAnalyses || [];
+    const idx = db.taskAnalyses.findIndex((t) => t.id === analysis.id);
+    if (idx >= 0) {
+      db.taskAnalyses[idx] = { ...db.taskAnalyses[idx], ...analysis };
+    } else {
+    }
+  });
+}
+
+export async function getTaskAnalyses(weekStart?: string): Promise<TaskAnalysis[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      let query = supabase
+        .from('ai_task_analysis')
+        .select('*')
+        .eq('user_id', userId)
+        .order('rank', { ascending: true });
+
+      if (weekStart) {
+        query = query.eq('week_start', weekStart);
+      }
+
+      const { data, error } = await query;
+      if (!error && data && data.length > 0) {
+        return data.map((r: any) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          priority: r.priority,
+          estimated_duration_hours: r.estimated_duration_hours,
+          scheduled_date: r.scheduled_date,
+          scheduled_start_time: r.scheduled_start_time,
+          scheduled_end_time: r.scheduled_end_time,
+          capacity_hours: r.capacity_hours,
+          rank: r.rank,
+          ai_reasoning: r.ai_reasoning,
+          stress_score: r.stress_score,
+          status: r.status,
+          calendar_event_id: r.calendar_event_id,
+          calendar_provider: r.calendar_provider,
+          createdAt: r.created_at,
+        }));
+      }
+    }
+  }
+
+  // Fallback to local store
+  const db = await readDb();
+  let list = db.taskAnalyses || [];
+  if (weekStart) {
+    list = list.filter((t) => t.week_start === weekStart);
+  }
+  return [...list].sort((a, b) => (a.rank || 0) - (b.rank || 0));
+}
+
+export async function approveTaskAnalysis(id: string, approved: boolean): Promise<void> {
+  const status = approved ? 'approved' : 'rejected';
+  if (hasSupabase) {
+    await supabase
+      .from('ai_task_analysis')
+      .update({ status })
+      .eq('id', id);
+  }
+  await writeDb((db) => {
+    const item = (db.taskAnalyses || []).find((t) => t.id === id);
+    if (item) item.status = status;
+  });
+}
+
+export async function deferTaskAnalysis(id: string, newDate?: string): Promise<void> {
+  if (hasSupabase) {
+    const patch: any = { status: 'deferred' };
+    if (newDate) patch.scheduled_date = newDate;
+    await supabase.from('ai_task_analysis').update(patch).eq('id', id);
+  }
+  await writeDb((db) => {
+    const item = (db.taskAnalyses || []).find((t) => t.id === id);
+    if (item) {
+      item.status = 'deferred';
+      if (newDate) item.scheduled_date = newDate;
+    }
+  });
+}
+
+export async function deleteTaskAnalysis(id: string): Promise<void> {
+  if (hasSupabase) {
+    await supabase.from('ai_task_analysis').delete().eq('id', id);
+  }
+  await writeDb((db) => {
+    db.taskAnalyses = (db.taskAnalyses || []).filter((t) => t.id !== id);
+  });
+}
+
+export async function saveWeeklyCapacity(capacity: WeeklyCapacityAnalysis): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      await supabase.from('weekly_capacity_analyses').upsert({
+        user_id: userId,
+        week_start: capacity.week_start,
+        total_capacity_hours: capacity.total_capacity_hours,
+        used_capacity_hours: capacity.used_capacity_hours,
+        overload_warning: capacity.overload_warning,
+        category_breakdown: capacity.category_breakdown,
+        stress_score: capacity.stress_score,
+        ai_reasoning: capacity.ai_reasoning,
+      }, { onConflict: 'user_id,week_start' });
+    }
+  }
+  await writeDb((db) => {
+    db.weeklyCapacities = db.weeklyCapacities || [];
+    const idx = db.weeklyCapacities.findIndex((c) => c.week_start === capacity.week_start);
+    if (idx >= 0) {
+      db.weeklyCapacities[idx] = capacity;
+    } else {
+      db.weeklyCapacities.push(capacity);
+    }
+  });
+}
+
+export async function getWeeklyCapacity(weekStart?: string): Promise<WeeklyCapacityAnalysis | null> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      let query = supabase
+        .from('weekly_capacity_analyses')
+        .select('*')
+        .eq('user_id', userId);
+
+      if (weekStart) {
+        query = query.eq('week_start', weekStart);
+      } else {
+        query = query.order('week_start', { ascending: false }).limit(1);
+      }
+
+      const { data } = await query;
+      const row = data?.[0];
+      if (row) {
+        return {
+          id: row.id,
+          week_start: row.week_start,
+          total_capacity_hours: row.total_capacity_hours,
+          used_capacity_hours: row.used_capacity_hours,
+          overload_warning: row.overload_warning,
+          category_breakdown: row.category_breakdown || {},
+          stress_score: row.stress_score,
+          ai_reasoning: row.ai_reasoning,
+          createdAt: row.created_at,
+        };
+      }
+    }
+  }
+
+  // Fallback to local store
+  const db = await readDb();
+  const list = db.weeklyCapacities || [];
+  if (weekStart) {
+    return list.find((c) => c.week_start === weekStart) || null;
+  }
+  return list[list.length - 1] || null;
+}
+
+export async function saveChatLog(message: string, sender: 'user' | 'ai', taskId?: string): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      await supabase.from('task_chat_logs').insert({
+        user_id: userId,
+        message,
+        sender,
+        task_id: taskId,
+      });
+    }
+  }
+}
+
+export async function getChatLogs(limit = 50): Promise<Array<{ message: string; sender: string; createdAt: string }>> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      const { data } = await supabase
+        .from('task_chat_logs')
+        .select('message, sender, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      return (data ?? []).reverse().map((r: any) => ({
+        message: r.message,
+        sender: r.sender,
+        createdAt: r.created_at,
+      }));
+    }
+  }
+  return [];
+}
+
+/**
+ * Two-way task creation: Adds to device native calendar + persists in database + re-evaluates capacity.
+ */
+export async function createAndSyncTask(task: Omit<TaskAnalysis, 'id' | 'createdAt'>): Promise<string> {
+  // 1. Sync to phone native calendar
+  const calEventId = await addEventToDeviceCalendar({
+    title: task.title,
+    scheduled_date: task.scheduled_date,
+    scheduled_start_time: task.scheduled_start_time,
+    scheduled_end_time: task.scheduled_end_time,
+  });
+
+  const id = uid();
+  const taskRecord: TaskAnalysis = {
+    ...task,
+    id,
+    calendar_event_id: calEventId || undefined,
+    status: 'approved',
+    createdAt: new Date().toISOString(),
+  };
+
+  // 2. Persist in database
+  await saveTaskAnalysis(taskRecord);
+  try {
+    await createWorkloadItem(taskRecord);
+  } catch (e) {
+    // workload item insert optional
+  }
+
+  // 3. Re-evaluate weekly capacity
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - now.getDay() + 1);
+  const weekStartStr = weekStart.toISOString().split('T')[0];
+
+  const allTasks = await getTaskAnalyses(weekStartStr);
+  const perceivedStress = await getBaseline();
+  const { analyzeWeeklyCapacity } = await import('@/services/aiService');
+  const capacity = await analyzeWeeklyCapacity(allTasks, {
+    perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
+  });
+  await saveWeeklyCapacity(capacity);
+
+  return id;
+}
+
+/**
+ * Two-way task deletion: Deletes from device native calendar + removes from database + re-evaluates capacity.
+ */
+export async function deleteAndSyncTask(taskId: string, calendarEventId?: string): Promise<void> {
+  // 1. Delete from phone native calendar
+  if (calendarEventId) {
+    await deleteEventFromDeviceCalendar(calendarEventId);
+  }
+
+  // 2. Delete from database
+  await deleteTaskAnalysis(taskId);
+  if (hasSupabase) {
+    await supabase.from('workload_items').delete().eq('id', taskId);
+  }
+  await writeDb((db) => {
+    db.workloadItems = (db.workloadItems || []).filter((w) => w.id !== taskId);
+  });
+
+  // 3. Re-evaluate weekly capacity
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - now.getDay() + 1);
+  const weekStartStr = weekStart.toISOString().split('T')[0];
+
+  const allTasks = await getTaskAnalyses(weekStartStr);
+  const perceivedStress = await getBaseline();
+  const { analyzeWeeklyCapacity } = await import('@/services/aiService');
+  const capacity = await analyzeWeeklyCapacity(allTasks, {
+    perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
+  });
+  await saveWeeklyCapacity(capacity);
+}
+
+/**
+ * Syncs calendar events for the active week and triggers AI workload + capacity analysis.
+ */
+export async function syncAndAnalyzeCalendar(): Promise<{ tasksCreated: number; capacityAnalyzed: boolean }> {
+  const connections = await getCalendarConnections();
+  const hasConnection = connections.some((c) => c.connected);
+  if (!hasConnection) return { tasksCreated: 0, capacityAnalyzed: false };
+
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - now.getDay() + 1);
+  const weekStartStr = weekStart.toISOString().split('T')[0];
+
+  const allEvents = await syncCalendarEvents();
+  if (!allEvents || allEvents.length === 0) {
+    return { tasksCreated: 0, capacityAnalyzed: false };
+  }
+
+  const perceivedStress = await getBaseline();
+  const { analyzeCalendarTasks, analyzeWeeklyCapacity } = await import('@/services/aiService');
+
+  const analyzedTasks = await analyzeCalendarTasks(allEvents, {
+    perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
+  });
+
+  if (analyzedTasks.length > 0) {
+    for (const task of analyzedTasks) {
+      await saveTaskAnalysis({
+        ...task,
+        week_start: weekStartStr,
+        status: 'pending',
+        calendar_event_id: task.calendar_event_id || allEvents[task.rank - 1]?.id,
+        calendar_provider: 'device',
+      });
+    }
+
+    const capacity = await analyzeWeeklyCapacity(analyzedTasks, {
+      perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
+    });
+    await saveWeeklyCapacity({
+      ...capacity,
+      week_start: weekStartStr,
+    });
+
+    if (hasSupabase) {
+      const userId = await currentUserId();
+      if (userId) {
+        await supabase
+          .from('calendar_connections')
+          .update({ last_synced_at: new Date().toISOString() })
+          .eq('user_id', userId)
+          .eq('provider', 'device');
+      }
+    }
+
+    return { tasksCreated: analyzedTasks.length, capacityAnalyzed: true };
+  }
+
+  return { tasksCreated: 0, capacityAnalyzed: false };
+}
+

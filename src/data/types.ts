@@ -180,3 +180,90 @@ export interface SupportNudge {
   createdAt: string;
   seenAt: string | null;
 }
+
+/* ── Calendar & Workload Types ─────────────────────────────────────────── */
+
+export interface CalendarConnection {
+  provider: string;
+  connected: boolean;
+  accountEmail?: string;
+  lastSyncedAt?: string;
+}
+
+export interface CalendarEventItem {
+  id: string;
+  title: string;
+  startDate: string;
+  endDate: string;
+  allDay?: boolean;
+  location?: string | null;
+  notes?: string | null;
+}
+
+export type CalendarEvent = CalendarEventItem;
+
+export type TaskCategory =
+  | 'academic'
+  | 'work'
+  | 'social'
+  | 'physical'
+  | 'mental'
+  | 'errands'
+  | 'other';
+
+export type TaskPriority = 'high' | 'medium' | 'low';
+
+export interface TaskAnalysis {
+  id: string;
+  title: string;
+  category: string;
+  priority: TaskPriority;
+  estimated_duration_hours: number;
+  scheduled_date: string;
+  scheduled_start_time?: string;
+  scheduled_end_time?: string;
+  capacity_hours?: number;
+  rank: number;
+  ai_reasoning?: string;
+  stress_score?: number;
+  status: 'pending' | 'approved' | 'rejected' | 'scheduled' | 'completed' | 'deferred';
+  calendar_event_id?: string;
+  calendar_provider?: 'device' | 'google' | 'outlook' | string;
+  week_start?: string;
+  createdAt?: string;
+}
+
+export interface WorkloadItem {
+  id: string;
+  title: string;
+  category: string;
+  priority: TaskPriority;
+  estimated_hours: number;
+  scheduled_start?: string;
+  scheduled_end?: string;
+  status: string;
+  calendar_event_id?: string;
+  source?: string;
+  createdAt?: string;
+}
+
+export interface WeeklyCapacityAnalysis {
+  id?: string;
+  week_start: string;
+  total_capacity_hours: number;
+  used_capacity_hours: number;
+  overload_warning: boolean;
+  category_breakdown: Record<string, number>;
+  stress_score: number;
+  ai_reasoning?: string;
+  createdAt?: string;
+}
+
+export interface LoadBalanceSuggestion {
+  taskId: string;
+  taskTitle: string;
+  reason: string;
+  suggestedDate?: string;
+  hoursSaved: number;
+}
+

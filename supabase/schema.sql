@@ -20,6 +20,7 @@ create table if not exists profiles (
   username text unique not null,
   invite_code text unique not null
     default 'WICK-' || upper(substr(md5(random()::text), 1, 4)),
+  onboarded boolean not null default false,
   created_at timestamptz default now()
 );
 
@@ -406,6 +407,9 @@ create table if not exists challenge_participants (
   primary key (challenge_id, user_id)
 );
 
+alter table challenge_participants enable row level security;
+
+alter table challenge_participants add column if not exists verified boolean not null default false;
 alter table challenge_participants add column if not exists completed_at timestamptz;
 
 alter table challenge_participants enable row level security;
@@ -869,5 +873,140 @@ grant execute on function public.complete_challenge(text, boolean, boolean) to a
 grant execute on function public.remove_friend(uuid) to authenticated;
 grant execute on function public.set_username(text) to authenticated;
 grant execute on function public.cancel_challenge(text, boolean) to authenticated;
-grant execute on function public.delete_challenge(text)    to authenticated;
 grant execute on function public.send_circle_support(text) to authenticated;
+
+-- â”€â”€ Pillar 5: recovery records â”€â”€
+-- Coordinates are intentionally absent. A recovery action records only its
+-- verified outcome, never a route, place, or location history.
+create table if not exists recovery_days (
+  user_id uuid not null references auth.users on delete cascade,
+  recovery_date date not null,
+  completed_plan_ids text[] not null default '{}',
+  game_completed boolean not null default false,
+  game_minutes integer not null default 0,
+  outdoor_completed boolean not null default false,
+  recovery_event_id text,
+  recovery_event_start timestamptz,
+  recovery_pct integer not null default 0 check (recovery_pct between 0 and 100),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, recovery_date)
+);
+
+alter table recovery_days enable row level security;
+drop policy if exists "own recovery days" on recovery_days;
+create policy "own recovery days" on recovery_days for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ── Pillar 1: Calendar Sync & Workload Capacity ─────────────────────────────
+
+create table if not exists calendar_connections (
+  user_id uuid not null references auth.users on delete cascade,
+  provider text not null check (provider in ('google', 'outlook')),
+  provider text not null default 'device' check (provider in ('device', 'google', 'outlook')),
+  connected boolean not null default true,
+  account_email text,
+  access_token text,
+  refresh_token text,
+  expires_at timestamptz,
+  last_synced_at timestamptz default now(),
+  created_at timestamptz default now(),
+  primary key (user_id, provider)
+);
+
+alter table calendar_connections enable row level security;
+drop policy if exists "own calendar connections" on calendar_connections;
+create policy "own calendar connections" on calendar_connections for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+alter table public.calendar_connections
+drop constraint if exists calendar_connections_provider_check;
+
+alter table public.calendar_connections
+add constraint calendar_connections_provider_check
+check (provider in ('device', 'google', 'outlook'));
+
+
+create table if not exists workload_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  title text not null,
+  category text not null check (category in ('academic', 'social', 'physical', 'errands', 'mental')),
+  estimated_hours double precision not null default 1.0,
+  priority text not null default 'medium' check (priority in ('low', 'medium', 'high')),
+  source text not null default 'manual' check (source in ('google', 'outlook', 'manual')),
+  status text not null default 'scheduled' check (status in ('scheduled', 'deferred', 'completed')),
+  scheduled_start timestamptz,
+  scheduled_end timestamptz,
+  created_at timestamptz default now()
+);
+
+create index if not exists workload_items_user_time on workload_items (user_id, status, scheduled_start);
+
+alter table workload_items enable row level security;
+drop policy if exists "own workload items" on workload_items;
+create policy "own workload items" on workload_items for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ── Pillar 1 Extensions: AI Analysis & Weekly Capacity ──────────────────────
+
+create table if not exists ai_task_analysis (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  week_start date not null,
+  title text not null,
+  category text not null check (category in ('academic', 'social', 'physical', 'errands', 'mental')),
+  priority text not null default 'medium' check (priority in ('low', 'medium', 'high')),
+  estimated_duration_hours double precision not null default 1.0,
+  scheduled_date date not null,
+  scheduled_start_time time,
+  scheduled_end_time time,
+  capacity_hours double precision not null default 1.0,
+  rank int not null default 0,
+  ai_reasoning text,
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected', 'deferred', 'completed')),
+  calendar_event_id text,
+  calendar_provider text check (calendar_provider in ('device', 'google', 'outlook')),
+  created_at timestamptz default now()
+);
+
+create index if not exists ai_task_analysis_user_week on ai_task_analysis (user_id, week_start, rank);
+
+alter table ai_task_analysis enable row level security;
+drop policy if exists "own ai task analysis" on ai_task_analysis;
+create policy "own ai task analysis" on ai_task_analysis for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists weekly_capacity_analyses (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  week_start date not null,
+  total_capacity_hours double precision not null default 40.0,
+  used_capacity_hours double precision not null default 0.0,
+  overload_warning boolean not null default false,
+  category_breakdown jsonb not null default '{}',
+  stress_score double precision,
+  ai_reasoning text,
+  created_at timestamptz default now(),
+  unique (user_id, week_start)
+);
+
+alter table weekly_capacity_analyses enable row level security;
+drop policy if exists "own weekly capacity" on weekly_capacity_analyses;
+create policy "own weekly capacity" on weekly_capacity_analyses for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists task_chat_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  message text not null,
+  sender text not null check (sender in ('user', 'ai')),
+  task_id uuid references ai_task_analysis on delete set null,
+  created_at timestamptz default now()
+);
+
+create index if not exists task_chat_logs_user_time on task_chat_logs (user_id, created_at);
+
+alter table task_chat_logs enable row level security;
+drop policy if exists "own chat logs" on task_chat_logs;
+create policy "own chat logs" on task_chat_logs for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
