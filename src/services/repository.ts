@@ -1473,6 +1473,38 @@ export async function deleteAndSyncTask(taskId: string, calendarEventId?: string
 }
 
 /**
+ * Removes all task analyses, workload items, and capacity records that do NOT
+ * belong to the given current-week start date.  Keeps the database focused on
+ * the active week only.
+ */
+export async function deleteTasksOutsideWeek(currentWeekStart: string): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      await supabase
+        .from('ai_task_analysis')
+        .delete()
+        .eq('user_id', userId)
+        .neq('week_start', currentWeekStart);
+      await supabase
+        .from('weekly_capacity_analyses')
+        .delete()
+        .eq('user_id', userId)
+        .neq('week_start', currentWeekStart);
+    }
+  }
+
+  await writeDb((db) => {
+    db.taskAnalyses = (db.taskAnalyses || []).filter(
+      (t) => t.week_start === currentWeekStart
+    );
+    db.weeklyCapacities = (db.weeklyCapacities || []).filter(
+      (c) => c.week_start === currentWeekStart
+    );
+  });
+}
+
+/**
  * Syncs calendar events for the active week and triggers AI workload + capacity analysis.
  */
 export async function syncAndAnalyzeCalendar(): Promise<{ tasksCreated: number; capacityAnalyzed: boolean }> {
@@ -1484,6 +1516,9 @@ export async function syncAndAnalyzeCalendar(): Promise<{ tasksCreated: number; 
   const weekStart = new Date(now);
   weekStart.setDate(now.getDate() - now.getDay() + 1);
   const weekStartStr = weekStart.toISOString().split('T')[0];
+
+  // Purge previous/next-week data so the DB only holds the current week
+  await deleteTasksOutsideWeek(weekStartStr);
 
   const allEvents = await syncCalendarEvents();
   if (!allEvents || allEvents.length === 0) {

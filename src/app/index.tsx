@@ -2,35 +2,47 @@ import { Redirect } from 'expo-router';
 import React from 'react';
 import { ActivityIndicator, View } from 'react-native';
 
+import { bootstrap } from '@/lib/bootstrap';
 import { hasSupabase, supabase } from '@/lib/supabaseClient';
 import { colors } from '@/theme';
 
-/**
- * Entry point.
- * - If Supabase is configured: check for an existing session.
- *   → Logged in  → go to /baseline (or /home if already onboarded).
- *   → Not logged in → go to /login.
- * - If Supabase is NOT configured (local demo mode) → go straight to /baseline.
- */
 export default function Index() {
   const [checking, setChecking] = React.useState(true);
-  const [isLoggedIn, setIsLoggedIn] = React.useState(false);
+  const [route, setRoute] = React.useState<string | null>(null);
 
   React.useEffect(() => {
-    if (!hasSupabase) {
-      // No Supabase → skip auth, go straight to baseline (demo mode).
-      setChecking(false);
-      setIsLoggedIn(true); // treat as "logged in" for demo mode
-      return;
+    let cancelled = false;
+
+    async function resolve() {
+      if (!hasSupabase) {
+        setRoute('/baseline');
+        return;
+      }
+
+      const { data } = await supabase.auth.getSession();
+      const loggedIn = !!data.session;
+
+      if (!loggedIn) {
+        if (!cancelled) setRoute('/login');
+        return;
+      }
+
+      const { onboarded } = await bootstrap();
+      if (!cancelled) {
+        setRoute(onboarded ? '/home' : '/baseline');
+      }
     }
 
-    supabase.auth.getSession().then(({ data }) => {
-      setIsLoggedIn(!!data.session);
-      setChecking(false);
+    resolve().finally(() => {
+      if (!cancelled) setChecking(false);
     });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  if (checking) {
+  if (checking || !route) {
     return (
       <View
         style={{
@@ -45,10 +57,6 @@ export default function Index() {
     );
   }
 
-  if (isLoggedIn) {
-    return <Redirect href="/baseline" />;
-  }
-
-  return <Redirect href="/login" />;
+  return <Redirect href={route} />;
 }
 

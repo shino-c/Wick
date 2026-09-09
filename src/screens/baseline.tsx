@@ -2,24 +2,21 @@ import React, { useState } from 'react';
 import {
   Alert,
   Pressable,
-  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
-  View,
+  View
 } from 'react-native';
 
 import Slider from '@react-native-community/slider';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
-import TopNavigation from '@/components/topbar';
+import { NavBar, Screen } from '@/components/base';
 import { ITEMS } from '@/features/calibration/questionnaire';
 import { markOnboarded } from '@/lib/bootstrap';
 import { supabase } from '@/lib/supabaseClient';
 import {
   connectCalendar,
-  disconnectCalendar,
   getCalendarConnections,
   getCalendarPermissionStatus,
   syncCalendarEvents,
@@ -27,6 +24,7 @@ import {
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import {
   getBaseline,
+  hasQuestionnaireAnswers,
   latestSelfReport,
   saveSelfReport,
   syncAndAnalyzeCalendar,
@@ -61,18 +59,26 @@ export default function BaselineScreen() {
   const [syncInfo, setSyncInfo] = useState<string | null>(null);
 
   const refresh = React.useCallback(async () => {
-    const [baseline, self, connections] = await Promise.all([
-      getBaseline(),
-      latestSelfReport(),
-      getCalendarConnections(),
-    ]);
-    const permissionStatus = await getCalendarPermissionStatus();
+  const [baseline, self, questionnaireCompleted, connections] = await Promise.all([
+    getBaseline(),
+    latestSelfReport(),
+    hasQuestionnaireAnswers(),
+    getCalendarConnections(),
+  ]);
 
-    setScanCount(baseline.calibrationScans);
-    setQuestionnaireDone(Boolean(self?.rawAnswers));
-    setCalendarConnections(connections);
-    setCalendarPermission(permissionStatus);
-  }, []);
+  const permissionStatus = await getCalendarPermissionStatus();
+
+  setScanCount(baseline.calibrationScans);
+  setQuestionnaireDone(questionnaireCompleted);
+
+  // Restore the latest perceived-stress value.
+  if (self?.score != null) {
+    setStress(Number(self.score));
+  }
+
+  setCalendarConnections(connections);
+  setCalendarPermission(permissionStatus);
+}, []);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -92,7 +98,7 @@ export default function BaselineScreen() {
         setSyncInfo('Calendar connected (demo mode/limited on this device)');
       } else {
         const total = (syncRes.saved || 0) + (syncRes.existing || 0);
-        setSyncInfo(`Real Calendar Synced: ${total} task(s) found for this week`);
+        setSyncInfo(`${total} task(s) found for this week`);
       }
     } catch (error) {
       console.error('Calendar connection error:', error);
@@ -102,18 +108,7 @@ export default function BaselineScreen() {
     }
   };
 
-  const handleDisconnectCalendar = async () => {
-    setSyncing(true);
-    try {
-      await disconnectCalendar();
-      setSyncInfo(null);
-      await refresh();
-    } catch (error) {
-      console.error('Calendar disconnection error:', error);
-    } finally {
-      setSyncing(false);
-    }
-  };
+
 
   const handleContinue = async () => {
     setSaving(true);
@@ -172,187 +167,9 @@ export default function BaselineScreen() {
   const stressState = getStressState();
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
-      <View style={styles.container}>
-        <TopNavigation />
-
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-          <View style={styles.titleSection}>
-            <Text style={styles.title}>Set Your Baseline</Text>
-            <Text style={styles.subtitle}>
-              A gentle space tailored to your daily rhythm. Tell us how you are feeling today.
-            </Text>
-          </View>
-
-          <View style={styles.card}>
-            <View style={styles.cardHeader}>
-              <Text style={styles.cardTitle}>How stressed are you feeling?</Text>
-              <Text style={styles.sparkle}>✦</Text>
-            </View>
-            <View style={styles.badgeRow}>
-              <View
-                style={[
-                  styles.stressBadge,
-                  {
-                    backgroundColor: stressState.background,
-                    left: `${Math.min(Math.max(stress, 5), 95)}%`,
-                  },
-                ]}
-              >
-                <Text style={[styles.stressBadgeText, { color: stressState.color }]}>
-                  {stressState.label}
-                </Text>
-              </View>
-            </View>
-            <View style={styles.sliderContainer}>
-              <View style={styles.sliderBackground}>
-                <View style={[styles.sliderGreen, { width: `${stress}%` }]} />
-              </View>
-              <Slider
-                style={styles.slider}
-                minimumValue={0}
-                maximumValue={100}
-                value={stress}
-                onValueChange={setStress}
-                minimumTrackTintColor="transparent"
-                maximumTrackTintColor="transparent"
-                thumbTintColor="#2D2723"
-              />
-            </View>
-            <View style={styles.sliderLabels}>
-              <View style={styles.sliderLabelLeft}>
-                <Text style={styles.emoji}>🌱</Text>
-                <Text style={styles.labelText}>Relaxed</Text>
-              </View>
-              <View style={styles.sliderLabelRight}>
-                <Text style={styles.labelText}>Very stressed</Text>
-                <Text style={styles.emoji}>⚡</Text>
-              </View>
-            </View>
-          </View>
-
-          <View style={styles.card}>
-            <View style={styles.assessmentRow}>
-              <View style={styles.assessmentLeft}>
-                <View style={[styles.checkCircle, !questionnaireDone && { backgroundColor: '#F1EDE4' }]}>
-                  <Text style={[styles.checkIcon, !questionnaireDone && { color: '#A79E93' }]}>
-                    {questionnaireDone ? '✓' : '○'}
-                  </Text>
-                </View>
-                <View style={styles.assessmentText}>
-                  <Text style={styles.assessmentTitle}>Personal Baseline{'\n'}Assessment</Text>
-                  <Text style={styles.assessmentSubtitle}>
-                    {ITEMS.length}-Item Perceived Stress{questionnaireDone ? ' (Completed)' : ' (Not started)'}
-                  </Text>
-                </View>
-              </View>
-              <Pressable
-                onPress={() => router.push('/questionnaire')}
-                style={({ pressed }) => [styles.recalibrateButton, pressed && styles.pressed]}
-              >
-                <Text style={styles.recalibrateText}>{questionnaireDone ? 'Recalibrate' : 'Start'}</Text>
-                <Text style={styles.chevron}>›</Text>
-              </Pressable>
-            </View>
-          </View>
-
-          <View style={styles.card}>
-            <View style={styles.ppgHeader}>
-              <View style={styles.pointIcon}>
-                <Text style={styles.pointEmoji}>👉</Text>
-              </View>
-              <View style={styles.ppgText}>
-                <Text style={styles.ppgTitle}>Finger-PPG Spot Check</Text>
-                <Text style={styles.ppgSubtitle}>
-                  Place your index fingertip{'\n'}over rear camera + flash · 1min check
-                </Text>
-              </View>
-            </View>
-            <View style={styles.progressRow}>
-              <Text style={styles.progressLabel}>
-                {scanCount}/{BASELINE_MIN_SCANS} scans
-              </Text>
-              <Text style={[styles.progressHint, { color: scansLeft > 0 ? '#B4892F' : COLORS.green }]}>
-                {scansLeft > 0 ? `${scansLeft} more to unlock stress detection` : 'Baseline active'}
-              </Text>
-            </View>
-            <View style={styles.progressTrack}>
-              <View
-                style={[
-                  styles.progressFill,
-                  {
-                    width: `${(Math.min(scanCount, BASELINE_MIN_SCANS) / BASELINE_MIN_SCANS) * 100}%`,
-                    backgroundColor: scansLeft > 0 ? COLORS.yellow : COLORS.green,
-                  },
-                ]}
-              />
-            </View>
-            <Pressable
-              onPress={() => router.push('/spot-check')}
-              style={({ pressed }) => [styles.yellowButton, pressed && styles.pressedButton]}
-            >
-              <Text style={styles.yellowButtonText}>Start Spot Check</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.card}>
-            <View style={styles.ppgHeader}>
-              <View style={[styles.pointIcon, { backgroundColor: COLORS.orangeLight }]}>
-                <Text style={styles.pointEmoji}>📅</Text>
-              </View>
-
-              <View style={styles.ppgText}>
-                <Text style={styles.ppgTitle}>Sync Your Calendar</Text>
-                <Text style={styles.ppgSubtitle}>
-                  Connect your calendar{'\n'}
-                  so Wick can understand your workload
-                </Text>
-              </View>
-            </View>
-
-            {calendarPermission === 'denied' ? (
-              <View style={styles.calendarNote}>
-                <Text style={styles.calendarNoteText}>
-                  Calendar permission was denied. Please enable it in your device settings to continue.
-                </Text>
-              </View>
-            ) : (
-              <Pressable
-                onPress={calendarConnected ? handleDisconnectCalendar : handleConnectCalendar}
-                disabled={syncing}
-                style={({ pressed }) => [
-                  styles.yellowButton,
-                  pressed && styles.pressedButton,
-                  syncing && styles.disabledButton,
-                ]}
-              >
-                <Text style={styles.yellowButtonText}>
-                  {syncing
-                    ? calendarConnected
-                      ? 'Disconnecting...'
-                      : 'Syncing...'
-                    : calendarConnected
-                      ? 'Disconnect Calendar'
-                      : 'Sync Calendar'}
-                </Text>
-              </Pressable>
-            )}
-
-            {calendarConnected && (
-              <View style={{ marginTop: 10, paddingHorizontal: 4 }}>
-                <Text style={{ fontSize: 13, color: '#16A34A', fontWeight: '600' }}>
-                  ✓ {syncInfo || 'Phone system calendar connected'}
-                </Text>
-              </View>
-            )}
-          </View>
-
-
-
-          <View style={{ height: 24 }} />
-        </ScrollView>
-
+    <Screen
+      header={<NavBar title="SET UP" onBack={handleBackToLogin} />}
+      footer={
         <View style={styles.bottomContainer}>
           <Pressable
             onPress={handleContinue}
@@ -370,20 +187,185 @@ export default function BaselineScreen() {
           </Pressable>
           <View style={styles.homeIndicator} />
         </View>
+      }
+    >
+      <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
+
+      <View style={styles.titleSection}>
+        <Text style={styles.title}>Set Your Baseline</Text>
+        <Text style={styles.subtitle}>
+          A gentle space tailored to your daily rhythm. Tell us how you are feeling today.
+        </Text>
       </View>
-    </SafeAreaView>
+
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardTitle}>How stressed are you feeling?</Text>
+          <Text style={styles.sparkle}>✦</Text>
+        </View>
+        <View style={styles.badgeRow}>
+          <View
+            style={[
+              styles.stressBadge,
+              {
+                backgroundColor: stressState.background,
+                left: `${Math.min(Math.max(stress, 5), 95)}%`,
+              },
+            ]}
+          >
+            <Text style={[styles.stressBadgeText, { color: stressState.color }]}>
+              {stressState.label}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.sliderContainer}>
+          <View style={styles.sliderBackground}>
+            <View style={[styles.sliderGreen, { width: `${stress}%` }]} />
+          </View>
+          <Slider
+            style={styles.slider}
+            minimumValue={0}
+            maximumValue={100}
+            value={stress}
+            onValueChange={setStress}
+            minimumTrackTintColor="transparent"
+            maximumTrackTintColor="transparent"
+            thumbTintColor="#2D2723"
+          />
+        </View>
+        <View style={styles.sliderLabels}>
+          <View style={styles.sliderLabelLeft}>
+            <Text style={styles.emoji}>🌱</Text>
+            <Text style={styles.labelText}>Relaxed</Text>
+          </View>
+          <View style={styles.sliderLabelRight}>
+            <Text style={styles.labelText}>Very stressed</Text>
+            <Text style={styles.emoji}>⚡</Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.assessmentRow}>
+          <View style={styles.assessmentLeft}>
+            <View style={[styles.checkCircle, !questionnaireDone && { backgroundColor: '#F1EDE4' }]}>
+              <Text style={[styles.checkIcon, !questionnaireDone && { color: '#A79E93' }]}>
+                {questionnaireDone ? '✓' : '○'}
+              </Text>
+            </View>
+            <View style={styles.assessmentText}>
+              <Text style={styles.assessmentTitle}>Personal Baseline{'\n'}Assessment</Text>
+              <Text style={styles.assessmentSubtitle}>
+                {ITEMS.length}-Item Perceived Stress{questionnaireDone ? ' (Completed)' : ' (Not started)'}
+              </Text>
+            </View>
+          </View>
+          <Pressable
+            onPress={() => router.push('/questionnaire')}
+            style={({ pressed }) => [styles.recalibrateButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.recalibrateText}>{questionnaireDone ? 'Recalibrate' : 'Start'}</Text>
+            <Text style={styles.chevron}>›</Text>
+          </Pressable>
+        </View>
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.ppgHeader}>
+          <View style={styles.pointIcon}>
+            <Text style={styles.pointEmoji}>👉</Text>
+          </View>
+          <View style={styles.ppgText}>
+            <Text style={styles.ppgTitle}>Finger-PPG Spot Check</Text>
+            <Text style={styles.ppgSubtitle}>
+              Place your index fingertip{'\n'}over rear camera + flash · 1min check
+            </Text>
+          </View>
+        </View>
+        <View style={styles.progressRow}>
+          <Text style={styles.progressLabel}>
+            {scanCount}/{BASELINE_MIN_SCANS} scans
+          </Text>
+          <Text style={[styles.progressHint, { color: scansLeft > 0 ? '#B4892F' : COLORS.green }]}>
+            {scansLeft > 0 ? `${scansLeft} more to unlock stress detection` : 'Baseline active'}
+          </Text>
+        </View>
+        <View style={styles.progressTrack}>
+          <View
+            style={[
+              styles.progressFill,
+              {
+                width: `${(Math.min(scanCount, BASELINE_MIN_SCANS) / BASELINE_MIN_SCANS) * 100}%`,
+                backgroundColor: scansLeft > 0 ? COLORS.yellow : COLORS.green,
+              },
+            ]}
+          />
+        </View>
+        <Pressable
+          onPress={() => router.push('/spot-check')}
+          style={({ pressed }) => [styles.yellowButton, pressed && styles.pressedButton]}
+        >
+          <Text style={styles.yellowButtonText}>Start Spot Check</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.ppgHeader}>
+          <View style={[styles.pointIcon, { backgroundColor: COLORS.orangeLight }]}>
+            <Text style={styles.pointEmoji}>📅</Text>
+          </View>
+          <View style={styles.ppgText}>
+            <Text style={styles.ppgTitle}>Sync Your Calendar</Text>
+            <Text style={styles.ppgSubtitle}>
+              Connect your calendar{'\n'}
+              so Wick can understand your workload
+            </Text>
+          </View>
+        </View>
+
+        {calendarPermission === 'denied' ? (
+          <View style={styles.calendarNote}>
+            <Text style={styles.calendarNoteText}>
+              Calendar permission was denied. Please enable it in your device settings to continue.
+            </Text>
+          </View>
+        ) : (
+          <Pressable
+            onPress={handleConnectCalendar}
+            disabled={syncing}
+            style={({ pressed }) => [
+              styles.yellowButton,
+              pressed && styles.pressedButton,
+              syncing && styles.disabledButton,
+            ]}
+          >
+            <Text style={styles.yellowButtonText}>
+              {syncing
+                ? 'Syncing...'
+                : calendarConnected
+                  ? 'Re-sync Calendar'
+                  : 'Sync Calendar'}
+            </Text>
+          </Pressable>
+        )}
+
+        {calendarConnected && (
+          <View style={{ marginTop: 10, paddingHorizontal: 4 }}>
+            <Text style={{ fontSize: 13, color: '#16A34A', fontWeight: '600' }}>
+              ✓ {syncInfo || 'Phone system calendar connected'}
+            </Text>
+          </View>
+        )}
+      </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },
   container: { flex: 1, backgroundColor: COLORS.background },
-  header: { height: 58, paddingHorizontal: 24, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  backButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EDE8E1', alignItems: 'center', justifyContent: 'center' },
-  backIcon: { fontSize: 32, lineHeight: 34, color: COLORS.text, fontWeight: '300' },
-  setupText: { position: 'absolute', left: 0, right: 0, textAlign: 'center', color: '#8E877F', fontSize: 13, fontWeight: '700', letterSpacing: 3 },
-  headerSpacer: { width: 40 },
-  scrollContent: { paddingHorizontal: 24, paddingTop: 12, paddingBottom: 90 },
+  scrollView: { flex: 1, paddingHorizontal: 24 },
+  scrollContent: { paddingTop: 12, paddingBottom: 24},
   titleSection: { marginBottom: 16 },
   title: { color: COLORS.text, fontSize: 32, lineHeight: 38, fontWeight: '700', letterSpacing: -0.7 },
   subtitle: { marginTop: 6, color: COLORS.muted, fontSize: 15, lineHeight: 23 },
@@ -441,7 +423,7 @@ const styles = StyleSheet.create({
   connectButton: { width: '100%', height: 52, borderRadius: 16, backgroundColor: COLORS.brown, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   connectButtonIcon: { fontSize: 20 },
   connectButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
-  bottomContainer: { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 24, paddingTop: 18, paddingBottom: 12, backgroundColor: COLORS.background },
+  bottomContainer: { paddingHorizontal: 24, paddingTop: 18, paddingBottom: 50, backgroundColor: COLORS.background },
   setupHint: { color: '#B4892F', fontSize: 12, lineHeight: 17, textAlign: 'center', marginBottom: 10 },
   continueButton: { width: '100%', height: 56, borderRadius: 30, backgroundColor: COLORS.brown, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   continueText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },

@@ -4,7 +4,9 @@ import { useCallback, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    KeyboardAvoidingView,
     Modal,
+    Platform,
     Pressable,
     ScrollView,
     StatusBar,
@@ -21,6 +23,7 @@ import TopNavigation from '@/components/topbar';
 import type {
     CalendarConnection,
     LoadBalanceSuggestion,
+    StressScoreRow,
     TaskAnalysis,
     WeeklyCapacityAnalysis,
 } from '@/data/types';
@@ -34,6 +37,7 @@ import {
     getCalendarConnections,
     getTaskAnalyses,
     getWeeklyCapacity,
+    listStressScores,
     syncAndAnalyzeCalendar
 } from '@/services/repository';
 import { colors } from '@/theme';
@@ -75,6 +79,7 @@ export default function Home() {
   const [capacity, setCapacity] = useState<WeeklyCapacityAnalysis | null>(null);
   const [connections, setConnections] = useState<CalendarConnection[]>([]);
   const [loadSuggestions, setLoadSuggestions] = useState<LoadBalanceSuggestion[]>([]);
+  const [stressScores, setStressScores] = useState<StressScoreRow[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Review Modal for Unapproved Tasks (Current Week)
@@ -96,15 +101,17 @@ export default function Home() {
 
   const loadDashboardData = useCallback(async () => {
     try {
-      const [allTasks, currentCapacity, allConns] = await Promise.all([
+      const [allTasks, currentCapacity, allConns, scores] = await Promise.all([
         getTaskAnalyses(currentWeekStart),
         getWeeklyCapacity(currentWeekStart),
         getCalendarConnections(),
+        listStressScores(14),
       ]);
 
       setTasks(allTasks);
       setCapacity(currentCapacity);
       setConnections(allConns);
+      setStressScores(scores);
 
       // Check for unapproved / newly synced tasks for this week
       const unapproved = allTasks.filter((t) => t.status === 'pending');
@@ -262,6 +269,68 @@ export default function Home() {
     errands: tasks.filter((t) => t.category === 'errands' || t.category === 'work').length,
   };
 
+  // Map stress scores to Mon-Sun for the current week
+  const weekStartMs = new Date(currentWeekStart + 'T00:00:00').getTime();
+  const dayScores: (number | null)[] = [null, null, null, null, null, null, null];
+  for (const s of stressScores) {
+    const d = new Date(s.createdAt);
+    const dayIdx = (d.getDay() + 6) % 7; // Mon=0 .. Sun=6
+    // Only include scores from this week
+    const scoreDayMs = new Date(d.toISOString().split('T')[0] + 'T00:00:00').getTime();
+    if (scoreDayMs >= weekStartMs && scoreDayMs < weekStartMs + 7 * 86400000) {
+      if (dayScores[dayIdx] === null) {
+        dayScores[dayIdx] = s.fusedScore;
+      } else {
+        // Average multiple scores on same day
+        dayScores[dayIdx] = (dayScores[dayIdx]! + s.fusedScore) / 2;
+      }
+    }
+  }
+
+  // Find the latest day with data for the active-day highlight
+  let lastScoredDay = -1;
+  for (let i = dayScores.length - 1; i >= 0; i--) {
+    if (dayScores[i] !== null) {
+      lastScoredDay = i;
+      break;
+    }
+  }
+
+  // Build SVG path from available data points
+  // Chart area: x 20..365, y 100 (score=0) to 20 (score=100)
+  const chartLeft = 20;
+  const chartRight = 365;
+  const chartTop = 20;
+  const chartBottom = 100;
+  const xStep = (chartRight - chartLeft) / 6;
+
+  const points: { x: number; y: number }[] = [];
+  for (let i = 0; i < 7; i++) {
+    const score = dayScores[i];
+    const x = chartLeft + i * xStep;
+    const y =
+      score !== null
+        ? chartBottom - (score / 100) * (chartBottom - chartTop)
+        : null;
+    if (y !== null) points.push({ x, y });
+  }
+
+  // Generate a smooth bezier path through the points
+  let stressPath = '';
+  let stressGradientPath = '';
+  if (points.length >= 2) {
+    const lineParts = points.map(
+      (p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`
+    );
+    stressPath = lineParts.join(' ');
+    stressGradientPath =
+      stressPath +
+      ` L ${points[points.length - 1].x} ${chartBottom} L ${points[0].x} ${chartBottom} Z`;
+  } else if (points.length === 1) {
+    stressPath = `M ${points[0].x} ${points[0].y} L ${points[0].x} ${points[0].y}`;
+    stressGradientPath = `M ${points[0].x} ${chartBottom} L ${points[0].x} ${chartBottom}`;
+  }
+
   const usedHours = capacity?.used_capacity_hours ?? 0;
   const totalHours = capacity?.total_capacity_hours ?? 40;
   const capacityPct = Math.min(100, Math.round((usedHours / totalHours) * 100));
@@ -319,39 +388,53 @@ export default function Home() {
                   </LinearGradient>
                 </Defs>
 
+                {/* Grid lines */}
                 <Line x1="10" y1="20" x2="370" y2="20" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
                 <Line x1="10" y1="60" x2="370" y2="60" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
                 <Line x1="10" y1="100" x2="370" y2="100" stroke="#f2eede" strokeWidth="1" />
 
-                <Path
-                  d="M 20 85 C 50 82, 60 70, 80 68 C 110 65, 120 22, 140 16 C 160 12, 180 50, 200 55 C 230 62, 240 75, 260 78 C 290 82, 300 92, 320 90 C 340 88, 355 85, 365 85 L 365 100 L 20 100 Z"
-                  fill="url(#stressGradient)"
-                />
+                {/* Gradient fill */}
+                {stressGradientPath ? (
+                  <Path d={stressGradientPath} fill="url(#stressGradient)" />
+                ) : null}
 
-                <Path
-                  d="M 20 85 C 50 82, 60 70, 80 68 C 110 65, 120 22, 140 16 C 160 12, 180 50, 200 55 C 230 62, 240 75, 260 78 C 290 82, 300 92, 320 90 C 340 88, 355 85, 365 85"
-                  stroke="#7c5730"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                />
+                {/* Line */}
+                {stressPath ? (
+                  <Path
+                    d={stressPath}
+                    stroke="#7c5730"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                  />
+                ) : null}
 
-                <Circle cx="140" cy="16" r="6" fill="#ba1a1a" stroke="#ffffff" strokeWidth="2.5" />
-                <Circle cx="20" cy="85" r="3" fill="#81756c" />
-                <Circle cx="80" cy="68" r="3" fill="#81756c" />
-                <Circle cx="200" cy="55" r="3" fill="#81756c" />
-                <Circle cx="260" cy="78" r="3" fill="#81756c" />
-                <Circle cx="320" cy="90" r="3" fill="#81756c" />
-                <Circle cx="365" cy="85" r="3" fill="#81756c" />
+                {/* Data points */}
+                {points.map((p, i) => (
+                  <Circle
+                    key={i}
+                    cx={p.x}
+                    cy={p.y}
+                    r={p.x === chartLeft + lastScoredDay * xStep ? 6 : 3}
+                    fill={p.x === chartLeft + lastScoredDay * xStep ? '#ba1a1a' : '#81756c'}
+                    stroke={p.x === chartLeft + lastScoredDay * xStep ? '#ffffff' : 'none'}
+                    strokeWidth={p.x === chartLeft + lastScoredDay * xStep ? 2.5 : 0}
+                  />
+                ))}
+
+                {/* Empty state: flat line at 50% */}
+                {points.length === 0 && (
+                  <>
+                    <Line x1="20" y1="60" x2="365" y2="60" stroke="#ddd" strokeWidth="1.5" strokeDasharray="6 4" />
+                  </>
+                )}
               </Svg>
 
               <View style={styles.daysRow}>
                 <Text style={styles.dayText}>M</Text>
                 <Text style={styles.dayText}>T</Text>
-                <View style={styles.activeDayBadge}>
-                  <Text style={styles.activeDayText}>W</Text>
-                </View>
+                <Text style={styles.dayText}>W</Text>
                 <Text style={styles.dayText}>T</Text>
                 <Text style={styles.dayText}>F</Text>
                 <Text style={styles.dayText}>S</Text>
@@ -370,7 +453,7 @@ export default function Home() {
               </View>
               <View style={styles.insightContent}>
                 <Text style={styles.insightTitle}>
-                  {isOverloaded ? 'Cognitive Load Warning' : 'AI Workload Insight'}
+                  {isOverloaded ? 'Cognitive Load Warning' : 'Workload Insight'}
                 </Text>
                 <Text style={styles.insightText}>
                   {capacity?.ai_reasoning ||
@@ -535,7 +618,7 @@ export default function Home() {
           {/* 4. AI Ranked Tasks for This Week (with Delete -> 2-way sync) */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
-              <Text style={styles.cardTitle}>AI Ranked Tasks (This Week)</Text>
+              <Text style={styles.cardTitle}>Tasks This Week</Text>
               <Pressable onPress={() => setShowAddModal(true)} style={styles.iconButton}>
                 <MaterialIcons name="add-circle" size={24} color={COLORS.primary} />
               </Pressable>
@@ -545,7 +628,7 @@ export default function Home() {
               <View style={styles.emptyTasks}>
                 <Text style={styles.emptyTasksText}>No tasks logged for this week.</Text>
                 <Pressable onPress={() => setShowAddModal(true)} style={styles.addFirstTaskBtn}>
-                  <Text style={styles.addFirstTaskText}>+ Quick Add with AI</Text>
+                  <Text style={styles.addFirstTaskText}>+ Quick Add</Text>
                 </Pressable>
               </View>
             ) : (
@@ -586,7 +669,7 @@ export default function Home() {
 
             <Text style={styles.loadDescription}>
               {loadSuggestions.length > 0
-                ? 'AI recommends deferring these lower-priority tasks to relieve cognitive pressure this week:'
+                ? 'Consider deferring these lower-priority tasks to relieve cognitive pressure this week:'
                 : 'Your schedule is currently balanced. No deferrals required right now.'}
             </Text>
 
@@ -621,7 +704,7 @@ export default function Home() {
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <View>
-                <Text style={styles.modalTitle}>AI Workload Review</Text>
+                <Text style={styles.modalTitle}>Workload Review</Text>
                 <Text style={styles.modalSubtitle}>
                   Current week tasks auto-detected from your native calendar
                 </Text>
@@ -647,7 +730,7 @@ export default function Home() {
                     Stress Impact: {task.stress_score}% • Category: {task.category}
                   </Text>
                   {task.ai_reasoning ? (
-                    <Text style={styles.reviewTaskReasoning}>AI: {task.ai_reasoning}</Text>
+                    <Text style={styles.reviewTaskReasoning}>{task.ai_reasoning}</Text>
                   ) : null}
                   <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 6 }}>
                     <Pressable onPress={() => handleRejectTask(task.id)} style={styles.rejectBtn}>
@@ -677,11 +760,14 @@ export default function Home() {
 
       {/* ── QUICK ADD NLP CHATBOT MODAL (2-Way Calendar Sync) ─────────────── */}
       <Modal visible={showAddModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <View>
-                <Text style={styles.modalTitle}>AI Quick Task Logger</Text>
+                <Text style={styles.modalTitle}>Quick Task Logger</Text>
                 <Text style={styles.modalSubtitle}>
                   Type naturally (e.g. "2 assignment due Fri", "Exam Thu 2pm")
                 </Text>
@@ -691,56 +777,62 @@ export default function Home() {
               </Pressable>
             </View>
 
-            <TextInput
-              style={styles.chatInput}
-              placeholder="e.g. 2 assignment due Fri, Gym tomorrow 6pm..."
-              value={quickInput}
-              onChangeText={setQuickInput}
-              multiline
-            />
-
-            <Pressable
-              onPress={handleParseNLP}
-              disabled={parsingNLP || !quickInput.trim()}
-              style={[styles.nlpParseButton, (!quickInput.trim() || parsingNLP) && { opacity: 0.6 }]}
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.modalScrollContent}
             >
-              {parsingNLP ? (
-                <ActivityIndicator size="small" color="#FFFFFF" />
-              ) : (
-                <Text style={styles.nlpParseButtonText}>Analyze with AI</Text>
+              <TextInput
+                style={styles.chatInput}
+                placeholder="e.g. 2 assignment due Fri, Gym tomorrow 6pm..."
+                value={quickInput}
+                onChangeText={setQuickInput}
+                multiline
+              />
+
+              <Pressable
+                onPress={handleParseNLP}
+                disabled={parsingNLP || !quickInput.trim()}
+                style={[styles.nlpParseButton, (!quickInput.trim() || parsingNLP) && { opacity: 0.6 }]}
+              >
+                {parsingNLP ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.nlpParseButtonText}>Analyze</Text>
+                )}
+              </Pressable>
+
+              {/* Structured Details Preview */}
+              {parsedPreview && (
+                <View style={styles.previewBox}>
+                  <Text style={styles.previewHeader}>DETAILS DETECTED</Text>
+                  <Text style={styles.previewTitle}>📌 {parsedPreview.title}</Text>
+                  <Text style={styles.previewDetail}>
+                    Category: <Text style={{ fontWeight: '600' }}>{parsedPreview.category}</Text> • Priority: <Text style={{ fontWeight: '600' }}>{parsedPreview.priority.toUpperCase()}</Text>
+                  </Text>
+                  <Text style={styles.previewDetail}>
+                    Date: {parsedPreview.scheduled_date} ({parsedPreview.scheduled_start_time || '09:00'}) • {parsedPreview.estimated_duration_hours}h
+                  </Text>
+                  <Text style={styles.previewDetail}>
+                    Estimated Stress Impact: {parsedPreview.stress_score}%
+                  </Text>
+
+                  <Pressable
+                    onPress={handleConfirmAddTask}
+                    disabled={addingTask}
+                    style={[styles.primaryModalBtn, { marginTop: 12 }, addingTask && { opacity: 0.7 }]}
+                  >
+                    {addingTask ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Text style={styles.primaryModalBtnText}>Approve & Sync to Calendar</Text>
+                    )}
+                  </Pressable>
+                </View>
               )}
-            </Pressable>
-
-            {/* Structured Schema Preview */}
-            {parsedPreview && (
-              <View style={styles.previewBox}>
-                <Text style={styles.previewHeader}>Auto-Detected Schema:</Text>
-                <Text style={styles.previewTitle}>📌 {parsedPreview.title}</Text>
-                <Text style={styles.previewDetail}>
-                  Category: <Text style={{ fontWeight: '600' }}>{parsedPreview.category}</Text> • Priority: <Text style={{ fontWeight: '600' }}>{parsedPreview.priority.toUpperCase()}</Text>
-                </Text>
-                <Text style={styles.previewDetail}>
-                  Date: {parsedPreview.scheduled_date} ({parsedPreview.scheduled_start_time || '09:00'}) • {parsedPreview.estimated_duration_hours}h
-                </Text>
-                <Text style={styles.previewDetail}>
-                  Estimated Stress Impact: {parsedPreview.stress_score}%
-                </Text>
-
-                <Pressable
-                  onPress={handleConfirmAddTask}
-                  disabled={addingTask}
-                  style={[styles.primaryModalBtn, { marginTop: 12 }, addingTask && { opacity: 0.7 }]}
-                >
-                  {addingTask ? (
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                  ) : (
-                    <Text style={styles.primaryModalBtnText}>Approve & Sync to Calendar</Text>
-                  )}
-                </Pressable>
-              </View>
-            )}
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -830,8 +922,6 @@ const styles = StyleSheet.create({
   chartContainer: { alignItems: 'center', marginBottom: 12 },
   daysRow: { flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: 8, paddingHorizontal: 10 },
   dayText: { fontSize: 13, color: '#81756C', fontWeight: '500' },
-  activeDayBadge: { backgroundColor: '#7C5730', width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
-  activeDayText: { fontSize: 12, color: '#FFFFFF', fontWeight: '700' },
   insightBanner: { flexDirection: 'row', backgroundColor: '#FFF5F0', borderRadius: 12, padding: 12, marginTop: 4 },
   insightIconContainer: { marginRight: 8, marginTop: 2 },
   insightContent: { flex: 1 },
@@ -911,6 +1001,7 @@ const styles = StyleSheet.create({
   resyncButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '85%' },
+  modalScrollContent: { paddingBottom: 12 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
   modalSubtitle: { fontSize: 12, color: '#6B7280', marginTop: 2 },

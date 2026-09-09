@@ -10,16 +10,16 @@
  */
 
 import type {
-    CalendarEventItem,
-    LoadBalanceSuggestion,
-    TaskAnalysis,
-    WeeklyCapacityAnalysis,
+  CalendarEventItem,
+  LoadBalanceSuggestion,
+  TaskAnalysis,
+  WeeklyCapacityAnalysis,
 } from '@/data/types';
 
 const OPENROUTER_KEY = process.env.EXPO_PUBLIC_OPENROUTER_API_KEY;
 const GEMINI_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
 
-/* ── Free-Tier AI Callers ─────────────────────────────────────────────────── */
+/* ── AI Callers ─────────────────────────────────────────────────── */
 
 async function callOpenRouter(prompt: string, systemPrompt?: string): Promise<string | null> {
   if (!OPENROUTER_KEY) return null;
@@ -33,7 +33,7 @@ async function callOpenRouter(prompt: string, systemPrompt?: string): Promise<st
         'X-Title': 'Wick Stress & Workload',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp:free',
+        model: 'nex-agi/nex-n2.5-pro:free',
         messages: [
           ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
           { role: 'user', content: prompt },
@@ -193,12 +193,17 @@ export async function analyzeCalendarTasks(
   const prompt = `Analyze these ${events.length} calendar events for the current week. Return a JSON array with:
   - id: matching event id
   - title: clear, concise task title
-  - category: one of ["academic", "work", "social", "physical", "mental", "errands"]
+  - category: a short, descriptive category name (dynamically determined based on the event context, but reuse existing category names where applicable to keep the total number of unique categories under 6)
   - priority: one of ["high", "medium", "low"]
   - estimated_duration_hours: number (0.5 to 8)
   - stress_score: number (0 to 100)
   - rank: number (1 is highest priority/urgency)
   - ai_reasoning: short sentence explaining why this task has this rank and priority
+
+  Guidelines for category:
+  - Do not use a fixed list of categories.
+  - Invent intuitive, concise category names (1-2 words, e.g., "Engineering", "Health", "Social") as needed.
+  - Group similar events together by intentionally reusing category names across multiple items instead of creating a new category for every single event.
 
 Events: ${JSON.stringify(events.map(e => ({ id: e.id, title: e.title, start: e.startDate, end: e.endDate })))}
 
