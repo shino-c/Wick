@@ -414,52 +414,95 @@ export async function parseQuickTaskNLP(
   input: string,
   context?: { currentWeekStart?: string }
 ): Promise<Omit<TaskAnalysis, 'id' | 'createdAt'>> {
-  const prompt = `Parse this user task input into a structured schedule object:
+  const results = await parseQuickTasksNLP(input, context);
+  return results[0];
+}
+
+/**
+ * Natural language parser that handles MULTIPLE tasks in a single input.
+ * Example: "exam Fri 2pm, Travel Sunday, Gym 3pm" → 3 separate task objects.
+ * Example: "2 assignment due Fri" → 1 task object.
+ *
+ * Always returns an array of at least one task.
+ */
+export async function parseQuickTasksNLP(
+  input: string,
+  context?: { currentWeekStart?: string }
+): Promise<Omit<TaskAnalysis, 'id' | 'createdAt'>[]> {
+  const today = new Date().toISOString().split('T')[0];
+  const prompt = `Parse the following user input into one or more structured task schedule objects.
+The input may contain multiple tasks separated by commas, semicolons, or "and".
+Examples:
+  - "2 assignment due Fri" → 1 task
+  - "exam Fri 2pm, Travel Sunday, Gym 3pm" → 3 tasks
+  - "Meeting Mon 10am and gym Tue" → 2 tasks
+
 Input: "${input}"
 
-Return a strict JSON object with:
-- title: concise cleaned task title
-- category: one of ["academic", "work", "social", "physical", "mental", "errands"]
-- priority: one of ["high", "medium", "low"]
-- estimated_duration_hours: number (e.g. 1, 2)
-- scheduled_date: ISO date string (YYYY-MM-DD) for this week
-- scheduled_start_time: string in HH:MM format (24h), or null
-- scheduled_end_time: string in HH:MM format (24h), or null
-- stress_score: number 0-100
-- ai_reasoning: short rationale
+Return a strict JSON ARRAY (always an array, even for 1 task). Each element:
+{
+  "title": "concise cleaned task title",
+  "category": one of ["academic","work","social","physical","mental","errands"],
+  "priority": one of ["high","medium","low"],
+  "estimated_duration_hours": number (0.5–8),
+  "scheduled_date": "YYYY-MM-DD for this or next week",
+  "scheduled_start_time": "HH:MM" or null,
+  "scheduled_end_time": "HH:MM" or null,
+  "stress_score": 0–100,
+  "ai_reasoning": "short rationale"
+}
 
-Reference current date: ${new Date().toISOString().split('T')[0]}
-OUTPUT STRICT JSON ONLY.`;
+Reference current date: ${today}
+OUTPUT STRICT JSON ARRAY ONLY (no markdown, just [ ... ]).`;
 
-  const rawAi = await callAI(prompt, 'You are an intelligent NLP task scheduling assistant.');
+  const rawAi = await callAI(prompt, 'You are an intelligent NLP task scheduling assistant. Always return a JSON array.');
   if (rawAi) {
     try {
       const clean = rawAi.trim().replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
       const parsed = JSON.parse(clean);
-      if (parsed && parsed.title) {
-        const category = normalizeCategory(parsed.category);
-        return {
-          title: parsed.title,
-          category,
-          priority: (parsed.priority === 'high' || parsed.priority === 'low' ? parsed.priority : 'medium') as 'high' | 'medium' | 'low',
-          estimated_duration_hours: Number(parsed.estimated_duration_hours) || 1,
-          scheduled_date: parsed.scheduled_date || toISODate(),
-          scheduled_start_time: parsed.scheduled_start_time || '09:00',
-          scheduled_end_time: parsed.scheduled_end_time || undefined,
-          capacity_hours: Number(parsed.estimated_duration_hours) || 1,
-          stress_score: Number(parsed.stress_score) || 50,
-          rank: 1,
-          ai_reasoning: parsed.ai_reasoning || 'Auto-parsed from quick input.',
-          status: 'pending',
-          calendar_provider: 'device',
-        };
+      const arr = Array.isArray(parsed) ? parsed : [parsed];
+      if (arr.length > 0 && arr[0]?.title) {
+        return arr.map((item: any, idx: number) => {
+          const category = normalizeCategory(item.category);
+          const priority = (item.priority === 'high' || item.priority === 'low' ? item.priority : 'medium') as 'high' | 'medium' | 'low';
+          const hours = Number(item.estimated_duration_hours) || 1;
+          return {
+            title: item.title,
+            category,
+            priority,
+            estimated_duration_hours: hours,
+            scheduled_date: item.scheduled_date || today,
+            scheduled_start_time: item.scheduled_start_time || '09:00',
+            scheduled_end_time: item.scheduled_end_time || undefined,
+            capacity_hours: hours,
+            stress_score: Number(item.stress_score) || 50,
+            rank: idx + 1,
+            ai_reasoning: item.ai_reasoning || 'Auto-parsed from quick input.',
+            status: 'pending' as const,
+            calendar_provider: 'device',
+          };
+        });
       }
     } catch (e) {
       console.error('AI NLP parse error, falling back to local heuristic:', e);
     }
   }
 
-  // Heuristic Fallback
+  // ── Heuristic Fallback ────────────────────────────────────────────────────
+  // Split on comma / semicolon / "and" separators to detect multiple tasks
+  const segments = input
+    .split(/\s*[,;]\s*|\s+and\s+/i)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  return segments.map((segment, idx) => heuristicParseSegment(segment, idx + 1));
+}
+
+/** Parse a single text segment into a task using deterministic heuristics. */
+function heuristicParseSegment(
+  input: string,
+  rank = 1
+): Omit<TaskAnalysis, 'id' | 'createdAt'> {
   const lower = input.toLowerCase();
   const category = inferCategory(input);
   const priority = inferPriority(input, category);
@@ -523,7 +566,7 @@ OUTPUT STRICT JSON ONLY.`;
     scheduled_end_time: endTime,
     capacity_hours: hours,
     stress_score: stressScore,
-    rank: 1,
+    rank,
     ai_reasoning: `Auto-categorized as ${category} with ${priority} priority.`,
     status: 'pending',
     calendar_provider: 'device',
@@ -539,14 +582,14 @@ export async function suggestLoadBalance(
 ): Promise<LoadBalanceSuggestion[]> {
   if (!tasks || tasks.length === 0) return [];
 
-  // Prefer low-priority work. Only consider medium-priority work when there
-  // are no eligible low-priority tasks to defer.
+  // Priority order: low first — only fall back to medium when no low-priority
+  // tasks remain. Never suggest tasks that are already done or deferred.
   const candidatesByPriority = (priority: 'low' | 'medium') => tasks.filter(
     (t) =>
       t.status !== 'completed' &&
       t.status !== 'deferred' &&
-      t.priority === priority &&
-      (t.category === 'errands' || t.category === 'academic' || t.category === 'work')
+      t.status !== 'rejected' &&
+      t.priority === priority
   );
 
   const lowPriorityTasks = candidatesByPriority('low');

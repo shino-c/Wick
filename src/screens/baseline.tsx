@@ -17,6 +17,7 @@ import Slider from '@react-native-community/slider';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { NavBar, Screen } from '@/components/base';
+import { DateChipPicker, TimeChipPicker } from '@/components/taskPickers';
 import type { TaskAnalysis } from '@/data/types';
 import { ITEMS } from '@/features/calibration/questionnaire';
 import { markOnboarded } from '@/lib/bootstrap';
@@ -504,37 +505,44 @@ export default function BaselineScreen() {
                 keyboardShouldPersistTaps="handled"
               >
                 <View style={styles.reviewEditorCard}>
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Rank</Text>
-                    <TextInput
-                      style={[styles.reviewEditorInput, { width: 70 }]}
-                      value={String(editingTask.rank)}
-                      onChangeText={(v) => handleEditField('rank', parseInt(v, 10) || 1)}
-                      keyboardType="number-pad"
-                    />
-                  </View>
-
+                  {/* Title */}
                   <View style={styles.reviewEditorField}>
                     <Text style={styles.reviewEditorLabel}>Title</Text>
                     <TextInput
                       style={styles.reviewEditorInput}
                       value={editingTask.title}
                       onChangeText={(v) => handleEditField('title', v)}
+                      scrollEnabled={false}
                     />
                   </View>
 
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Category</Text>
-                    <TextInput
-                      style={styles.reviewEditorInput}
-                      value={editingTask.category}
-                      onChangeText={(v) => handleEditField('category', v)}
-                    />
+                  {/* Category Pills */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Category</Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                      {([
+                        { key: 'academic', label: '📚 Academic' },
+                        { key: 'work', label: '💼 Work' },
+                        { key: 'social', label: '🌱 Social' },
+                        { key: 'physical', label: '🏃 Physical' },
+                        { key: 'mental', label: '🧘 Mental' },
+                        { key: 'errands', label: '🛒 Errands' },
+                        { key: 'other', label: '📌 Other' },
+                      ] as const).map(({ key, label }) => (
+                        <Pressable
+                          key={key}
+                          onPress={() => handleEditField('category', key)}
+                          style={[styles.pickerChip, editingTask.category === key && styles.pickerChipActive]}
+                        >
+                          <Text style={[styles.pickerChipText, editingTask.category === key && styles.pickerChipTextActive]}>
+                            {label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
                   </View>
-                  <Text style={styles.reviewEditorHint}>
-                    academic, work, social, physical, mental, errands
-                  </Text>
 
+                  {/* Priority Pills */}
                   <View style={styles.reviewEditorField}>
                     <Text style={styles.reviewEditorLabel}>Priority</Text>
                     <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -560,35 +568,43 @@ export default function BaselineScreen() {
                     </View>
                   </View>
 
+                  {/* Hours Stepper */}
                   <View style={styles.reviewEditorField}>
                     <Text style={styles.reviewEditorLabel}>Hours</Text>
-                    <TextInput
-                      style={[styles.reviewEditorInput, { width: 70 }]}
-                      value={String(editingTask.estimated_duration_hours)}
-                      onChangeText={(v) =>
-                        handleEditField('estimated_duration_hours', parseFloat(v) || 1)
-                      }
-                      keyboardType="decimal-pad"
-                    />
+                    <View style={styles.stepperRow}>
+                      <Pressable
+                        onPress={() => handleEditField('estimated_duration_hours', Math.max(0.5, (editingTask.estimated_duration_hours || 1) - 0.5))}
+                        style={styles.stepperBtn}
+                      >
+                        <Text style={styles.stepperBtnText}>−</Text>
+                      </Pressable>
+                      <Text style={styles.stepperValue}>{editingTask.estimated_duration_hours}h</Text>
+                      <Pressable
+                        onPress={() => handleEditField('estimated_duration_hours', Math.min(12, (editingTask.estimated_duration_hours || 1) + 0.5))}
+                        style={styles.stepperBtn}
+                      >
+                        <Text style={styles.stepperBtnText}>+</Text>
+                      </Pressable>
+                    </View>
                   </View>
 
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Date</Text>
-                    <TextInput
-                      style={styles.reviewEditorInput}
+                  {/* Date Chips — current week Mon-Sun + Other text fallback */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Date</Text>
+                    <DateChipPicker
+                      key={`${editingTask.id}-date`}
                       value={editingTask.scheduled_date}
-                      onChangeText={(v) => handleEditField('scheduled_date', v)}
-                      placeholder="YYYY-MM-DD"
+                      onChange={(v) => handleEditField('scheduled_date', v)}
                     />
                   </View>
 
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Start Time</Text>
-                    <TextInput
-                      style={[styles.reviewEditorInput, { width: 90 }]}
-                      value={editingTask.scheduled_start_time || ''}
-                      onChangeText={(v) => handleEditField('scheduled_start_time', v)}
-                      placeholder="HH:MM"
+                  {/* Time Chips — preset slots + Other text fallback */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
+                    <TimeChipPicker
+                      key={`${editingTask.id}-time`}
+                      value={editingTask.scheduled_start_time}
+                      onChange={(v) => handleEditField('scheduled_start_time', v)}
                     />
                   </View>
 
@@ -826,4 +842,24 @@ const styles = StyleSheet.create({
   reviewCancelBtnText: { fontSize: 13, fontWeight: '600', color: colors.inkSoft },
   reviewSaveBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.brown, alignItems: 'center' },
   reviewSaveBtnText: { fontSize: 13, fontWeight: '700', color: colors.cream },
+  /* Picker chips — category pills, date chips, time chips */
+  pickerChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    minWidth: 46,
+  },
+  pickerChipActive: { backgroundColor: colors.brown, borderColor: colors.brown },
+  pickerChipText: { fontSize: 11, fontWeight: '600', color: colors.inkSoft },
+  pickerChipTextActive: { color: colors.cream },
+  pickerChipSub: { fontSize: 10, color: colors.inkFaint, marginTop: 1 },
+  /* Hours stepper */
+  stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  stepperBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: COLORS.yellowLight, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
+  stepperBtnText: { fontSize: 18, fontWeight: '700', color: colors.brown, lineHeight: 22 },
+  stepperValue: { fontSize: 15, fontWeight: '700', color: COLORS.text, minWidth: 36, textAlign: 'center' },
 });

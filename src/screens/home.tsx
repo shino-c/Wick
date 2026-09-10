@@ -19,6 +19,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-native-svg';
 
 import BottomNavigation from '@/components/bottombar';
+import { DateChipPicker, TimeChipPicker } from '@/components/taskPickers';
 import TopNavigation from '@/components/topbar';
 import type {
   CalendarConnection,
@@ -27,7 +28,7 @@ import type {
   TaskAnalysis,
   WeeklyCapacityAnalysis,
 } from '@/data/types';
-import { analyzeWeeklyCapacity, parseQuickTaskNLP, suggestLoadBalance } from '@/services/aiService';
+import { analyzeWeeklyCapacity, parseQuickTasksNLP, suggestLoadBalance } from '@/services/aiService';
 import { isNewWeek, updateEventOnDeviceCalendar } from '@/services/calendarSync';
 import { toISODate } from '@/services/dateUtils';
 import {
@@ -115,8 +116,8 @@ export default function Home() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [quickInput, setQuickInput] = useState('');
   const [parsingNLP, setParsingNLP] = useState(false);
-  const [parsedPreview, setParsedPreview] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'> | null>(null);
-  const [editPreview, setEditPreview] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'> | null>(null);
+  const [parsedTasks, setParsedTasks] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'>[]>([]);
+  const [editingParsedIdx, setEditingParsedIdx] = useState<number | null>(null);
   const [addingTask, setAddingTask] = useState(false);
 
   // Sync state
@@ -276,14 +277,14 @@ export default function Home() {
     }
   };
 
-  // Quick Add NLP Parser
+  // Quick Add NLP Parser — handles single and multi-task inputs
   const handleParseNLP = async () => {
     if (!quickInput.trim()) return;
     setParsingNLP(true);
     try {
-      const parsed = await parseQuickTaskNLP(quickInput);
-      setParsedPreview(parsed);
-      setEditPreview(parsed);
+      const parsed = await parseQuickTasksNLP(quickInput);
+      setParsedTasks(parsed);
+      setEditingParsedIdx(null);
     } catch (err) {
       console.error('Error parsing task input:', err);
     } finally {
@@ -291,18 +292,25 @@ export default function Home() {
     }
   };
 
-  // Confirm Add Task (Syncs to Phone Calendar + DB)
+  // Confirm Add All Parsed Tasks (Syncs each to Phone Calendar + DB)
   const handleConfirmAddTask = async () => {
-    if (!editPreview) return;
+    if (parsedTasks.length === 0) return;
     setAddingTask(true);
     try {
-      await createAndSyncTask(editPreview);
+      for (const task of parsedTasks) {
+        await createAndSyncTask(task);
+      }
       setQuickInput('');
-      setParsedPreview(null);
-      setEditPreview(null);
+      setParsedTasks([]);
+      setEditingParsedIdx(null);
       setShowAddModal(false);
       await loadDashboardData();
-      Alert.alert('Task Created', 'Task has been logged and synced to your phone calendar.');
+      Alert.alert(
+        'Tasks Created',
+        parsedTasks.length === 1
+          ? 'Task has been logged and synced to your phone calendar.'
+          : `${parsedTasks.length} tasks have been logged and synced to your phone calendar.`
+      );
     } catch (err: any) {
       console.error('Error creating task:', err);
       Alert.alert('Error', err?.message || 'Could not create task');
@@ -711,34 +719,47 @@ export default function Home() {
                 )}
               </View>
 
-              {/* Legend with Real Category Percentages */}
+              {/* Legend with Real Category Percentages — only show categories > 0% */}
               <View style={styles.legendContainer}>
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.academic }]} />
-                  <Text style={styles.legendText}>Academic ({academicPct}%)</Text>
-                </View>
+                {academicPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.academic }]} />
+                    <Text style={styles.legendText}>Academic ({academicPct}%)</Text>
+                  </View>
+                )}
                 {workPct > 0 && (
                   <View style={styles.legendItem}>
                     <View style={[styles.legendDot, { backgroundColor: '#FCD34D' }]} />
                     <Text style={styles.legendText}>Work ({workPct}%)</Text>
                   </View>
                 )}
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.social }]} />
-                  <Text style={styles.legendText}>Social ({socialPct}%)</Text>
-                </View>
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.physical }]} />
-                  <Text style={styles.legendText}>Physical ({physicalPct}%)</Text>
-                </View>
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.errands }]} />
-                  <Text style={styles.legendText}>Errands ({errandsPct}%)</Text>
-                </View>
-                <View style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: COLORS.mental }]} />
-                  <Text style={styles.legendText}>Mental ({mentalPct}%)</Text>
-                </View>
+                {socialPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.social }]} />
+                    <Text style={styles.legendText}>Social ({socialPct}%)</Text>
+                  </View>
+                )}
+                {physicalPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.physical }]} />
+                    <Text style={styles.legendText}>Physical ({physicalPct}%)</Text>
+                  </View>
+                )}
+                {errandsPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.errands }]} />
+                    <Text style={styles.legendText}>Errands ({errandsPct}%)</Text>
+                  </View>
+                )}
+                {mentalPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.mental }]} />
+                    <Text style={styles.legendText}>Mental ({mentalPct}%)</Text>
+                  </View>
+                )}
+                {usedHours === 0 && (
+                  <Text style={[styles.legendText, { color: '#9CA3AF', fontStyle: 'italic' }]}>No tasks scheduled yet</Text>
+                )}
               </View>
             </View>
           </View>
@@ -747,10 +768,6 @@ export default function Home() {
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Categorized Load Map</Text>
-              <Pressable onPress={() => setShowAddModal(true)} style={styles.addInlineButton}>
-                <MaterialIcons name="add" size={16} color={COLORS.primary} />
-                <Text style={styles.addInlineText}>Quick Add</Text>
-              </Pressable>
             </View>
 
             <View style={styles.categoryGrid}>
@@ -813,11 +830,13 @@ export default function Home() {
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Tasks This Week</Text>
-              <Pressable onPress={() => setShowAddModal(true)} style={styles.iconButton}>
-                <MaterialIcons name="add-circle" size={24} color={COLORS.primary} />
+              <Pressable onPress={() => setShowAddModal(true)} style={styles.addInlineButton}>
+                <MaterialIcons name="add" size={16} color={COLORS.primary} />
+                <Text style={styles.addInlineText}>Quick Add</Text>
               </Pressable>
             </View>
 
+          
             {tasks.length === 0 ? (
               <View style={styles.emptyTasks}>
                 <Text style={styles.emptyTasksText}>No tasks logged for this week.</Text>
@@ -962,35 +981,47 @@ export default function Home() {
               /* ── Inline Task Editor ─── */
               <ScrollView style={{ maxHeight: 480 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
                 <View style={styles.reviewEditorCard}>
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Rank</Text>
-                    <TextInput
-                      style={[styles.reviewEditorInput, { width: 70 }]}
-                      value={String(editingTask.rank)}
-                      onChangeText={(v) => handleEditField('rank', parseInt(v) || 1)}
-                      keyboardType="number-pad"
-                    />
-                  </View>
-
+                  {/* Title */}
                   <View style={styles.reviewEditorField}>
                     <Text style={styles.reviewEditorLabel}>Title</Text>
                     <TextInput
                       style={styles.reviewEditorInput}
                       value={editingTask.title}
                       onChangeText={(v) => handleEditField('title', v)}
+                      scrollEnabled={false}
                     />
                   </View>
 
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Category</Text>
-                    <TextInput
-                      style={styles.reviewEditorInput}
-                      value={editingTask.category}
-                      onChangeText={(v) => handleEditField('category', v)}
-                    />
+                  {/* Category Pills */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Category</Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                      {([
+                        { key: 'academic', label: '📚 Academic' },
+                        { key: 'work', label: '💼 Work' },
+                        { key: 'social', label: '🌱 Social' },
+                        { key: 'physical', label: '🏃 Physical' },
+                        { key: 'mental', label: '🧘 Mental' },
+                        { key: 'errands', label: '🛒 Errands' },
+                        { key: 'other', label: '📌 Other' },
+                      ] as const).map(({ key, label }) => (
+                        <Pressable
+                          key={key}
+                          onPress={() => handleEditField('category', key)}
+                          style={[
+                            styles.pickerChip,
+                            editingTask.category === key && styles.pickerChipActive,
+                          ]}
+                        >
+                          <Text style={[styles.pickerChipText, editingTask.category === key && styles.pickerChipTextActive]}>
+                            {label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
                   </View>
-                  <Text style={styles.reviewEditorHint}>academic, work, social, physical, mental, errands</Text>
 
+                  {/* Priority Pills */}
                   <View style={styles.reviewEditorField}>
                     <Text style={styles.reviewEditorLabel}>Priority</Text>
                     <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -1008,33 +1039,43 @@ export default function Home() {
                     </View>
                   </View>
 
+                  {/* Hours Stepper */}
                   <View style={styles.reviewEditorField}>
                     <Text style={styles.reviewEditorLabel}>Hours</Text>
-                    <TextInput
-                      style={[styles.reviewEditorInput, { width: 70 }]}
-                      value={String(editingTask.estimated_duration_hours)}
-                      onChangeText={(v) => handleEditField('estimated_duration_hours', parseFloat(v) || 1)}
-                      keyboardType="decimal-pad"
-                    />
+                    <View style={styles.stepperRow}>
+                      <Pressable
+                        onPress={() => handleEditField('estimated_duration_hours', Math.max(0.5, (editingTask.estimated_duration_hours || 1) - 0.5))}
+                        style={styles.stepperBtn}
+                      >
+                        <Text style={styles.stepperBtnText}>−</Text>
+                      </Pressable>
+                      <Text style={styles.stepperValue}>{editingTask.estimated_duration_hours}h</Text>
+                      <Pressable
+                        onPress={() => handleEditField('estimated_duration_hours', Math.min(12, (editingTask.estimated_duration_hours || 1) + 0.5))}
+                        style={styles.stepperBtn}
+                      >
+                        <Text style={styles.stepperBtnText}>+</Text>
+                      </Pressable>
+                    </View>
                   </View>
 
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Date</Text>
-                    <TextInput
-                      style={styles.reviewEditorInput}
+                  {/* Date Chips — current week Mon-Sun + Other text fallback */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Date</Text>
+                    <DateChipPicker
+                      key={`${editingTask.id}-date`}
                       value={editingTask.scheduled_date}
-                      onChangeText={(v) => handleEditField('scheduled_date', v)}
-                      placeholder="YYYY-MM-DD"
+                      onChange={(v) => handleEditField('scheduled_date', v)}
                     />
                   </View>
 
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Start Time</Text>
-                    <TextInput
-                      style={[styles.reviewEditorInput, { width: 90 }]}
-                      value={editingTask.scheduled_start_time || ''}
-                      onChangeText={(v) => handleEditField('scheduled_start_time', v)}
-                      placeholder="HH:MM"
+                  {/* Time Chips — preset slots + Other text fallback */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
+                    <TimeChipPicker
+                      key={`${editingTask.id}-time`}
+                      value={editingTask.scheduled_start_time}
+                      onChange={(v) => handleEditField('scheduled_start_time', v)}
                     />
                   </View>
 
@@ -1117,140 +1158,261 @@ export default function Home() {
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={{ flex: 1 }}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
         >
           <View style={styles.modalOverlay}>
             <View style={[styles.modalContent, { maxHeight: '92%' }]}>
               <View style={styles.modalHeader}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.modalTitle}>Quick Task Logger</Text>
+                  <Text style={styles.modalTitle}>
+                    {editingParsedIdx !== null ? 'Edit Task' : 'Quick Task Logger'}
+                  </Text>
                   <Text style={styles.modalSubtitle}>
-                    Type naturally (e.g. "2 assignment due Fri", "Exam Thu 2pm")
+                    {editingParsedIdx !== null
+                      ? 'Adjust details and tap Save'
+                      : parsedTasks.length > 0
+                        ? `${parsedTasks.length} task${parsedTasks.length > 1 ? 's' : ''} detected — review below`
+                        : 'Type naturally, e.g. "exam Fri 2pm, Travel Sunday, Gym 3pm"'}
                   </Text>
                 </View>
-                <Pressable onPress={() => { setShowAddModal(false); setParsedPreview(null); setEditPreview(null); setQuickInput(''); }} hitSlop={8} style={{ padding: 4 }}>
-                  <Ionicons name="close" size={22} color={colors.inkSoft} />
+                <Pressable
+                  onPress={() => {
+                    if (editingParsedIdx !== null) {
+                      setEditingParsedIdx(null);
+                    } else {
+                      setShowAddModal(false);
+                      setParsedTasks([]);
+                      setQuickInput('');
+                    }
+                  }}
+                  hitSlop={8}
+                  style={{ padding: 4 }}
+                >
+                  <Ionicons name={editingParsedIdx !== null ? 'arrow-back' : 'close'} size={22} color={colors.inkSoft} />
                 </Pressable>
               </View>
 
-              <ScrollView
-                showsVerticalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled"
-                contentContainerStyle={{ paddingBottom: 16 }}
-              >
-                <TextInput
-                  style={styles.chatInput}
-                  placeholder="e.g. 2 assignment due Fri, Gym tomorrow 6pm..."
-                  placeholderTextColor={colors.inkFaint}
-                  value={quickInput}
-                  onChangeText={setQuickInput}
-                  multiline
-                />
+              {editingParsedIdx !== null ? (
+                /* ── Step 3: Edit one parsed task ─── */
+                (() => {
+                  const task = parsedTasks[editingParsedIdx];
+                  const updateField = (field: string, value: unknown) => {
+                    setParsedTasks(prev => prev.map((t, i) => i === editingParsedIdx ? { ...t, [field]: value } : t));
+                  };
+                  return (
+                    <ScrollView style={{ maxHeight: 440 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                      <View style={styles.reviewEditorCard}>
+                        {/* Title */}
+                        <View style={styles.reviewEditorField}>
+                          <Text style={styles.reviewEditorLabel}>Title</Text>
+                          <TextInput
+                            style={styles.reviewEditorInput}
+                            value={task.title}
+                            onChangeText={(v) => updateField('title', v)}
+                            scrollEnabled={false}
+                          />
+                        </View>
 
-                <Pressable
-                  onPress={handleParseNLP}
-                  disabled={parsingNLP || !quickInput.trim()}
-                  style={[styles.nlpParseButton, (!quickInput.trim() || parsingNLP) && { opacity: 0.6 }]}
-                >
-                  {parsingNLP ? (
-                    <ActivityIndicator size="small" color={colors.cream} />
-                  ) : (
-                    <Text style={styles.nlpParseButtonText}>Analyze</Text>
-                  )}
-                </Pressable>
+                        {/* Category Pills */}
+                        <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                          <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Category</Text>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                            {([
+                              { key: 'academic', label: '📚 Academic' },
+                              { key: 'work', label: '💼 Work' },
+                              { key: 'social', label: '🌱 Social' },
+                              { key: 'physical', label: '🏃 Physical' },
+                              { key: 'mental', label: '🧘 Mental' },
+                              { key: 'errands', label: '🛒 Errands' },
+                              { key: 'other', label: '📌 Other' },
+                            ] as const).map(({ key, label }) => (
+                              <Pressable
+                                key={key}
+                                onPress={() => updateField('category', key)}
+                                style={[styles.pickerChip, task.category === key && styles.pickerChipActive]}
+                              >
+                                <Text style={[styles.pickerChipText, task.category === key && styles.pickerChipTextActive]}>
+                                  {label}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                        </View>
 
-                {/* Editable Details Preview */}
-                {editPreview && (
-                  <View style={styles.previewBox}>
-                    <Text style={styles.previewHeader}>DETAILS DETECTED</Text>
+                        {/* Priority Pills */}
+                        <View style={styles.reviewEditorField}>
+                          <Text style={styles.reviewEditorLabel}>Priority</Text>
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            {(['high', 'medium', 'low'] as const).map(p => (
+                              <Pressable
+                                key={p}
+                                onPress={() => updateField('priority', p)}
+                                style={[styles.reviewPriorityBtn, task.priority === p && styles.reviewPriorityBtnActive]}
+                              >
+                                <Text style={[styles.reviewPriorityBtnText, task.priority === p && { color: colors.cream }]}>
+                                  {p.toUpperCase()}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                        </View>
 
-                    <View style={styles.previewFieldRow}>
-                      <Text style={styles.previewFieldLabel}>Title</Text>
-                      <TextInput
-                        style={styles.previewInput}
-                        value={editPreview.title}
-                        onChangeText={(v) => setEditPreview(p => p ? { ...p, title: v } : p)}
-                      />
-                    </View>
+                        {/* Hours Stepper */}
+                        <View style={styles.reviewEditorField}>
+                          <Text style={styles.reviewEditorLabel}>Hours</Text>
+                          <View style={styles.stepperRow}>
+                            <Pressable
+                              onPress={() => updateField('estimated_duration_hours', Math.max(0.5, (task.estimated_duration_hours || 1) - 0.5))}
+                              style={styles.stepperBtn}
+                            >
+                              <Text style={styles.stepperBtnText}>−</Text>
+                            </Pressable>
+                            <Text style={styles.stepperValue}>{task.estimated_duration_hours}h</Text>
+                            <Pressable
+                              onPress={() => updateField('estimated_duration_hours', Math.min(12, (task.estimated_duration_hours || 1) + 0.5))}
+                              style={styles.stepperBtn}
+                            >
+                              <Text style={styles.stepperBtnText}>+</Text>
+                            </Pressable>
+                          </View>
+                        </View>
 
-                    <View style={styles.previewFieldRow}>
-                      <Text style={styles.previewFieldLabel}>Category</Text>
-                      <TextInput
-                        style={styles.previewInput}
-                        value={editPreview.category}
-                        onChangeText={(v) => setEditPreview(p => p ? { ...p, category: v } : p)}
-                      />
-                    </View>
-                    <Text style={styles.previewFieldHint}>academic, work, social, physical, mental, errands</Text>
+                        {/* Date Chips */}
+                        <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                          <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Date</Text>
+                          <DateChipPicker
+                            key={`parsed-${editingParsedIdx}-date`}
+                            value={task.scheduled_date}
+                            onChange={(v) => updateField('scheduled_date', v)}
+                          />
+                        </View>
 
-                    <View style={styles.previewFieldRow}>
-                      <Text style={styles.previewFieldLabel}>Priority</Text>
-                      <View style={styles.previewPriorityRow}>
-                        {(['high', 'medium', 'low'] as const).map(p => (
-                          <Pressable
-                            key={p}
-                            onPress={() => setEditPreview(prev => prev ? { ...prev, priority: p } : prev)}
-                            style={[styles.previewPriorityBtn, editPreview.priority === p && styles.previewPriorityBtnActive]}
-                          >
-                            <Text style={[styles.previewPriorityBtnText, editPreview.priority === p && styles.previewPriorityBtnTextActive]}>
-                              {p.toUpperCase()}
-                            </Text>
+                        {/* Time Chips */}
+                        <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                          <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
+                          <TimeChipPicker
+                            key={`parsed-${editingParsedIdx}-time`}
+                            value={task.scheduled_start_time}
+                            onChange={(v) => updateField('scheduled_start_time', v)}
+                          />
+                        </View>
+
+                        <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                          <Pressable onPress={() => setEditingParsedIdx(null)} style={styles.reviewCancelBtn}>
+                            <Text style={styles.reviewCancelBtnText}>Back</Text>
                           </Pressable>
-                        ))}
+                          <Pressable onPress={() => setEditingParsedIdx(null)} style={styles.reviewSaveBtn}>
+                            <Text style={styles.reviewSaveBtnText}>Done</Text>
+                          </Pressable>
+                        </View>
                       </View>
-                    </View>
-
-                    <View style={styles.previewFieldRow}>
-                      <Text style={styles.previewFieldLabel}>Hours</Text>
+                    </ScrollView>
+                  );
+                })()
+              ) : (
+                /* ── Step 1 & 2: Input + Card Review ─── */
+                <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }}>
+                  {parsedTasks.length === 0 && (
+                    <>
                       <TextInput
-                        style={[styles.previewInput, { width: 60 }]}
-                        value={String(editPreview.estimated_duration_hours)}
-                        onChangeText={(v) => setEditPreview(p => p ? { ...p, estimated_duration_hours: parseFloat(v) || 1 } : p)}
-                        keyboardType="decimal-pad"
-                      />
-                    </View>
-
-                    <View style={styles.previewFieldRow}>
-                      <Text style={styles.previewFieldLabel}>Date</Text>
-                      <TextInput
-                        style={styles.previewInput}
-                        value={editPreview.scheduled_date}
-                        onChangeText={(v) => setEditPreview(p => p ? { ...p, scheduled_date: v } : p)}
-                        placeholder="YYYY-MM-DD"
+                        style={styles.chatInput}
+                        placeholder={'e.g. "exam Fri 2pm, Travel Sunday, Gym 3pm"\nor "2 assignment due Fri"'}
                         placeholderTextColor={colors.inkFaint}
+                        value={quickInput}
+                        onChangeText={setQuickInput}
+                        multiline
+                        scrollEnabled={false}
                       />
-                    </View>
+                      <Pressable
+                        onPress={handleParseNLP}
+                        disabled={parsingNLP || !quickInput.trim()}
+                        style={[styles.nlpParseButton, (!quickInput.trim() || parsingNLP) && { opacity: 0.6 }]}
+                      >
+                        {parsingNLP ? (
+                          <ActivityIndicator size="small" color={colors.cream} />
+                        ) : (
+                          <Text style={styles.nlpParseButtonText}>Analyze →</Text>
+                        )}
+                      </Pressable>
+                    </>
+                  )}
 
-                    <View style={styles.previewFieldRow}>
-                      <Text style={styles.previewFieldLabel}>Time</Text>
-                      <TextInput
-                        style={[styles.previewInput, { width: 80 }]}
-                        value={editPreview.scheduled_start_time || ''}
-                        onChangeText={(v) => setEditPreview(p => p ? { ...p, scheduled_start_time: v } : p)}
-                        placeholder="HH:MM"
-                        placeholderTextColor={colors.inkFaint}
-                      />
-                    </View>
+                  {/* Step 2: Brief task cards */}
+                  {parsedTasks.length > 0 && (
+                    <>
+                      <Text style={styles.previewHeader}>
+                        {parsedTasks.length === 1 ? 'TASK DETECTED' : `${parsedTasks.length} TASKS DETECTED`}
+                      </Text>
+                      {parsedTasks.map((task, idx) => {
+                        const catEmoji = getCategoryEmoji(task.category);
+                        const priorityStyle = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.medium;
+                        const timeLabel = task.scheduled_start_time
+                          ? (() => {
+                              const h = parseInt(task.scheduled_start_time.split(':')[0], 10);
+                              const m = task.scheduled_start_time.split(':')[1];
+                              return h < 12 ? `${h}:${m}am` : h === 12 ? `12:${m}pm` : `${h - 12}:${m}pm`;
+                            })()
+                          : 'All Day';
+                        return (
+                          <View key={idx} style={styles.parsedTaskCard}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                                <View style={styles.reviewRankPill}>
+                                  <Text style={styles.reviewRankText}>#{task.rank ?? idx + 1}</Text>
+                                </View>
+                                <Text style={{ fontSize: 16 }}>{catEmoji}</Text>
+                                <Text style={styles.parsedTaskTitle} numberOfLines={1}>{task.title}</Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                <View style={[styles.priorityPill, { backgroundColor: priorityStyle.bg, borderColor: priorityStyle.border }]}>
+                                  <Text style={[styles.pillText, { color: priorityStyle.text }]}>{task.priority.toUpperCase()}</Text>
+                                </View>
+                                <Pressable
+                                  onPress={() => setEditingParsedIdx(idx)}
+                                  style={styles.reviewEditBtn}
+                                >
+                                  <Ionicons name="pencil" size={13} color={colors.brown} />
+                                  <Text style={styles.reviewEditText}>Edit</Text>
+                                </Pressable>
+                              </View>
+                            </View>
+                            <Text style={styles.parsedTaskMeta}>
+                              {task.category} • {task.estimated_duration_hours}h • {task.scheduled_date} • {timeLabel}
+                            </Text>
+                            <Pressable
+                              onPress={() => setParsedTasks(prev => prev.filter((_, i) => i !== idx))}
+                              style={styles.parsedTaskRemoveBtn}
+                            >
+                              <Text style={styles.parsedTaskRemoveText}>Remove</Text>
+                            </Pressable>
+                          </View>
+                        );
+                      })}
 
-                    <View style={styles.previewFieldRow}>
-                      <Text style={styles.previewFieldLabel}>Stress</Text>
-                      <Text style={styles.previewStressValue}>{editPreview.stress_score}%</Text>
-                    </View>
-
-                    <Pressable
-                      onPress={handleConfirmAddTask}
-                      disabled={addingTask}
-                      style={[styles.primaryModalBtn, { marginTop: 12 }, addingTask && { opacity: 0.7 }]}
-                    >
-                      {addingTask ? (
-                        <ActivityIndicator size="small" color={colors.cream} />
-                      ) : (
-                        <Text style={styles.primaryModalBtnText}>Approve & Sync to Calendar</Text>
-                      )}
-                    </Pressable>
-                  </View>
-                )}
-              </ScrollView>
+                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 6 }}>
+                        <Pressable
+                          onPress={() => { setParsedTasks([]); }}
+                          style={styles.reviewCancelBtn}
+                        >
+                          <Text style={styles.reviewCancelBtnText}>Start Over</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={handleConfirmAddTask}
+                          disabled={addingTask || parsedTasks.length === 0}
+                          style={[styles.reviewSaveBtn, (addingTask || parsedTasks.length === 0) && { opacity: 0.7 }]}
+                        >
+                          {addingTask ? (
+                            <ActivityIndicator size="small" color={colors.cream} />
+                          ) : (
+                            <Text style={styles.reviewSaveBtnText}>
+                              {parsedTasks.length === 1 ? 'Add Task →' : `Add ${parsedTasks.length} Tasks →`}
+                            </Text>
+                          )}
+                        </Pressable>
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
+              )}
             </View>
           </View>
         </KeyboardAvoidingView>
@@ -1388,7 +1550,7 @@ const styles = StyleSheet.create({
   capacitySection: { marginTop: 8 },
   capacityBar: { height: 10, borderRadius: 5, flexDirection: 'row', overflow: 'hidden', backgroundColor: '#E5E7EB', marginBottom: 10 },
   capacitySegment: { height: '100%' },
-  legendContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
+  legendContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4, justifyContent: 'center' },
   legendItem: { flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 4 },
   legendDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   legendText: { fontSize: 11, color: '#6B7280' },
@@ -1490,22 +1652,36 @@ const styles = StyleSheet.create({
   reviewSaveBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.brown, alignItems: 'center' },
   reviewSaveBtnText: { fontSize: 13, fontWeight: '700', color: colors.cream },
   /* Quick Add Modal */
-  chatInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, fontSize: 14, minHeight: 60, textAlignVertical: 'top', color: COLORS.text },
-  nlpParseButton: { backgroundColor: colors.brown, borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginTop: 10 },
+  chatInput: { backgroundColor: '#FAF8F5', borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, fontSize: 14, minHeight: 70, textAlignVertical: 'top', color: COLORS.text },
+  nlpParseButton: { backgroundColor: colors.brown, borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginTop: 10 },
   nlpParseButtonText: { color: colors.cream, fontSize: 13, fontWeight: '700' },
-  /* Editable Preview */
-  previewBox: { backgroundColor: '#F0FDF4', borderRadius: 12, padding: 12, marginTop: 14, borderWidth: 1, borderColor: '#BBF7D0' },
-  previewHeader: { fontSize: 11, fontWeight: '700', color: '#166534', letterSpacing: 0.5, marginBottom: 8 },
-  previewFieldRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#E8F5E9' },
-  previewFieldLabel: { fontSize: 12, fontWeight: '600', color: '#374151', minWidth: 70 },
-  previewFieldHint: { fontSize: 10, color: colors.inkFaint, marginTop: -2, marginBottom: 4, textAlign: 'right' },
-  previewInput: { flex: 1, height: 32, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#C8E6C9', borderRadius: 6, paddingHorizontal: 8, fontSize: 12, color: '#1B5E20', textAlign: 'right' },
-  previewPriorityRow: { flexDirection: 'row', gap: 6 },
-  previewPriorityBtn: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, borderWidth: 1, borderColor: '#C8E6C9', backgroundColor: '#FFFFFF' },
-  previewPriorityBtnActive: { backgroundColor: '#166534', borderColor: '#166534' },
-  previewPriorityBtnText: { fontSize: 10, fontWeight: '700', color: '#374151' },
-  previewPriorityBtnTextActive: { color: '#FFFFFF' },
+  /* previewHeader reused for multi-task detected label */
+  previewHeader: { fontSize: 11, fontWeight: '700', color: colors.brown, letterSpacing: 0.5, marginBottom: 10, marginTop: 4 },
   previewStressValue: { fontSize: 12, fontWeight: '700', color: '#B45309' },
-  previewTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text, marginBottom: 2 },
-  previewDetail: { fontSize: 12, color: '#374151', marginTop: 2 },
+  /* Parsed task cards — brief card in multi-task review */
+  parsedTaskCard: { backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  parsedTaskTitle: { fontSize: 14, fontWeight: '700', color: COLORS.text, flex: 1 },
+  parsedTaskMeta: { fontSize: 12, color: '#6B7280', marginBottom: 6 },
+  parsedTaskRemoveBtn: { alignSelf: 'flex-end', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 5, backgroundColor: '#F3F4F6' },
+  parsedTaskRemoveText: { fontSize: 11, color: '#9CA3AF', fontWeight: '600' },
+  /* Picker chips — category pills, date chips, time chips */
+  pickerChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    minWidth: 46,
+  },
+  pickerChipActive: { backgroundColor: colors.brown, borderColor: colors.brown },
+  pickerChipText: { fontSize: 11, fontWeight: '600', color: colors.inkSoft },
+  pickerChipTextActive: { color: colors.cream },
+  pickerChipSub: { fontSize: 10, color: colors.inkFaint, marginTop: 1 },
+  /* Hours stepper */
+  stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  stepperBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.yellowWash, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
+  stepperBtnText: { fontSize: 18, fontWeight: '700', color: colors.brown, lineHeight: 22 },
+  stepperValue: { fontSize: 15, fontWeight: '700', color: COLORS.text, minWidth: 36, textAlign: 'center' },
 });
