@@ -319,8 +319,8 @@ export async function addEventToDeviceCalendar(task: {
 
     const startTime = task.scheduled_start_time || '09:00';
     const endTime = task.scheduled_end_time || '10:00';
-    const start = new Date(`${task.scheduled_date}T${startTime}:00`);
-    const end = new Date(`${task.scheduled_date}T${endTime}:00`);
+    const start = new Date(`${task.scheduled_date}T${startTime}`);
+    const end = new Date(`${task.scheduled_date}T${endTime}`);
 
     const event = await targetCalendar.createEvent({
       title: task.title,
@@ -369,8 +369,8 @@ export async function updateEventOnDeviceCalendar(
 
     await event.update({
       title: task.title,
-      startDate: new Date(`${task.scheduled_date}T${task.scheduled_start_time || '09:00'}:00`),
-      endDate: new Date(`${task.scheduled_date}T${task.scheduled_end_time || '10:00'}:00`),
+      startDate: new Date(`${task.scheduled_date}T${task.scheduled_start_time || '09:00'}`),
+      endDate: new Date(`${task.scheduled_date}T${task.scheduled_end_time || '10:00'}`),
     });
     return true;
   } catch (err) {

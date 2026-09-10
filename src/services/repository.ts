@@ -29,10 +29,12 @@ import type {
   WorkloadItem
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
+import { toISODate } from '@/services/dateUtils';
 import {
   addEventToDeviceCalendar,
   deleteEventFromDeviceCalendar,
-  syncCalendarEvents
+  syncCalendarEvents,
+  updateEventOnDeviceCalendar,
 } from '@/services/calendarSync';
 import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
 import { PPGService, type PPGResult, type StressClassification } from './ppgService';
@@ -1069,9 +1071,9 @@ export async function getWorkloadItems(status?: string): Promise<TaskAnalysis[]>
       category: r.category,
       priority: r.priority,
       estimated_duration_hours: r.estimated_hours,
-      scheduled_date: r.scheduled_start ? new Date(r.scheduled_start).toISOString().split('T')[0] : '',
-      scheduled_start_time: r.scheduled_start ? new Date(r.scheduled_start).toISOString().split('T')[1].slice(0, 5) : undefined,
-      scheduled_end_time: r.scheduled_end ? new Date(r.scheduled_end).toISOString().split('T')[1].slice(0, 5) : undefined,
+      scheduled_date: r.scheduled_start ? toISODate(new Date(r.scheduled_start)) : '',
+      scheduled_start_time: r.scheduled_start ? new Date(r.scheduled_start).toTimeString().slice(0, 5) : undefined,
+      scheduled_end_time: r.scheduled_end ? new Date(r.scheduled_end).toTimeString().slice(0, 5) : undefined,
       capacity_hours: r.estimated_hours,
       rank: 0,
       status: r.status,
@@ -1099,9 +1101,9 @@ export async function getWorkloadItems(status?: string): Promise<TaskAnalysis[]>
       category: r.category,
       priority: r.priority,
       estimated_duration_hours: r.estimated_hours,
-      scheduled_date: r.scheduled_start ? new Date(r.scheduled_start).toISOString().split('T')[0] : '',
-      scheduled_start_time: r.scheduled_start ? new Date(r.scheduled_start).toISOString().split('T')[1].slice(0, 5) : undefined,
-      scheduled_end_time: r.scheduled_end ? new Date(r.scheduled_end).toISOString().split('T')[1].slice(0, 5) : undefined,
+      scheduled_date: r.scheduled_start ? toISODate(new Date(r.scheduled_start)) : '',
+      scheduled_start_time: r.scheduled_start ? new Date(r.scheduled_start).toTimeString().slice(0, 5) : undefined,
+      scheduled_end_time: r.scheduled_end ? new Date(r.scheduled_end).toTimeString().slice(0, 5) : undefined,
       capacity_hours: r.estimated_hours,
       rank: 0,
       status: r.status as TaskAnalysis['status'],
@@ -1199,7 +1201,7 @@ export async function updateWorkloadItem(id: string, updates: Partial<TaskAnalys
     const idx = (db.workloadItems || []).findIndex((item) => item.id === id);
     if (idx >= 0) {
       const item = db.workloadItems[idx];
-      const schedDate = updates.scheduled_date || (item.scheduled_start ? new Date(item.scheduled_start).toISOString().split('T')[0] : undefined);
+      const schedDate = updates.scheduled_date || (item.scheduled_start ? toISODate(new Date(item.scheduled_start)) : undefined);
       const startTime = updates.scheduled_start_time || (item.scheduled_start ? new Date(item.scheduled_start).toTimeString().slice(0, 5) : undefined);
       const endTime = updates.scheduled_end_time || (item.scheduled_end ? new Date(item.scheduled_end).toTimeString().slice(0, 5) : undefined);
 
@@ -1242,9 +1244,9 @@ async function getWorkloadItemById(id: string): Promise<TaskAnalysis | null> {
       category: data.category,
       priority: data.priority,
       estimated_duration_hours: data.estimated_hours,
-      scheduled_date: new Date(data.scheduled_start).toISOString().split('T')[0],
-      scheduled_start_time: new Date(data.scheduled_start).toISOString().split('T')[1].slice(0, 5),
-      scheduled_end_time: data.scheduled_end ? new Date(data.scheduled_end).toISOString().split('T')[1].slice(0, 5) : undefined,
+      scheduled_date: toISODate(new Date(data.scheduled_start)),
+      scheduled_start_time: new Date(data.scheduled_start).toTimeString().slice(0, 5),
+      scheduled_end_time: data.scheduled_end ? new Date(data.scheduled_end).toTimeString().slice(0, 5) : undefined,
       capacity_hours: data.estimated_hours,
       rank: 0,
       status: data.status,
@@ -1268,7 +1270,7 @@ export async function saveTaskAnalysis(analysis: TaskAnalysis): Promise<void> {
       throw error;
     }
 
-    const weekStart = analysis.week_start || new Date().toISOString().split('T')[0];
+    const weekStart = analysis.week_start || toISODate();
     const scheduledStart = analysis.scheduled_date
         ? new Date(`${analysis.scheduled_date}T${analysis.scheduled_start_time || '00:00'}`).toISOString()
         : new Date().toISOString();
@@ -1448,9 +1450,22 @@ export async function updateTaskAnalysis(
 }
 
 export async function deferTaskAnalysis(id: string, newDate?: string): Promise<void> {
+  const allTasks = await getTaskAnalyses();
+  const task = allTasks.find((item) => item.id === id);
+  const previousWeekStart = task?.week_start;
+  const deferredWeekStart = newDate
+    ? (() => {
+        const date = new Date(`${newDate}T00:00:00`);
+        const day = date.getDay();
+        date.setDate(date.getDate() - day + (day === 0 ? -6 : 1));
+        return toISODate(date);
+      })()
+    : previousWeekStart;
+
   if (hasSupabase && isUuid(id)) {
     const patch: any = { status: 'deferred' };
     if (newDate) patch.scheduled_date = newDate;
+    if (deferredWeekStart) patch.week_start = deferredWeekStart;
     const { error } = await supabase.from('ai_task_analysis').update(patch).eq('id', id);
     if (error) {
       console.error('deferTaskAnalysis database update failed:', error);
@@ -1463,10 +1478,18 @@ export async function deferTaskAnalysis(id: string, newDate?: string): Promise<v
     if (item) {
       item.status = 'deferred';
       if (newDate) item.scheduled_date = newDate;
-      targetWeekStart = item.week_start;
+      if (deferredWeekStart) item.week_start = deferredWeekStart;
     }
   });
-  await recomputeCurrentWeekDerivedData(targetWeekStart);
+  if (task?.calendar_event_id && newDate) {
+    await updateEventOnDeviceCalendar(task.calendar_event_id, {
+      title: task.title,
+      scheduled_date: newDate,
+      scheduled_start_time: task.scheduled_start_time,
+      scheduled_end_time: task.scheduled_end_time,
+    });
+  }
+  await recomputeCurrentWeekDerivedData(previousWeekStart);
 }
 
 export async function deleteTaskAnalysis(id: string): Promise<void> {
@@ -1612,7 +1635,7 @@ export async function recomputeCurrentWeekDerivedData(
       const day = d.getDay();
       const diff = d.getDate() - day + (day === 0 ? -6 : 1);
       d.setDate(diff);
-      return d.toISOString().split('T')[0];
+      return toISODate(d);
     })();
 
   const allTasks = await getTaskAnalyses(weekStart);
@@ -1695,7 +1718,7 @@ export async function createAndSyncTask(task: Omit<TaskAnalysis, 'id' | 'created
   const diff = now.getDate() - day + (day === 0 ? -6 : 1);
   const weekStartDate = new Date(now);
   weekStartDate.setDate(diff);
-  const weekStartStr = weekStartDate.toISOString().split('T')[0];
+  const weekStartStr = toISODate(weekStartDate);
 
   const id = uid();
   const taskRecord: TaskAnalysis = {
@@ -1795,7 +1818,7 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
     const weekStartDate = new Date(now);
     weekStartDate.setDate(diff);
-    const targetWeekStart = weekStartStr || weekStartDate.toISOString().split('T')[0];
+    const targetWeekStart = weekStartStr || toISODate(weekStartDate);
 
     // Purge previous/next-week data so the DB only holds the current week
     await deleteTasksOutsideWeek(targetWeekStart);
@@ -1816,7 +1839,10 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
       const start = ev.startDate ? new Date(ev.startDate) : new Date();
       const end = ev.endDate ? new Date(ev.endDate) : undefined;
 
-      const evStartDate = start.toISOString().split('T')[0];
+      // The calendar's raw times are irrelevant for an all-day event, but the
+      // *date* is not — use the local date of the event so an early-morning
+      // meeting never lands on yesterday.
+      const evStartDate = toISODate(start);
       const evStartTime = start.toTimeString().slice(0, 5);
       const evEndTime = end ? end.toTimeString().slice(0, 5) : undefined;
 
@@ -1851,6 +1877,7 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
           scheduled_date: evStartDate,
           scheduled_start_time: evStartTime,
           scheduled_end_time: evEndTime,
+          allDay: Boolean(ev.allDay),
           capacity_hours: durationHours,
           rank: existingTasks.length + created + 1,
           stress_score: 50,
@@ -1880,6 +1907,7 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
               scheduled_date: evStartDate,
               scheduled_start_time: evStartTime,
               scheduled_end_time: evEndTime,
+              allDay: Boolean(ev.allDay),
               estimated_duration_hours: durationHours,
               calendar_event_id: ev.id,
               calendar_provider: 'device',
@@ -1928,7 +1956,7 @@ export async function analyzeCurrentWeekTasks(
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
     const weekStartDate = new Date(now);
     weekStartDate.setDate(diff);
-    const targetWeekStart = weekStartStr || weekStartDate.toISOString().split('T')[0];
+    const targetWeekStart = weekStartStr || toISODate(weekStartDate);
 
     const allTasks = await getTaskAnalyses(targetWeekStart);
     const tasks = taskIds
@@ -2002,7 +2030,7 @@ export async function syncAndAnalyzeCalendar(): Promise<{
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
     const currentWeekDate = new Date(now);
     currentWeekDate.setDate(diff);
-    const currentWeekStart = currentWeekDate.toISOString().split('T')[0];
+    const currentWeekStart = toISODate(currentWeekDate);
     const syncRes = await syncCalendarToDb(currentWeekStart);
     if (syncRes.changedTaskIds.length > 0) {
       await analyzeCurrentWeekTasks(currentWeekStart, syncRes.changedTaskIds);

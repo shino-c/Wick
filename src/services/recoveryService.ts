@@ -1,6 +1,7 @@
 import { readDb, uid, writeDb } from '@/data/localStore';
 import type {
   AvailableSlot,
+  ChallengeRow,
   DailyRecoveryPlan,
   GardenWallet,
   RecoveryDay,
@@ -10,16 +11,18 @@ import type {
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
 import { generateDailyRecoveryPlan } from '@/services/aiService';
+import { toISODate, todayISO } from '@/services/dateUtils';
 import {
   earnSeeds,
   getBaseline,
   getGardenWallet,
   getTaskAnalyses,
   getWeeklyCapacity,
+  listChallenges,
   listStressScores,
 } from '@/services/repository';
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => todayISO();
 
 const blankSession = (date: string): RecoveryPlanSession => ({
   id: uid(),
@@ -117,23 +120,45 @@ const toMinutes = (time: string | undefined): number | null => {
   return h * 60 + m;
 };
 
+/** Minutes past midnight → "HH:MM" label for slot chips. */
+const fmtHM = (minutes: number): string => {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+};
+
 /**
  * The user's real free windows today, computed from what is actually on their
  * schedule (approved, timed tasks for today) — never invented.
  */
 export function computeAvailableSlots(tasks: TaskAnalysis[], date: string): AvailableSlot[] {
+  const isAllDay = (t: TaskAnalysis): boolean => {
+    if (t.allDay === true) return true;
+    // All-day events sync as start/end "00:00" (their raw instants straddle
+    // midnight), which the `end > start` check would otherwise drop — making a
+    // fully-booked day look completely free.
+    const start = toMinutes(t.scheduled_start_time);
+    const end = toMinutes(t.scheduled_end_time);
+    return start === 0 && end === 0;
+  };
+
   const busy = tasks
     .filter((t) => {
       if (t.scheduled_date !== date) return false;
       if (t.status === 'rejected' || t.status === 'deferred' || t.status === 'completed') return false;
       const start = toMinutes(t.scheduled_start_time);
       const end = toMinutes(t.scheduled_end_time);
+      if (isAllDay(t)) return true;
       return start !== null && end !== null && end > start;
     })
-    .map((t) => ({
-      start: Math.max(DAY_START_MIN, toMinutes(t.scheduled_start_time)!),
-      end: Math.min(DAY_END_MIN, toMinutes(t.scheduled_end_time)!),
-    }))
+    .map((t) =>
+      isAllDay(t)
+        ? { start: DAY_START_MIN, end: DAY_END_MIN }
+        : {
+            start: Math.max(DAY_START_MIN, toMinutes(t.scheduled_start_time)!),
+            end: Math.min(DAY_END_MIN, toMinutes(t.scheduled_end_time)!),
+          }
+    )
     .sort((a, b) => a.start - b.start);
 
   // Merge overlapping/adjacent blocks so free time is measured against real gaps.
@@ -147,24 +172,41 @@ export function computeAvailableSlots(tasks: TaskAnalysis[], date: string): Avai
     }
   }
 
-  const fmt = (minutes: number) => {
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  };
-
   const slots: AvailableSlot[] = [];
   let cursor = DAY_START_MIN;
   for (const block of merged) {
     if (block.start - cursor >= MIN_FREE_MINUTES) {
-      slots.push({ start: fmt(cursor), end: fmt(block.start), minutes: block.start - cursor });
+      slots.push({ start: fmtHM(cursor), end: fmtHM(block.start), minutes: block.start - cursor });
     }
     cursor = Math.max(cursor, block.end);
   }
   if (DAY_END_MIN - cursor >= MIN_FREE_MINUTES) {
-    slots.push({ start: fmt(cursor), end: fmt(DAY_END_MIN), minutes: DAY_END_MIN - cursor });
+    slots.push({ start: fmtHM(cursor), end: fmtHM(DAY_END_MIN), minutes: DAY_END_MIN - cursor });
   }
   return slots;
+}
+
+/**
+ * A free window that is already over is not usable — a "plan today" should
+ * never point at a gap in the past, and past gaps are the main reason a busy
+ * day looks like it has "too many" slots. Keeps only windows with
+ * MIN_FREE_MINUTES still remaining, clamping a window already in progress so
+ * it reflects what is actually left.
+ */
+function prunePastSlots(slots: AvailableSlot[], date: string, now = new Date()): AvailableSlot[] {
+  if (date !== toISODate(now)) return slots;
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const kept: AvailableSlot[] = [];
+  for (const slot of slots) {
+    const start = toMinutes(slot.start);
+    const end = toMinutes(slot.end);
+    if (start === null || end === null || end <= nowMinutes) continue;
+    const effectiveStart = Math.max(start, nowMinutes);
+    const minutes = end - effectiveStart;
+    if (minutes < MIN_FREE_MINUTES) continue;
+    kept.push({ start: fmtHM(effectiveStart), end: slot.end, minutes });
+  }
+  return kept;
 }
 
 export async function getRecoveryDay(date = today()): Promise<RecoveryDay> {
@@ -191,7 +233,7 @@ export async function getRecoveryWeek(): Promise<RecoveryDay[]> {
   const dates = Array.from({ length: 7 }, (_, index) => {
     const date = new Date(start);
     date.setDate(start.getDate() + index);
-    return date.toISOString().slice(0, 10);
+    return toISODate(date);
   });
   if (hasSupabase) {
     const userId = await currentUserId();
@@ -395,31 +437,186 @@ export async function recordGameMinute(): Promise<RecoveryDay> {
 export type { DailyRecoveryPlan };
 
 /**
- * Today's plan, built from real signals:
- * today's scheduled free time, this week's capacity, recent stress, baseline,
- * and what is already done. Suggestions are optional and always fit a slot.
+ * Only recommend plans that actually fit one of today's real free slots.
+ * Each kept suggestion is re-anchored to the first slot its length fits;
+ * anything that fits no slot is dropped, so a plan is never recommended
+ * into busy time. No free slots today → nothing is recommended.
+ */
+function fitSuggestionsToSlots(
+  suggestions: RecoverySuggestion[],
+  slots: AvailableSlot[]
+): RecoverySuggestion[] {
+  if (slots.length === 0) return [];
+  return suggestions
+    .map((s) => ({ ...s, slot: slots.find((slot) => slot.minutes >= s.minutes) }))
+    .filter((s): s is RecoverySuggestion & { slot: AvailableSlot } => s.slot !== undefined);
+}
+
+const CHALLENGE_EMOJI: Record<ChallengeRow['category'], string> = {
+  physical: '🚶',
+  social: '💬',
+  mental: '🍵',
+};
+
+/** Best-guess length of a challenge until challenges carry a real duration. */
+function challengeMinutes(ch: ChallengeRow): number {
+  const match = /\b(\d+)\s*min\b/i.exec(ch.subtitle ?? '');
+  if (match) return Math.max(5, Math.min(120, Number(match[1])));
+  return ch.category === 'physical' ? 30 : 15;
+}
+
+/**
+ * Turns a circle challenge into a recovery suggestion. The challenge becomes
+ * one of today's three plans — a fixed plan with a set time, which is exactly
+ * what a fully-booked day still has room for.
+ */
+function challengeToSuggestion(ch: ChallengeRow): RecoverySuggestion {
+  const minutes = challengeMinutes(ch);
+  return {
+    id: `challenge:${ch.id}`,
+    challengeId: ch.id,
+    challengeJoined: ch.joined,
+    challengeScheduledFor: ch.scheduledFor,
+    emoji: CHALLENGE_EMOJI[ch.category],
+    title: ch.title,
+    detail: ch.notes ?? ch.subtitle,
+    minutes,
+    reason: ch.joined
+      ? 'Your fixed plan with the circle — the time is already held for you.'
+      : 'A shared challenge from your circle — a fixed time that holds even on a busy day.',
+    targetType: 'minutes',
+    targetValue: minutes,
+    slot: undefined,
+  };
+}
+
+/**
+ * The circle challenge reserved as today's fixed plan. Prefers a challenge the
+ * user already joined (a standing daily plan), then the first joinable one.
+ */
+function pickFixedChallenge(challenges: ChallengeRow[]): ChallengeRow | null {
+  const candidates = challenges.filter(
+    (ch) =>
+      !ch.cancelled &&
+      !ch.completedByMe &&
+      (ch.capacity === null || ch.joinedCount < ch.capacity)
+  );
+  if (candidates.length === 0) return null;
+  return candidates.find((ch) => ch.joined) ?? candidates[0];
+}
+
+/* ── Fixed, per-day plan cache ─────────────────────────────────────────────── */
+
+/**
+ * The plan for a day is generated once and frozen until midnight. These helpers
+ * store it device-locally (same privacy posture as everything else) so opening
+ * the Recovery tab is instant and consistent, and a started session is never
+ * orphaned when the page is reopened.
+ */
+async function getCachedDailyRecoveryPlan(date: string): Promise<DailyRecoveryPlan | null> {
+  const db = await readDb();
+  return db.dailyRecoveryPlans.find((p) => p.date === date) ?? null;
+}
+
+async function saveDailyRecoveryPlan(date: string, plan: DailyRecoveryPlan): Promise<void> {
+  await writeDb((db) => {
+    // Keep packs from today and yesterday only — old days can never come back.
+    const older = (db.dailyRecoveryPlans ?? []).filter((p) => p.date >= todayISO());
+    db.dailyRecoveryPlans = [...older.filter((p) => p.date !== date), plan];
+  });
+}
+
+/** Same shape as today, but with a given challenge's join state updated in place. */
+function withChallengeState(
+  plan: DailyRecoveryPlan,
+  challengeId: string,
+  joined: boolean
+): DailyRecoveryPlan {
+  return {
+    ...plan,
+    suggestions: plan.suggestions.map((s) =>
+      s.challengeId === challengeId
+        ? {
+            ...s,
+            challengeJoined: joined,
+            reason: joined
+              ? 'Your fixed plan with the circle — the time is already held for you.'
+              : 'A shared challenge from your circle — a fixed time that holds even on a busy day.',
+          }
+        : s
+    ),
+  };
+}
+
+/**
+ * After joining/leaving a challenge, update today's cached plan in place so the
+ * fixed suggestion reflects the new state immediately — without regenerating
+ * (and quietly reseeding) the whole day.
+ */
+export async function setChallengeJoinedForToday(
+  challengeId: string,
+  joined: boolean,
+  date = today()
+): Promise<DailyRecoveryPlan> {
+  const plan = await getDailyRecoveryPlan(date);
+  const updated = withChallengeState(plan, challengeId, joined);
+  if (updated.suggestions.some((s) => s.challengeId === challengeId)) {
+    await saveDailyRecoveryPlan(date, updated);
+  }
+  return updated;
+}
+
+/**
+ * The day's plan, generated once and reused for the whole day. Reopening the
+ * Recovery tab after that is instant and returns the exact same plans, so the
+ * suggestion you started stays put and its tracked progress is never stranded
+ * by a fresh random plan.
  */
 export async function getDailyRecoveryPlan(date = today()): Promise<DailyRecoveryPlan> {
+  const cached = await getCachedDailyRecoveryPlan(date);
+  if (cached) return cached;
+
+  const plan = await buildDailyRecoveryPlan(date);
+  await saveDailyRecoveryPlan(date, plan);
+  return plan;
+}
+
+/**
+ * Generates a fresh plan from real signals — the expensive part (calendars,
+ * capacity, stress and the AI), so it only runs once per day and the result is
+ * cached by getDailyRecoveryPlan.
+ */
+async function buildDailyRecoveryPlan(date: string): Promise<DailyRecoveryPlan> {
   const weekStart = new Date();
   weekStart.setHours(0, 0, 0, 0);
-  weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1);
-  const weekStartStr = weekStart.toISOString().slice(0, 10);
+  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7)); // Monday, local
+  const weekStartStr = toISODate(weekStart);
 
-  const [tasks, capacity, baseline, scores, day] = await Promise.all([
-    getTaskAnalyses(weekStartStr),
+  const [capacity, baseline, scores, day] = await Promise.all([
     getWeeklyCapacity(weekStartStr),
     getBaseline(),
     listStressScores(7),
     getRecoveryDay(date),
   ]);
 
-  const slots = computeAvailableSlots(tasks, date);
+  // Load this week's analysed tasks. If the week-scoped query misses today
+  // (older rows written with a UTC-shifted week_start, for example), fall back
+  // to any real task scheduled for today so a full calendar is never reported
+  // as free time.
+  let tasks = await getTaskAnalyses(weekStartStr);
+  if (!tasks.some((t) => t.scheduled_date === date)) {
+    const todaysTasks = (await getTaskAnalyses()).filter((t) => t.scheduled_date === date);
+    if (todaysTasks.length > 0) tasks = todaysTasks;
+  }
+
+  // Only windows with time still ahead of us are usable today.
+  const slots = prunePastSlots(computeAvailableSlots(tasks, date), date);
   const latestScore = scores[0]?.fusedScore ?? null;
   const capacityPct = capacity
     ? Math.round((capacity.used_capacity_hours / Math.max(1, capacity.total_capacity_hours)) * 100)
     : 0;
 
-  return generateDailyRecoveryPlan({
+  const plan = await generateDailyRecoveryPlan({
     date,
     slots,
     capacityPct,
@@ -428,6 +625,20 @@ export async function getDailyRecoveryPlan(date = today()): Promise<DailyRecover
     baseline: baseline.perceivedStressBaseline ?? null,
     completedToday: day.completedPlanIds,
   });
+
+  // Reserve the first of the three plans for the circle challenge, then fill
+  // the remaining two with gentle suggestions that really fit a free window.
+  const fixedChallenge = pickFixedChallenge(await listChallenges());
+  const slotSuggestions = fitSuggestionsToSlots(plan.suggestions, slots);
+
+  const suggestions: RecoverySuggestion[] = [];
+  if (fixedChallenge) suggestions.push(challengeToSuggestion(fixedChallenge));
+  for (const suggestion of slotSuggestions) {
+    if (suggestions.length >= 3) break;
+    suggestions.push(suggestion);
+  }
+
+  return { ...plan, suggestions };
 }
 
 export { getGardenWallet };

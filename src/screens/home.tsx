@@ -29,6 +29,7 @@ import type {
 } from '@/data/types';
 import { analyzeWeeklyCapacity, parseQuickTaskNLP, suggestLoadBalance } from '@/services/aiService';
 import { isNewWeek, updateEventOnDeviceCalendar } from '@/services/calendarSync';
+import { toISODate } from '@/services/dateUtils';
 import {
   approveTaskAnalysis,
   createAndSyncTask,
@@ -70,7 +71,7 @@ function getWeekStart(date = new Date()): string {
   const day = d.getDay();
   const diff = d.getDate() - day + (day === 0 ? -6 : 1);
   d.setDate(diff);
-  return d.toISOString().split('T')[0];
+  return toISODate(d);
 }
 
 const CATEGORY_EMOJI: Record<string, string> = {
@@ -1038,7 +1039,7 @@ export default function Home() {
                   </View>
 
                   {editingTask.ai_reasoning ? (
-                    <Text style={styles.reviewEditorReasoning}>AI: {editingTask.ai_reasoning}</Text>
+                    <Text style={styles.reviewEditorReasoning}>{editingTask.ai_reasoning}</Text>
                   ) : null}
 
                   <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>

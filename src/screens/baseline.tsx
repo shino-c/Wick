@@ -20,6 +20,7 @@ import { NavBar, Screen } from '@/components/base';
 import type { TaskAnalysis } from '@/data/types';
 import { ITEMS } from '@/features/calibration/questionnaire';
 import { markOnboarded } from '@/lib/bootstrap';
+import { toISODate } from '@/services/dateUtils';
 import { supabase } from '@/lib/supabaseClient';
 import {
   connectCalendar,
@@ -65,7 +66,7 @@ function getWeekStart(date = new Date()): string {
   const day = d.getDay();
   const diff = d.getDate() - day + (day === 0 ? -6 : 1);
   d.setDate(diff);
-  return d.toISOString().split('T')[0];
+  return toISODate(d);
 }
 
 const CATEGORY_EMOJI: Record<string, string> = {

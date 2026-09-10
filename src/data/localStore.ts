@@ -14,6 +14,7 @@ import type {
     CalendarConnection,
     CalibrationFeedbackRow,
     ChallengeRow,
+    DailyRecoveryPlan,
     FocusSessionRow,
     FriendSummary,
     GardenItem,
@@ -52,6 +53,8 @@ export interface LocalDb {
   calendarConnections: CalendarConnection[];
   recoveryDays: RecoveryDay[];
   recoveryPlanSessions: RecoveryPlanSession[];
+  /** The fixed plan for each day, generated once and reused until midnight. */
+  dailyRecoveryPlans: DailyRecoveryPlan[];
   gardenWallet: GardenWallet;
   gardenItems: GardenItem[];
 }
@@ -86,6 +89,7 @@ function emptyDb(): LocalDb {
     calendarConnections: [],
     recoveryDays: [],
     recoveryPlanSessions: [],
+    dailyRecoveryPlans: [],
     gardenWallet: { seeds: 0, updatedAt: new Date().toISOString() },
     gardenItems: [],
   };

@@ -222,6 +222,8 @@ export interface TaskAnalysis {
   scheduled_date: string;
   scheduled_start_time?: string;
   scheduled_end_time?: string;
+  /** True when the calendar event spans a whole day (blocks the full day). */
+  allDay?: boolean;
   capacity_hours?: number;
   rank: number;
   ai_reasoning?: string;
@@ -298,6 +300,16 @@ export interface RecoverySuggestion {
   minutes: number;
   reason: string;
   slot?: AvailableSlot;
+  /**
+   * When set, this suggestion is a shared challenge from the Social page, not a
+   * timed pause. It is a fixed plan with a set time, so it does not need a free
+   * slot — the circle holds the time for you.
+   */
+  challengeId?: string;
+  /** Whether the user already joined this challenge (it then reads as a fixed plan). */
+  challengeJoined?: boolean;
+  /** The challenge's raw schedule, formatted on the client via formatSchedule(). */
+  challengeScheduledFor?: string | null;
   /**
    * How "done" is actually measured. A plan is never finished by tapping a
    * button — `steps` is met by the pedometer, `minutes` by a real timer.

@@ -18,6 +18,7 @@ import type {
   TaskAnalysis,
   WeeklyCapacityAnalysis,
 } from '@/data/types';
+import { toISODate } from '@/services/dateUtils';
 
 
 
@@ -265,9 +266,10 @@ OUTPUT STRICT VALID JSON ONLY (no markdown fences, just [ ... ]).`;
             category,
             priority: (item.priority === 'high' || item.priority === 'low' ? item.priority : 'medium') as 'high' | 'medium' | 'low',
             estimated_duration_hours: Number(item.estimated_duration_hours) || 1,
-            scheduled_date: start.toISOString().split('T')[0],
+            scheduled_date: toISODate(start),
             scheduled_start_time: start.toTimeString().slice(0, 5),
             scheduled_end_time: end ? end.toTimeString().slice(0, 5) : undefined,
+            allDay: Boolean(original?.allDay),
             capacity_hours: Number(item.estimated_duration_hours) || 1,
             stress_score: Math.min(100, Math.max(0, Number(item.stress_score) || 50)),
             rank: Number(item.rank) || (idx + 1),
@@ -302,9 +304,10 @@ OUTPUT STRICT VALID JSON ONLY (no markdown fences, just [ ... ]).`;
       category,
       priority,
       estimated_duration_hours: durationHours,
-      scheduled_date: start.toISOString().split('T')[0],
+      scheduled_date: toISODate(start),
       scheduled_start_time: start.toTimeString().slice(0, 5),
       scheduled_end_time: end ? end.toTimeString().slice(0, 5) : undefined,
+      allDay: Boolean(ev.allDay),
       capacity_hours: durationHours,
       stress_score: stressScore,
       rank: 0,
@@ -393,7 +396,7 @@ export async function analyzeWeeklyCapacity(
   weekStart.setDate(diff);
 
   return {
-    week_start: weekStart.toISOString().split('T')[0],
+    week_start: toISODate(weekStart),
     total_capacity_hours: totalCapacityHours,
     used_capacity_hours: usedCapacityRounded,
     overload_warning: overloadWarning,
@@ -440,7 +443,7 @@ OUTPUT STRICT JSON ONLY.`;
           category,
           priority: (parsed.priority === 'high' || parsed.priority === 'low' ? parsed.priority : 'medium') as 'high' | 'medium' | 'low',
           estimated_duration_hours: Number(parsed.estimated_duration_hours) || 1,
-          scheduled_date: parsed.scheduled_date || new Date().toISOString().split('T')[0],
+          scheduled_date: parsed.scheduled_date || toISODate(),
           scheduled_start_time: parsed.scheduled_start_time || '09:00',
           scheduled_end_time: parsed.scheduled_end_time || undefined,
           capacity_hours: Number(parsed.estimated_duration_hours) || 1,
@@ -515,7 +518,7 @@ OUTPUT STRICT JSON ONLY.`;
     category,
     priority,
     estimated_duration_hours: hours,
-    scheduled_date: targetDate.toISOString().split('T')[0],
+    scheduled_date: toISODate(targetDate),
     scheduled_start_time: startTime,
     scheduled_end_time: endTime,
     capacity_hours: hours,
@@ -536,21 +539,24 @@ export async function suggestLoadBalance(
 ): Promise<LoadBalanceSuggestion[]> {
   if (!tasks || tasks.length === 0) return [];
 
-  // Find lower-priority or flexible tasks that can be deferred
-  const deferrable = tasks.filter(
+  // Prefer low-priority work. Only consider medium-priority work when there
+  // are no eligible low-priority tasks to defer.
+  const candidatesByPriority = (priority: 'low' | 'medium') => tasks.filter(
     (t) =>
       t.status !== 'completed' &&
       t.status !== 'deferred' &&
-      (t.priority === 'low' || t.priority === 'medium') &&
+      t.priority === priority &&
       (t.category === 'errands' || t.category === 'academic' || t.category === 'work')
   );
 
-  // Sort lowest priority first
-  deferrable.sort((a, b) => {
-    if (a.priority === 'low' && b.priority !== 'low') return -1;
-    if (b.priority === 'low' && a.priority !== 'low') return 1;
-    return (b.estimated_duration_hours || 1) - (a.estimated_duration_hours || 1);
-  });
+  const lowPriorityTasks = candidatesByPriority('low');
+  const deferrable = lowPriorityTasks.length > 0
+    ? lowPriorityTasks
+    : candidatesByPriority('medium');
+
+  deferrable.sort(
+    (a, b) => (b.estimated_duration_hours || 1) - (a.estimated_duration_hours || 1)
+  );
 
   const candidates = deferrable.slice(0, 3);
   return candidates.map((task) => {
@@ -621,6 +627,23 @@ function normalizeTargetType(raw: unknown): 'steps' | 'minutes' {
   return value === 'steps' ? 'steps' : 'minutes';
 }
 
+/**
+ * The day's note must be one warm line. AI models occasionally wrap JSON
+ * strings, so this collapses every run of whitespace (including newlines)
+ * into a single space and keeps only the first sentence — the UI can then
+ * always show one calm line, never a wrapped paragraph.
+ */
+function normalizeNote(raw: unknown, fallback: string): string {
+  const collapsed = String(raw ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!collapsed) return fallback;
+  const firstSentence = collapsed.split(/(?<=[.!?])\s+/)[0].trim();
+  const MAX_LENGTH = 140;
+  if (firstSentence.length <= MAX_LENGTH) return firstSentence;
+  return `${firstSentence.slice(0, MAX_LENGTH).trimEnd().replace(/[.,;|]+$/, '')}…`;
+}
+
 export async function generateDailyRecoveryPlan(ctx: RecoveryPlanContext): Promise<DailyRecoveryPlan> {
   const prompt = `Create a gentle, optional daily recovery plan for a stressed student.
 Today is ${ctx.date}. Their real free windows are: ${ctx.slots.length > 0 ? ctx.slots.map(s => `${s.start}-${s.end} (${s.minutes} min)`).join(', ') : 'none found'}.
@@ -630,7 +653,7 @@ Already done today: ${ctx.completedToday.length > 0 ? ctx.completedToday.join(',
 
 Reply with STRICT JSON:
 {
-  "note": "one soft, caring sentence (no pressure, no 'you must')",
+  "note": "ONE short line only (single sentence, 8-18 words, no line breaks): warm and uplifting, something that lets a stressed student put the shoulders down and breathe — encouraging relief, never pressure. Examples of the tone: 'Whatever today held, there is still room for a softer breath.' / 'One small kindness to yourself is plenty.'",
   "suggestions": [
     {
       "id": "unique-slug",
@@ -674,19 +697,19 @@ OUTPUT STRICT VALID JSON ONLY (no markdown fences).`;
           date: ctx.date,
           slots: ctx.slots,
           suggestions: suggestions.length > 0 ? suggestions : heuristicSuggestions(ctx),
-          note: String(parsed.note || 'Here is one idea at a time. Take whatever feels okay.'),
+          note: normalizeNote(parsed.note, 'Here is one idea at a time. Take whatever feels okay.'),
         };
       }
     } catch (e) {
       console.error('Failed to parse AI recovery plan, using local heuristic:', e);
     }
   }
-  return { date: ctx.date, slots: ctx.slots, suggestions: heuristicSuggestions(ctx), note: heuristicNote(ctx) };
+  return { date: ctx.date, slots: ctx.slots, suggestions: heuristicSuggestions(ctx), note: normalizeNote(heuristicNote(ctx), 'Here are ideas, never obligations.') };
 }
 
 function heuristicNote(ctx: RecoveryPlanContext): string {
   if (ctx.overloaded) return 'This week is carrying a lot. Even one tiny pause can soften it.';
-  if ((ctx.stressScore ?? 50) >= 60) return 'Things feel a little heavier than usual. A small reset might help.';
+  if ((ctx.stressScore ?? 50) >= 60) return 'Things feel heavier than usual. A small reset might help.';
   return 'You have some open time today. Here are ideas, not obligations.';
 }
 

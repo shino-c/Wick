@@ -1,5 +1,5 @@
 import { useFocusEffect, useRouter } from "expo-router";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	ActivityIndicator,
 	Modal,
@@ -9,8 +9,8 @@ import {
 	View,
 } from "react-native";
 
-import BottomNavigation from "@/components/bottombar";
 import { Badge, Card, Emoji, Row, Screen, Txt } from "@/components/base";
+import BottomNavigation from "@/components/bottombar";
 import TopNavigation from "@/components/topbar";
 import { GARDEN_CATALOG } from "@/data/gardenCatalog";
 import type {
@@ -20,10 +20,12 @@ import type {
 	RecoveryPlanSession,
 	RecoverySuggestion,
 } from "@/data/types";
+import { formatSchedule } from "@/features/circles/scheduling";
 import {
 	completePlanSession,
 	getDailyRecoveryPlan,
 	getPlanSessions,
+	setChallengeJoinedForToday,
 	startPlanSession,
 	updatePlanProgress,
 } from "@/services/recoveryService";
@@ -32,6 +34,7 @@ import {
 	getGardenItems,
 	getGardenWallet,
 	purchaseGardenItem,
+	toggleChallenge,
 } from "@/services/repository";
 import {
 	ensureStepPermission,
@@ -79,6 +82,7 @@ export default function RecoveryScreen() {
 	const [showShop, setShowShop] = useState(false);
 	const [purchasingKey, setPurchasingKey] = useState<string | null>(null);
 	const [activePlan, setActivePlan] = useState<RecoverySuggestion | null>(null);
+	const [joiningChallenge, setJoiningChallenge] = useState(false);
 
 	const [toast, setToast] = useState<string | null>(null);
 	const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -158,7 +162,41 @@ export default function RecoveryScreen() {
 		}
 	}, [showToast]);
 
+	/**
+	 * A shared-challenge suggestion is one of today's three plans, not a timed
+	 * pause. If it is already joined it is a fixed plan → open it in Social; if
+	 * not, join it right here and the plan refreshes to show it as fixed.
+	 */
+	const handleChallengeAction = useCallback(
+		async (suggestion: RecoverySuggestion) => {
+			const id = suggestion.challengeId;
+			if (!id) return;
+			if (suggestion.challengeJoined) {
+				router.push({ pathname: "/challenge", params: { id } });
+				return;
+			}
+			setJoiningChallenge(true);
+			try {
+				await toggleChallenge(id);
+				setPlan(await setChallengeJoinedForToday(id, true));
+				showToast("Joined. Your circle is holding this time for you.");
+			} catch (err) {
+				showToast(err instanceof Error ? err.message : "Could not join that challenge just yet.");
+			} finally {
+				setJoiningChallenge(false);
+			}
+		},
+		[router, showToast]
+	);
+
 	const doneToday = sessions.filter((session) => session.status === "completed").length;
+
+	// A busy day can produce many small gaps. Summarise the total and show only
+	// the top three remaining windows — never an endless chip list.
+	const slotsToday = plan?.slots ?? [];
+	const totalFreeMinutes = slotsToday.reduce((sum, slot) => sum + slot.minutes, 0);
+	const topSlots = slotsToday.slice(0, 3);
+	const overflowSlots = Math.max(0, slotsToday.length - topSlots.length);
 
 	return (
 		<Screen
@@ -255,31 +293,98 @@ export default function RecoveryScreen() {
 							center
 							v="body"
 							color={colors.ink}
-							style={[styles.gentleLine, { marginTop: spacing(3), lineHeight: 20 }]}
+							numberOfLines={1}
+							style={[styles.gentleLine, { marginTop: spacing(3), lineHeight: 20, fontSize: 12 }]}
 						>
 							{plan?.note ?? 'Here are ideas, never obligations.'}
 						</Txt>
 
 						<View style={styles.slots}>
-							{plan && plan.slots.length === 0 ? (
+							{plan && slotsToday.length === 0 ? (
 								<Txt v="small" color={colors.inkSoft} center style={styles.gentleLine}>
-									Your schedule looks fully booked today. A five-minute pause can
-									still fit between the seams.
+									No open time left today. A five-minute pause can still fit between the seams.
 								</Txt>
 							) : (
-								(plan?.slots ?? []).map((slot, index) => (
-									<View key={`${slot.start}-${index}`} style={styles.slotChip}>
+								<>
+									<View style={styles.slotSummary}>
 										<Emoji size={14}>⏳</Emoji>
 										<Txt v="small" color={colors.inkSoft}>
-											{slot.start}–{slot.end} · {slot.minutes} min free
+											{slotsToday.length} free window{slotsToday.length === 1 ? '' : 's'} ·{' '}
+											{formatMin(totalFreeMinutes)} today
 										</Txt>
 									</View>
-								))
+									<View style={styles.slotChips}>
+										{topSlots.map((slot, index) => (
+											<View key={`${slot.start}-${index}`} style={styles.slotChip}>
+												<Txt v="small" color={colors.inkSoft}>
+													{slot.start}–{slot.end} · {slot.minutes} min
+												</Txt>
+											</View>
+										))}
+										{overflowSlots > 0 && (
+											<View style={[styles.slotChip, styles.slotMoreChip]}>
+												<Txt v="small" color={colors.inkFaint}>
+													+{overflowSlots} more
+												</Txt>
+											</View>
+										)}
+									</View>
+								</>
 							)}
 						</View>
 
 						<View style={{ marginTop: spacing(4), gap: spacing(3) }}>
 							{(plan?.suggestions ?? []).map((suggestion) => {
+								/* A shared challenge is a fixed plan — no timer, join it or open it in Social. */
+								if (suggestion.challengeId) {
+									return (
+										<View
+											key={suggestion.id}
+											style={[styles.suggestionCard, styles.challengeSuggestionCard]}
+										>
+											<View style={[styles.suggestionEmoji, styles.challengeSuggestionEmoji]}>
+												<Emoji size={26}>{suggestion.emoji}</Emoji>
+											</View>
+											<View style={styles.suggestionBody}>
+												<Txt v="heading" color={colors.ink} style={{ flex: 1 }} numberOfLines={1}>
+													{suggestion.title}
+												</Txt>
+												<Txt
+													v="small"
+													color={colors.inkSoft}
+													numberOfLines={1}
+													style={{ marginTop: spacing(1) }}
+												>
+													{suggestion.challengeJoined ? 'Fixed plan · ' : 'Shared challenge · '}
+													{suggestion.challengeScheduledFor
+														? formatSchedule(suggestion.challengeScheduledFor)
+														: formatMin(suggestion.minutes)}
+												</Txt>
+											</View>
+											<Pressable
+												accessibilityLabel={
+													suggestion.challengeJoined ? "Open the challenge" : "Join this challenge"
+												}
+												onPress={() => handleChallengeAction(suggestion)}
+												disabled={joiningChallenge}
+												style={({ pressed }) => [
+													styles.challengeJoinButton,
+													suggestion.challengeJoined && styles.challengeJoinedButton,
+													pressed && styles.pressed,
+												]}
+											>
+												{joiningChallenge ? (
+													<ActivityIndicator size="small" color={colors.cream} />
+												) : (
+													<Txt v="small" color={colors.cream} style={{ fontWeight: '700' }}>
+														{suggestion.challengeJoined ? 'Open ›' : '+ Join'}
+													</Txt>
+												)}
+											</Pressable>
+										</View>
+									);
+								}
+
 								const session = sessionFor(suggestion.id);
 								const done = session?.status === "completed";
 								const started = session?.status === "started";
@@ -336,12 +441,9 @@ export default function RecoveryScreen() {
 					</Card>
 
 					{/* QUICK DE-STRESS */}
-					<Card style={{ padding: spacing(4) }}>
+					<Card style={{ padding: spacing(4), marginTop: 20 }}>
 						<Row style={{ marginBottom: spacing(3) }}>
 							<Badge label="Quick de-stress" fg={colors.alert} bg={colors.alertWash} />
-							<Txt v="small" color={colors.inkFaint} style={{ marginLeft: spacing(2) }}>
-								A tiny break your hands can take
-							</Txt>
 						</Row>
 
 						<Pressable
@@ -993,17 +1095,28 @@ const styles = StyleSheet.create({
 	},
 
 	gentleLine: { lineHeight: 20 },
-	slots: { marginTop: spacing(3), flexDirection: 'row', flexWrap: 'wrap', gap: spacing(2) },
+	slots: { marginTop: spacing(3) },
+	slotSummary: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: spacing(1.5),
+		marginBottom: spacing(2),
+	},
+	slotChips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing(2) },
 	slotChip: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		gap: spacing(1),
 		backgroundColor: colors.yellowWash,
 		paddingHorizontal: spacing(2.5),
 		paddingVertical: spacing(1.5),
 		borderRadius: radius.pill,
 		borderWidth: 1,
 		borderColor: colors.yellowDeep,
+	},
+	slotMoreChip: {
+		backgroundColor: colors.surface,
+		borderColor: colors.line,
+		opacity: 0.85,
 	},
 	miniChip: {
 		backgroundColor: colors.cream,
@@ -1046,6 +1159,26 @@ const styles = StyleSheet.create({
 	},
 	statusChipDone: { backgroundColor: colors.calmWash, borderColor: colors.calm },
 	statusChipStarted: { backgroundColor: colors.warnWash, borderColor: colors.warn },
+
+	/* Shared-challenge suggestion — one of today's three fixed plans */
+	challengeSuggestionCard: {
+		borderColor: colors.yellowDeep,
+		backgroundColor: colors.yellowWash,
+	},
+	challengeSuggestionEmoji: {
+		backgroundColor: colors.yellowWash,
+		borderWidth: 1,
+		borderColor: colors.yellowDeep,
+	},
+	challengeJoinButton: {
+		backgroundColor: colors.brown,
+		borderRadius: radius.pill,
+		paddingHorizontal: spacing(4),
+		paddingVertical: spacing(2),
+		alignItems: 'center',
+		justifyContent: 'center',
+	},
+	challengeJoinedButton: { backgroundColor: colors.calm },
 
 	/* Quick de-stress card */
 	destressCard: {
