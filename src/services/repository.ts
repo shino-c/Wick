@@ -33,6 +33,7 @@ import {
   addEventToDeviceCalendar,
   deleteEventFromDeviceCalendar,
   syncCalendarEvents,
+  updateEventOnDeviceCalendar,
 } from '@/services/calendarSync';
 import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
 import { PPGService, type PPGResult, type StressClassification } from './ppgService';
@@ -44,6 +45,17 @@ export { type LoadBalanceSuggestion, type TaskAnalysis, type WeeklyCapacityAnaly
  * zone" is a raw individual score wearing a disguise, so we suppress instead.
  */
 export const MIN_CIRCLE_SIZE = 3;
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function createTaskId(): string {
+  const hex = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16));
+  hex[12] = '4';
+  hex[16] = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
+}
 
 /**
  * How many recent finger spot checks the RMSSD baseline is built from.
@@ -396,7 +408,7 @@ export async function listStressScores(limit = 30): Promise<StressScoreRow[]> {
 /* ── Pillar 2: sessions + calibration feedback ───────────────────── */
 
 export async function saveSession(row: Omit<FocusSessionRow, 'id' | 'createdAt'>): Promise<string> {
-  const id = uid();
+  const id = createTaskId();
   if (hasSupabase) {
     const userId = await currentUserId();
     const { data } = await supabase
@@ -1246,6 +1258,9 @@ async function getWorkloadItemById(id: string): Promise<TaskAnalysis | null> {
 }
 
 export async function saveTaskAnalysis(analysis: TaskAnalysis): Promise<void> {
+  if (!isUuid(analysis.id)) {
+    analysis = { ...analysis, id: createTaskId() };
+  }
   if (hasSupabase) {
     const userId = await currentUserId();
     if (userId) {
@@ -1395,11 +1410,15 @@ export async function getTaskAnalyses(weekStart?: string): Promise<TaskAnalysis[
 
 export async function approveTaskAnalysis(id: string, approved: boolean): Promise<void> {
   const status = approved ? 'approved' : 'rejected';
-  if (hasSupabase) {
-    await supabase
+  if (hasSupabase && isUuid(id)) {
+    const { error } = await supabase
       .from('ai_task_analysis')
       .update({ status })
       .eq('id', id);
+    if (error) {
+      console.error('approveTaskAnalysis database update failed:', error);
+      throw error;
+    }
   }
   let targetWeekStart: string | undefined;
   await writeDb((db) => {
@@ -1435,9 +1454,15 @@ export async function updateTaskAnalysis(
     if (patch.status !== undefined) dbPatch.status = patch.status;
     if (patch.stress_score !== undefined) dbPatch.stress_score = patch.stress_score;
     if (patch.ai_reasoning !== undefined) dbPatch.ai_reasoning = patch.ai_reasoning;
+    if (patch.calendar_event_id !== undefined) dbPatch.calendar_event_id = patch.calendar_event_id;
+    if (patch.calendar_provider !== undefined) dbPatch.calendar_provider = patch.calendar_provider;
     if (patch.week_start !== undefined) dbPatch.week_start = patch.week_start;
-    if (Object.keys(dbPatch).length > 0) {
-      await supabase.from('ai_task_analysis').update(dbPatch).eq('id', id);
+    if (Object.keys(dbPatch).length > 0 && isUuid(id)) {
+      const { error } = await supabase.from('ai_task_analysis').update(dbPatch).eq('id', id);
+      if (error) {
+        console.error('updateTaskAnalysis database update failed:', error);
+        throw error;
+      }
     }
   }
   let targetWeekStart: string | undefined = patch.week_start;
@@ -1455,10 +1480,14 @@ export async function updateTaskAnalysis(
 }
 
 export async function deferTaskAnalysis(id: string, newDate?: string): Promise<void> {
-  if (hasSupabase) {
+  if (hasSupabase && isUuid(id)) {
     const patch: any = { status: 'deferred' };
     if (newDate) patch.scheduled_date = newDate;
-    await supabase.from('ai_task_analysis').update(patch).eq('id', id);
+    const { error } = await supabase.from('ai_task_analysis').update(patch).eq('id', id);
+    if (error) {
+      console.error('deferTaskAnalysis database update failed:', error);
+      throw error;
+    }
   }
   let targetWeekStart: string | undefined;
   await writeDb((db) => {
@@ -1473,8 +1502,12 @@ export async function deferTaskAnalysis(id: string, newDate?: string): Promise<v
 }
 
 export async function deleteTaskAnalysis(id: string): Promise<void> {
-  if (hasSupabase) {
-    await supabase.from('ai_task_analysis').delete().eq('id', id);
+  if (hasSupabase && isUuid(id)) {
+    const { error } = await supabase.from('ai_task_analysis').delete().eq('id', id);
+    if (error) {
+      console.error('deleteTaskAnalysis database delete failed:', error);
+      throw error;
+    }
   }
   let targetWeekStart: string | undefined;
   await writeDb((db) => {
@@ -1782,11 +1815,12 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
   tasksCreated: number;
   tasksUpdated: number;
   totalEvents: number;
+  changedTaskIds: string[];
 }> {
   try {
     const connections = await getCalendarConnections();
     const hasConnection = connections.some((c) => c.connected);
-    if (!hasConnection) return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0 };
+    if (!hasConnection) return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0, changedTaskIds: [] };
 
     const now = new Date();
     const day = now.getDay();
@@ -1799,14 +1833,16 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
     await deleteTasksOutsideWeek(targetWeekStart);
 
     const allEvents = await syncCalendarEvents();
-    if (!allEvents || allEvents.length === 0) {
-      return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0 };
+    if (allEvents.error) {
+      console.error('syncCalendarToDb calendar error:', allEvents.error);
+      return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0, changedTaskIds: [] };
     }
 
     const existingTasks = await getTaskAnalyses(targetWeekStart);
 
     let created = 0;
     let updated = 0;
+    const changedTaskIds: string[] = [];
 
     for (const ev of allEvents) {
       const start = ev.startDate ? new Date(ev.startDate) : new Date();
@@ -1819,23 +1855,29 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
       const durationHours = end
         ? Math.max(0.25, (end.getTime() - start.getTime()) / (1000 * 60 * 60))
         : 1;
-;
-
-      const existing = existingTasks.find(
+      const matchesByCalendarId = existingTasks.filter(
+        (t) => t.calendar_event_id && t.calendar_event_id === ev.id
+      );
+      const existing = matchesByCalendarId[0] || existingTasks.find(
         (t) =>
-          (t.calendar_event_id && t.calendar_event_id === ev.id) ||
           t.id === ev.id ||
           (t.title.toLowerCase().trim() === ev.title.toLowerCase().trim() &&
             t.scheduled_date === evStartDate &&
             (t.scheduled_start_time || '') === evStartTime)
       );
 
+      for (const duplicate of matchesByCalendarId.slice(1)) {
+        await deleteTaskAnalysis(duplicate.id);
+        const duplicateIndex = existingTasks.findIndex((t) => t.id === duplicate.id);
+        if (duplicateIndex >= 0) existingTasks.splice(duplicateIndex, 1);
+      }
+
       if (!existing) {
         // Insert new task without duplicates
         const newTask: TaskAnalysis = {
-          id: ev.id || uid(),
+          id: createTaskId(),
           title: ev.title || 'Untitled Event',
-          category: 'academic',
+          category: '',
           priority: 'medium',
           estimated_duration_hours: durationHours,
           scheduled_date: evStartDate,
@@ -1852,6 +1894,8 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
           createdAt: new Date().toISOString(),
         };
         await saveTaskAnalysis(newTask);
+        existingTasks.push(newTask);
+        changedTaskIds.push(newTask.id);
         created++;
       } else {
         const isChanged =
@@ -1870,11 +1914,24 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
               scheduled_end_time: evEndTime,
               estimated_duration_hours: durationHours,
               calendar_event_id: ev.id,
+              calendar_provider: 'device',
             },
             true
           );
+          changedTaskIds.push(existing.id);
           updated++;
         }
+      }
+    }
+
+    const eventIds = new Set(allEvents.map((event) => event.id));
+    for (const task of [...existingTasks]) {
+      if (
+        task.calendar_provider === 'device' &&
+        task.calendar_event_id &&
+        !eventIds.has(task.calendar_event_id)
+      ) {
+        await deleteTaskAnalysis(task.id);
       }
     }
 
@@ -1882,10 +1939,11 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
       tasksCreated: created,
       tasksUpdated: updated,
       totalEvents: allEvents.length,
+      changedTaskIds,
     };
   } catch (err) {
     console.error('syncCalendarToDb error:', err);
-    return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0 };
+    return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0, changedTaskIds: [] };
   }
 }
 
@@ -1893,7 +1951,8 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
  * Runs AI task analysis on the active week's tasks in the DB.
  */
 export async function analyzeCurrentWeekTasks(
-  weekStartStr?: string
+  weekStartStr?: string,
+  taskIds?: string[]
 ): Promise<TaskAnalysis[]> {
   try {
     const now = new Date();
@@ -1903,8 +1962,11 @@ export async function analyzeCurrentWeekTasks(
     weekStartDate.setDate(diff);
     const targetWeekStart = weekStartStr || weekStartDate.toISOString().split('T')[0];
 
-    const tasks = await getTaskAnalyses(targetWeekStart);
-    if (tasks.length === 0) return [];
+    const allTasks = await getTaskAnalyses(targetWeekStart);
+    const tasks = taskIds
+      ? allTasks.filter((task) => taskIds.includes(task.id))
+      : allTasks.filter((task) => task.status === 'pending');
+    if (tasks.length === 0) return allTasks;
 
     const eventsToAnalyze: CalendarEventItem[] = tasks.map((t) => {
       const startTime = t.scheduled_start_time || '09:00';
@@ -1967,11 +2029,17 @@ export async function syncAndAnalyzeCalendar(): Promise<{
   capacityAnalyzed: boolean;
 }> {
   try {
-    const syncRes = await syncCalendarToDb();
-    if (syncRes.totalEvents > 0) {
-      await analyzeCurrentWeekTasks();
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const currentWeekDate = new Date(now);
+    currentWeekDate.setDate(diff);
+    const currentWeekStart = currentWeekDate.toISOString().split('T')[0];
+    const syncRes = await syncCalendarToDb(currentWeekStart);
+    if (syncRes.changedTaskIds.length > 0) {
+      await analyzeCurrentWeekTasks(currentWeekStart, syncRes.changedTaskIds);
     }
-    await recomputeCurrentWeekDerivedData();
+    await recomputeCurrentWeekDerivedData(currentWeekStart);
     return {
       tasksCreated: syncRes.tasksCreated,
       tasksUpdated: syncRes.tasksUpdated,

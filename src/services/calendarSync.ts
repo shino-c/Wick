@@ -12,7 +12,6 @@
  */
 
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
-import { createWorkloadItem } from '@/services/repository';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Calendar from 'expo-calendar';
 import { Platform } from 'react-native';
@@ -243,8 +242,6 @@ export async function syncCalendarEvents(): Promise<CalendarSyncResult> {
     // 2. Fetch events across calendars for the week
     const rawEvents = await Calendar.listEvents(calendars, weekStart, weekEnd);
 
-    let saved = 0;
-    let existing = 0;
     const mappedEvents: CalendarEventItem[] = [];
 
     for (const ev of rawEvents) {
@@ -253,11 +250,6 @@ export async function syncCalendarEvents(): Promise<CalendarSyncResult> {
       const end = ev.endDate ? new Date(ev.endDate) : null;
 
       if (!start) continue;
-
-      const durationHours =
-        start && end && end.getTime() > start.getTime()
-          ? Math.max(0.5, Math.round(((end.getTime() - start.getTime()) / (1000 * 60 * 60)) * 10) / 10)
-          : 1;
 
       mappedEvents.push({
         id: ev.id,
@@ -269,25 +261,6 @@ export async function syncCalendarEvents(): Promise<CalendarSyncResult> {
         notes: ev.notes ?? null,
       });
 
-      const payload = {
-        title,
-        category: 'errands',
-        priority: 'medium' as const,
-        estimated_duration_hours: durationHours,
-        scheduled_date: start.toISOString().split('T')[0],
-        scheduled_start_time: start.toTimeString().slice(0, 5),
-        scheduled_end_time: end ? end.toTimeString().slice(0, 5) : undefined,
-        calendar_provider: 'device' as const,
-        status: 'scheduled',
-        calendar_event_id: ev.id,
-      };
-
-      try {
-        await createWorkloadItem(payload as any);
-        saved++;
-      } catch (e) {
-        existing++;
-      }
     }
 
     // Update last_synced_at timestamp
@@ -314,8 +287,7 @@ export async function syncCalendarEvents(): Promise<CalendarSyncResult> {
       }
     }
 
-    return createSyncResult(mappedEvents, saved, existing);
-    return createSyncResult(mappedEvents, mappedEvents.length, 0);
+    return createSyncResult(mappedEvents, 0, mappedEvents.length);
   } catch (err: any) {
     console.error('Calendar sync error:', err);
     return createSyncResult([], 0, 0, err.message ?? 'Unknown error');
@@ -378,6 +350,33 @@ export async function deleteEventFromDeviceCalendar(calendarEventId?: string): P
     console.warn('Failed to delete event from device calendar:', err);
   }
   return false;
+}
+
+/** Updates the matching native calendar event without creating a new event. */
+export async function updateEventOnDeviceCalendar(
+  calendarEventId: string | undefined,
+  task: {
+    title: string;
+    scheduled_date: string;
+    scheduled_start_time?: string;
+    scheduled_end_time?: string;
+  }
+): Promise<boolean> {
+  if (!calendarEventId || !isCalendarAvailable()) return false;
+  try {
+    const event = await Calendar.ExpoCalendarEvent.get(calendarEventId);
+    if (!event || typeof event.update !== 'function') return false;
+
+    await event.update({
+      title: task.title,
+      startDate: new Date(`${task.scheduled_date}T${task.scheduled_start_time || '09:00'}:00`),
+      endDate: new Date(`${task.scheduled_date}T${task.scheduled_end_time || '10:00'}:00`),
+    });
+    return true;
+  } catch (err) {
+    console.error('Failed to update device calendar event:', err);
+    return false;
+  }
 }
 
 /**

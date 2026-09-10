@@ -28,7 +28,7 @@ import type {
   WeeklyCapacityAnalysis,
 } from '@/data/types';
 import { analyzeWeeklyCapacity, parseQuickTaskNLP, suggestLoadBalance } from '@/services/aiService';
-import { isNewWeek } from '@/services/calendarSync';
+import { isNewWeek, updateEventOnDeviceCalendar } from '@/services/calendarSync';
 import {
   approveTaskAnalysis,
   createAndSyncTask,
@@ -185,7 +185,13 @@ export default function Home() {
     try {
       const res = await syncAndAnalyzeCalendar();
       await loadDashboardData();
-      Alert.alert('Calendar Synced', `Found and analyzed ${res.tasksCreated} task(s) for this week.`);
+      const changed = res.tasksCreated + res.tasksUpdated;
+      Alert.alert(
+        'Calendar Synced',
+        changed > 0
+          ? `Analyzed ${changed} new or changed task(s) for this week.`
+          : 'No new or changed tasks found for this week.'
+      );
     } catch (e: any) {
       Alert.alert('Sync Error', e?.message || 'Could not sync calendar');
     } finally {
@@ -243,6 +249,7 @@ export default function Home() {
         scheduled_start_time: editingTask.scheduled_start_time,
         status: editingTask.status,
       });
+      await updateEventOnDeviceCalendar(editingTask.calendar_event_id, editingTask);
       setPendingTasks(prev => prev.map(t => t.id === editingTask.id ? editingTask : t));
       setEditingTask(null);
       await loadDashboardData();

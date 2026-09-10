@@ -25,6 +25,7 @@ import {
   connectCalendar,
   getCalendarConnections,
   getCalendarPermissionStatus,
+  updateEventOnDeviceCalendar,
 } from '@/services/calendarSync';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import {
@@ -95,6 +96,7 @@ export default function BaselineScreen() {
   // Review Modal State for Analysed Tasks
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [tasksToReview, setTasksToReview] = useState<TaskAnalysis[]>([]);
+  const [taskIdsToAnalyze, setTaskIdsToAnalyze] = useState<string[]>([]);
   const [editingTask, setEditingTask] = useState<TaskAnalysis | null>(null);
   const [confirming, setConfirming] = useState(false);
 
@@ -140,6 +142,7 @@ export default function BaselineScreen() {
     try {
       await connectCalendar();
       const syncRes = await syncCalendarToDb(currentWeekStart);
+      setTaskIdsToAnalyze(syncRes.changedTaskIds);
       await refresh();
       if (syncRes.totalEvents === 0) {
         setSyncInfo('Calendar connected (0 tasks found for this week)');
@@ -157,11 +160,17 @@ export default function BaselineScreen() {
   const handleContinue = async () => {
     setSaving(true);
     try {
-      // AI analysis only starts work when user clicks continue to dashboard
-      const analyzedTasks = await analyzeCurrentWeekTasks(currentWeekStart);
+      // Analyze only tasks created or changed by the latest calendar sync.
+      const analyzedTasks = await analyzeCurrentWeekTasks(
+        currentWeekStart,
+        taskIdsToAnalyze.length > 0 ? taskIdsToAnalyze : undefined
+      );
+      const reviewTasks = taskIdsToAnalyze.length > 0
+        ? analyzedTasks.filter((task) => taskIdsToAnalyze.includes(task.id))
+        : analyzedTasks.filter((task) => task.status === 'pending');
 
-      if (analyzedTasks && analyzedTasks.length > 0) {
-        setTasksToReview(analyzedTasks);
+      if (reviewTasks.length > 0) {
+        setTasksToReview(reviewTasks);
         setShowReviewModal(true);
         setSaving(false);
         return;
@@ -219,6 +228,7 @@ export default function BaselineScreen() {
         scheduled_start_time: editingTask.scheduled_start_time,
         scheduled_end_time: editingTask.scheduled_end_time,
       });
+      await updateEventOnDeviceCalendar(editingTask.calendar_event_id, editingTask);
       setTasksToReview((prev) =>
         prev.map((t) => (t.id === editingTask.id ? editingTask : t))
       );
