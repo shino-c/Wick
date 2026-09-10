@@ -2,18 +2,18 @@ import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    Pressable,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-native-svg';
@@ -21,26 +21,26 @@ import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-nativ
 import BottomNavigation from '@/components/bottombar';
 import TopNavigation from '@/components/topbar';
 import type {
-    CalendarConnection,
-    LoadBalanceSuggestion,
-    StressScoreRow,
-    TaskAnalysis,
-    WeeklyCapacityAnalysis,
+  CalendarConnection,
+  LoadBalanceSuggestion,
+  StressScoreRow,
+  TaskAnalysis,
+  WeeklyCapacityAnalysis,
 } from '@/data/types';
 import { analyzeWeeklyCapacity, parseQuickTaskNLP, suggestLoadBalance } from '@/services/aiService';
 import { isNewWeek } from '@/services/calendarSync';
 import {
-    approveTaskAnalysis,
-    createAndSyncTask,
-    deferTaskAnalysis,
-    deleteAndSyncTask,
-    getCalendarConnections,
-    getTaskAnalyses,
-    getWeeklyCapacity,
-    listStressScores,
-    recomputeCurrentWeekDerivedData,
-    syncAndAnalyzeCalendar,
-    updateTaskAnalysis
+  approveTaskAnalysis,
+  createAndSyncTask,
+  deferTaskAnalysis,
+  deleteAndSyncTask,
+  getCalendarConnections,
+  getTaskAnalyses,
+  getWeeklyCapacity,
+  listStressScores,
+  recomputeCurrentWeekDerivedData,
+  syncAndAnalyzeCalendar,
+  updateTaskAnalysis
 } from '@/services/repository';
 import { colors } from '@/theme';
 
@@ -250,17 +250,18 @@ export default function Home() {
       console.error('Error saving task edit:', err);
     }
   };
-  // Toggle a task between completed and approved (strikethrough + drop to last rank)
+  // Toggle a task between completed and approved (strikethrough + re-rank)
   const handleToggleComplete = async (task: TaskAnalysis) => {
     const completing = task.status !== 'completed';
     try {
       if (completing) {
-        // Move to last rank when completing
+        // Move completed task to last rank
         const maxRank = Math.max(0, ...tasks.map((t) => t.rank || 0));
-        await updateTaskAnalysis(task.id, { status: 'completed', rank: maxRank + 1 });
+        await updateTaskAnalysis(task.id, { status: 'completed', rank: maxRank + 1 }, true);
       } else {
-        await updateTaskAnalysis(task.id, { status: 'approved' });
+        await updateTaskAnalysis(task.id, { status: 'approved' }, true);
       }
+      await recomputeCurrentWeekDerivedData(currentWeekStart);
       await loadDashboardData();
     } catch (err) {
       console.error('Error toggling task completion:', err);
@@ -295,6 +296,7 @@ export default function Home() {
       await loadDashboardData();
       Alert.alert('Task Created', 'Task has been logged and synced to your phone calendar.');
     } catch (err: any) {
+      console.error('Error creating task:', err);
       Alert.alert('Error', err?.message || 'Could not create task');
     } finally {
       setAddingTask(false);
@@ -311,6 +313,7 @@ export default function Home() {
         onPress: async () => {
           try {
             await deleteAndSyncTask(task.id, task.calendar_event_id);
+            await recomputeCurrentWeekDerivedData(currentWeekStart);
             await loadDashboardData();
           } catch (err) {
             console.error('Error deleting task:', err);
@@ -325,6 +328,7 @@ export default function Home() {
     try {
       await deferTaskAnalysis(suggestion.taskId, suggestion.suggestedDate);
       setLoadSuggestions((prev) => prev.filter((s) => s.taskId !== suggestion.taskId));
+      await recomputeCurrentWeekDerivedData(currentWeekStart);
       await loadDashboardData();
       Alert.alert('Task Deferred', `"${suggestion.taskTitle}" deferred to next week.`);
     } catch (err) {
@@ -340,6 +344,7 @@ export default function Home() {
         await deferTaskAnalysis(s.taskId, s.suggestedDate);
       }
       setLoadSuggestions([]);
+      await recomputeCurrentWeekDerivedData(currentWeekStart);
       await loadDashboardData();
       Alert.alert('Rebalance Applied', 'Low-priority tasks deferred to relieve this week’s workload.');
     } catch (err) {
@@ -347,31 +352,72 @@ export default function Home() {
     }
   };
 
-  // Calculate Category Counts
+  // Calculate Category Counts for active tasks
   const categoryCounts = {
-    academic: tasks.filter((t) => t.category === 'academic').length,
-    social: tasks.filter((t) => t.category === 'social').length,
-    physical: tasks.filter((t) => t.category === 'physical').length,
-    mental: tasks.filter((t) => t.category === 'mental').length,
-    errands: tasks.filter((t) => t.category === 'errands' || t.category === 'work').length,
+    academic: tasks.filter((t) => t.category === 'academic' && t.status !== 'deferred').length,
+    social: tasks.filter((t) => t.category === 'social' && t.status !== 'deferred').length,
+    physical: tasks.filter((t) => t.category === 'physical' && t.status !== 'deferred').length,
+    mental: tasks.filter((t) => t.category === 'mental' && t.status !== 'deferred').length,
+    errands: tasks.filter((t) => (t.category === 'errands' || t.category === 'work') && t.status !== 'deferred').length,
   };
 
-  // Map stress scores to Mon-Sun for the current week
+  // Map real stress scores & daily task workloads to Mon-Sun for the current week
   const weekStartMs = new Date(currentWeekStart + 'T00:00:00').getTime();
   const dayScores: (number | null)[] = [null, null, null, null, null, null, null];
-  for (const s of stressScores) {
-    const d = new Date(s.createdAt);
-    const dayIdx = (d.getDay() + 6) % 7; // Mon=0 .. Sun=6
-    // Only include scores from this week
-    const scoreDayMs = new Date(d.toISOString().split('T')[0] + 'T00:00:00').getTime();
-    if (scoreDayMs >= weekStartMs && scoreDayMs < weekStartMs + 7 * 86400000) {
-      if (dayScores[dayIdx] === null) {
-        dayScores[dayIdx] = s.fusedScore;
+
+  for (let i = 0; i < 7; i++) {
+    const dayDate = new Date(weekStartMs + i * 86400000);
+    const dayDateStr = dayDate.toISOString().split('T')[0];
+
+    // 1. Check for recorded biometric / fused stress scores on this day
+    const scoresOnDay = stressScores.filter((s) => {
+      const d = new Date(s.createdAt).toISOString().split('T')[0];
+      return d === dayDateStr;
+    });
+
+    let dayScore: number | null = null;
+    if (scoresOnDay.length > 0) {
+      dayScore = Math.round(
+        scoresOnDay.reduce((acc, s) => acc + s.fusedScore, 0) / scoresOnDay.length
+      );
+    }
+
+    // 2. Check for active tasks scheduled on this day
+    const dayTasks = tasks.filter(
+      (t) =>
+        t.scheduled_date === dayDateStr &&
+        t.status !== 'deferred' &&
+        t.status !== 'rejected'
+    );
+
+    if (dayTasks.length > 0) {
+      const avgTaskStress =
+        dayTasks.reduce((acc, t) => acc + (t.stress_score ?? 50), 0) /
+        dayTasks.length;
+      const dayHours = dayTasks.reduce(
+        (acc, t) => acc + (t.estimated_duration_hours || 1),
+        0
+      );
+      const taskLoadStress = Math.min(
+        95,
+        Math.round(avgTaskStress * 0.55 + Math.min(45, dayHours * 7))
+      );
+
+      if (dayScore !== null) {
+        dayScore = Math.round(dayScore * 0.5 + taskLoadStress * 0.5);
       } else {
-        // Average multiple scores on same day
-        dayScores[dayIdx] = (dayScores[dayIdx]! + s.fusedScore) / 2;
+        dayScore = taskLoadStress;
       }
     }
+
+    dayScores[i] = dayScore;
+  }
+
+  // If all days are null (e.g. no measurements and no scheduled tasks), default today
+  const todayDayIdx = (new Date().getDay() + 6) % 7;
+  const hasAnyDayScore = dayScores.some((s) => s !== null);
+  if (!hasAnyDayScore) {
+    dayScores[todayDayIdx] = capacity?.stress_score ?? 50;
   }
 
   // Find the latest day with data for the active-day highlight
@@ -391,31 +437,29 @@ export default function Home() {
   const chartBottom = 100;
   const xStep = (chartRight - chartLeft) / 6;
 
-  const points: { x: number; y: number }[] = [];
+  const points: { x: number; y: number; score: number }[] = [];
   for (let i = 0; i < 7; i++) {
     const score = dayScores[i];
     const x = chartLeft + i * xStep;
-    const y =
-      score !== null
-        ? chartBottom - (score / 100) * (chartBottom - chartTop)
-        : null;
-    if (y !== null) points.push({ x, y });
+    if (score !== null) {
+      const clampedScore = Math.max(0, Math.min(100, score));
+      const y = chartBottom - (clampedScore / 100) * (chartBottom - chartTop);
+      points.push({ x, y, score: clampedScore });
+    }
   }
 
-  // Generate a smooth bezier path through the points
+  // Generate smooth path through the points
   let stressPath = '';
   let stressGradientPath = '';
   if (points.length >= 2) {
-    const lineParts = points.map(
-      (p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`
-    );
+    const lineParts = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`);
     stressPath = lineParts.join(' ');
     stressGradientPath =
       stressPath +
       ` L ${points[points.length - 1].x} ${chartBottom} L ${points[0].x} ${chartBottom} Z`;
   } else if (points.length === 1) {
-    stressPath = `M ${points[0].x} ${points[0].y} L ${points[0].x} ${points[0].y}`;
-    stressGradientPath = `M ${points[0].x} ${chartBottom} L ${points[0].x} ${chartBottom}`;
+    stressPath = `M ${Math.max(chartLeft, points[0].x - 16)} ${points[0].y} L ${Math.min(chartRight, points[0].x + 16)} ${points[0].y}`;
+    stressGradientPath = `M ${Math.max(chartLeft, points[0].x - 16)} ${points[0].y} L ${Math.min(chartRight, points[0].x + 16)} ${points[0].y} L ${Math.min(chartRight, points[0].x + 16)} ${chartBottom} L ${Math.max(chartLeft, points[0].x - 16)} ${chartBottom} Z`;
   }
 
   const usedHours = capacity?.used_capacity_hours ?? 0;
@@ -423,7 +467,15 @@ export default function Home() {
   const capacityPct = Math.min(100, Math.round((usedHours / totalHours) * 100));
   const isOverloaded = capacity?.overload_warning || capacityPct >= 85;
 
-  /** Real cue for the recovery reminder — today's own data, never hardcoded. */
+  // Real Category Percentages from capacity breakdown
+  const academicPct = capacity?.category_breakdown?.academic ?? 0;
+  const workPct = capacity?.category_breakdown?.work ?? 0;
+  const socialPct = capacity?.category_breakdown?.social ?? 0;
+  const physicalPct = capacity?.category_breakdown?.physical ?? 0;
+  const mentalPct = capacity?.category_breakdown?.mental ?? 0;
+  const errandsPct = capacity?.category_breakdown?.errands ?? 0;
+
+  /** Real cue for the recovery reminder — today's own data */
   const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
   const todayStress = dayScores[todayIdx];
   const recoveryReminderVisible =
@@ -509,7 +561,7 @@ export default function Home() {
                     key={i}
                     cx={p.x}
                     cy={p.y}
-                    r={p.x === chartLeft + lastScoredDay * xStep ? 6 : 3}
+                    r={p.x === chartLeft + lastScoredDay * xStep ? 6 : 3.5}
                     fill={p.x === chartLeft + lastScoredDay * xStep ? '#ba1a1a' : '#81756c'}
                     stroke={p.x === chartLeft + lastScoredDay * xStep ? '#ffffff' : 'none'}
                     strokeWidth={p.x === chartLeft + lastScoredDay * xStep ? 2.5 : 0}
@@ -518,9 +570,7 @@ export default function Home() {
 
                 {/* Empty state: flat line at 50% */}
                 {points.length === 0 && (
-                  <>
-                    <Line x1="20" y1="60" x2="365" y2="60" stroke="#ddd" strokeWidth="1.5" strokeDasharray="6 4" />
-                  </>
+                  <Line x1="20" y1="60" x2="365" y2="60" stroke="#ddd" strokeWidth="1.5" strokeDasharray="6 4" />
                 )}
               </Svg>
 
@@ -556,7 +606,7 @@ export default function Home() {
             </View>
           </View>
 
-          {/* Gentle recovery reminder — only when today's real data warrants it */}
+          {/* Gentle recovery reminder */}
           {recoveryReminderVisible && (
             <Pressable
               onPress={() => router.push('/recovery')}
@@ -628,36 +678,58 @@ export default function Home() {
             )}
 
             <View style={styles.capacitySection}>
-              {/* Category Breakdown Bar */}
+              {/* Dynamic Category Breakdown Bar */}
               <View style={styles.capacityBar}>
-                <View style={[styles.capacitySegment, { width: `${capacity?.category_breakdown?.academic || 35}%`, backgroundColor: COLORS.academic }]} />
-                <View style={[styles.capacitySegment, { width: `${capacity?.category_breakdown?.social || 20}%`, backgroundColor: COLORS.social }]} />
-                <View style={[styles.capacitySegment, { width: `${capacity?.category_breakdown?.physical || 15}%`, backgroundColor: COLORS.physical }]} />
-                <View style={[styles.capacitySegment, { width: `${capacity?.category_breakdown?.errands || 15}%`, backgroundColor: COLORS.errands }]} />
-                <View style={[styles.capacitySegment, { width: `${capacity?.category_breakdown?.mental || 15}%`, backgroundColor: COLORS.mental }]} />
+                {academicPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${academicPct}%`, backgroundColor: COLORS.academic }]} />
+                )}
+                {workPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${workPct}%`, backgroundColor: '#FCD34D' }]} />
+                )}
+                {socialPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${socialPct}%`, backgroundColor: COLORS.social }]} />
+                )}
+                {physicalPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${physicalPct}%`, backgroundColor: COLORS.physical }]} />
+                )}
+                {errandsPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${errandsPct}%`, backgroundColor: COLORS.errands }]} />
+                )}
+                {mentalPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${mentalPct}%`, backgroundColor: COLORS.mental }]} />
+                )}
+                {usedHours === 0 && (
+                  <View style={[styles.capacitySegment, { width: '100%', backgroundColor: '#E5E7EB' }]} />
+                )}
               </View>
 
-              {/* Legend */}
+              {/* Legend with Real Category Percentages */}
               <View style={styles.legendContainer}>
                 <View style={styles.legendItem}>
                   <View style={[styles.legendDot, { backgroundColor: COLORS.academic }]} />
-                  <Text style={styles.legendText}>Academic ({capacity?.category_breakdown?.academic ?? 35}%)</Text>
+                  <Text style={styles.legendText}>Academic ({academicPct}%)</Text>
                 </View>
+                {workPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: '#FCD34D' }]} />
+                    <Text style={styles.legendText}>Work ({workPct}%)</Text>
+                  </View>
+                )}
                 <View style={styles.legendItem}>
                   <View style={[styles.legendDot, { backgroundColor: COLORS.social }]} />
-                  <Text style={styles.legendText}>Social ({capacity?.category_breakdown?.social ?? 20}%)</Text>
+                  <Text style={styles.legendText}>Social ({socialPct}%)</Text>
                 </View>
                 <View style={styles.legendItem}>
                   <View style={[styles.legendDot, { backgroundColor: COLORS.physical }]} />
-                  <Text style={styles.legendText}>Physical ({capacity?.category_breakdown?.physical ?? 15}%)</Text>
+                  <Text style={styles.legendText}>Physical ({physicalPct}%)</Text>
                 </View>
                 <View style={styles.legendItem}>
                   <View style={[styles.legendDot, { backgroundColor: COLORS.errands }]} />
-                  <Text style={styles.legendText}>Errands ({capacity?.category_breakdown?.errands ?? 15}%)</Text>
+                  <Text style={styles.legendText}>Errands ({errandsPct}%)</Text>
                 </View>
                 <View style={styles.legendItem}>
                   <View style={[styles.legendDot, { backgroundColor: COLORS.mental }]} />
-                  <Text style={styles.legendText}>Mental ({capacity?.category_breakdown?.mental ?? 15}%)</Text>
+                  <Text style={styles.legendText}>Mental ({mentalPct}%)</Text>
                 </View>
               </View>
             </View>
@@ -729,7 +801,7 @@ export default function Home() {
             </View>
           </View>
 
-          {/* 4. AI Ranked Tasks for This Week (with Delete -> 2-way sync) */}
+          {/* 4. AI Ranked Tasks for This Week (Tap card to toggle done/strikethrough) */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Tasks This Week</Text>
@@ -753,24 +825,28 @@ export default function Home() {
                 return (
                   <Pressable
                     key={task.id}
-                    onPress={() => {
-                      setEditingTask({ ...task });
-                      setShowReviewModal(true);
-                    }}
-                    style={({ pressed }) => [styles.taskCard, done && styles.taskCardDone, pressed && styles.pressed]}
+                    onPress={() => handleToggleComplete(task)}
+                    style={({ pressed }) => [
+                      styles.taskCard,
+                      done && styles.taskCardDone,
+                      pressed && styles.pressed,
+                    ]}
                   >
                     <View style={[styles.taskLeftBorder, done && { backgroundColor: colors.inkFaint }]} />
-                    <Pressable
-                      onPress={() => handleToggleComplete(task)}
+                    <View
                       style={[styles.taskRankBadge, done && styles.taskRankBadgeDone]}
-                      hitSlop={6}
                     >
-                      <Text style={[styles.taskRankText, done && styles.taskRankTextDone]}>{done ? '✓' : `#${task.rank}`}</Text>
-                    </Pressable>
+                      <Text style={[styles.taskRankText, done && styles.taskRankTextDone]}>
+                        {done ? '✓' : `#${task.rank}`}
+                      </Text>
+                    </View>
                     <View style={styles.taskBody}>
                       <View style={styles.taskTitleRow}>
                         <Text style={styles.taskCatEmoji}>{catEmoji}</Text>
-                        <Text style={[styles.taskTitleText, done && styles.taskTitleDone]} numberOfLines={1}>
+                        <Text
+                          style={[styles.taskTitleText, done && styles.taskTitleDone]}
+                          numberOfLines={1}
+                        >
                           {task.title}
                         </Text>
                       </View>
@@ -785,7 +861,25 @@ export default function Home() {
                         </Text>
                       </View>
                     </View>
-                    <Pressable onPress={() => handleDeleteTask(task)} style={styles.deleteButton} hitSlop={8}>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        setEditingTask({ ...task });
+                        setShowReviewModal(true);
+                      }}
+                      style={styles.editButton}
+                      hitSlop={8}
+                    >
+                      <MaterialIcons name="edit" size={17} color={colors.inkSoft} />
+                    </Pressable>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        handleDeleteTask(task);
+                      }}
+                      style={styles.deleteButton}
+                      hitSlop={8}
+                    >
                       <MaterialIcons name="delete-outline" size={18} color={colors.inkFaint} />
                     </Pressable>
                   </Pressable>
@@ -1331,6 +1425,7 @@ const styles = StyleSheet.create({
   pillText: { fontSize: 9, fontWeight: '700', color: colors.inkSoft },
   taskSubDetail: { fontSize: 11, color: colors.inkSoft, flexShrink: 1 },
   taskSubDone: { color: colors.inkFaint },
+  editButton: { padding: 8 },
   deleteButton: { padding: 8 },
   spikeBadge: { backgroundColor: '#FEE2E2', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
   spikeText: { fontSize: 10, fontWeight: '800', color: '#DC2626' },

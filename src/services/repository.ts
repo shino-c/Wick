@@ -7,32 +7,32 @@
  */
 import { readDb, uid, writeDb } from '@/data/localStore';
 import type {
-    AccuracyVerdict,
-    Baseline,
-    CalendarConnection,
-    CalendarEventItem,
-    ChallengeRow,
-    CircleSummary,
-    FocusSessionRow,
-    FriendSummary,
-    GardenItem,
-    GardenWallet,
-    IncomingRequest,
-    NewChallenge,
-    Participant,
-    PpgScan,
-    SelfReport,
-    StressScoreRow,
-    SupportNudge,
-    TaskAnalysis,
-    WeeklyCapacityAnalysis,
-    WorkloadItem
+  AccuracyVerdict,
+  Baseline,
+  CalendarConnection,
+  CalendarEventItem,
+  ChallengeRow,
+  CircleSummary,
+  FocusSessionRow,
+  FriendSummary,
+  GardenItem,
+  GardenWallet,
+  IncomingRequest,
+  NewChallenge,
+  Participant,
+  PpgScan,
+  SelfReport,
+  StressScoreRow,
+  SupportNudge,
+  TaskAnalysis,
+  WeeklyCapacityAnalysis,
+  WorkloadItem
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
 import {
-    addEventToDeviceCalendar,
-    deleteEventFromDeviceCalendar,
-    syncCalendarEvents,
+  addEventToDeviceCalendar,
+  deleteEventFromDeviceCalendar,
+  syncCalendarEvents,
 } from '@/services/calendarSync';
 import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
 import { PPGService, type PPGResult, type StressClassification } from './ppgService';
@@ -1772,6 +1772,187 @@ export async function deleteTasksOutsideWeek(currentWeekStart: string): Promise<
 }
 
 /**
+ * Syncs calendar events into the database for the active week WITHOUT running AI:
+ * - Match task/calendar ID or (title + date + time) to prevent duplicate workloads
+ * - New -> insert into DB as pending
+ * - Unchanged -> skip
+ * - Changed -> update date/time/title in DB
+ */
+export async function syncCalendarToDb(weekStartStr?: string): Promise<{
+  tasksCreated: number;
+  tasksUpdated: number;
+  totalEvents: number;
+}> {
+  try {
+    const connections = await getCalendarConnections();
+    const hasConnection = connections.some((c) => c.connected);
+    if (!hasConnection) return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0 };
+
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const weekStartDate = new Date(now);
+    weekStartDate.setDate(diff);
+    const targetWeekStart = weekStartStr || weekStartDate.toISOString().split('T')[0];
+
+    // Purge previous/next-week data so the DB only holds the current week
+    await deleteTasksOutsideWeek(targetWeekStart);
+
+    const allEvents = await syncCalendarEvents();
+    if (!allEvents || allEvents.length === 0) {
+      return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0 };
+    }
+
+    const existingTasks = await getTaskAnalyses(targetWeekStart);
+
+    let created = 0;
+    let updated = 0;
+
+    for (const ev of allEvents) {
+      const start = ev.startDate ? new Date(ev.startDate) : new Date();
+      const end = ev.endDate ? new Date(ev.endDate) : undefined;
+
+      const evStartDate = start.toISOString().split('T')[0];
+      const evStartTime = start.toTimeString().slice(0, 5);
+      const evEndTime = end ? end.toTimeString().slice(0, 5) : undefined;
+
+      const durationHours = end
+        ? Math.max(0.25, (end.getTime() - start.getTime()) / (1000 * 60 * 60))
+        : 1;
+;
+
+      const existing = existingTasks.find(
+        (t) =>
+          (t.calendar_event_id && t.calendar_event_id === ev.id) ||
+          t.id === ev.id ||
+          (t.title.toLowerCase().trim() === ev.title.toLowerCase().trim() &&
+            t.scheduled_date === evStartDate &&
+            (t.scheduled_start_time || '') === evStartTime)
+      );
+
+      if (!existing) {
+        // Insert new task without duplicates
+        const newTask: TaskAnalysis = {
+          id: ev.id || uid(),
+          title: ev.title || 'Untitled Event',
+          category: 'academic',
+          priority: 'medium',
+          estimated_duration_hours: durationHours,
+          scheduled_date: evStartDate,
+          scheduled_start_time: evStartTime,
+          scheduled_end_time: evEndTime,
+          capacity_hours: durationHours,
+          rank: existingTasks.length + created + 1,
+          stress_score: 50,
+          ai_reasoning: 'Synced from device calendar.',
+          status: 'pending',
+          calendar_event_id: ev.id,
+          calendar_provider: 'device',
+          week_start: targetWeekStart,
+          createdAt: new Date().toISOString(),
+        };
+        await saveTaskAnalysis(newTask);
+        created++;
+      } else {
+        const isChanged =
+          existing.title !== ev.title ||
+          existing.scheduled_date !== evStartDate ||
+          (existing.scheduled_start_time || '') !== evStartTime ||
+          (existing.scheduled_end_time || '') !== (evEndTime || '');
+
+        if (isChanged) {
+          await updateTaskAnalysis(
+            existing.id,
+            {
+              title: ev.title,
+              scheduled_date: evStartDate,
+              scheduled_start_time: evStartTime,
+              scheduled_end_time: evEndTime,
+              estimated_duration_hours: durationHours,
+              calendar_event_id: ev.id,
+            },
+            true
+          );
+          updated++;
+        }
+      }
+    }
+
+    return {
+      tasksCreated: created,
+      tasksUpdated: updated,
+      totalEvents: allEvents.length,
+    };
+  } catch (err) {
+    console.error('syncCalendarToDb error:', err);
+    return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0 };
+  }
+}
+
+/**
+ * Runs AI task analysis on the active week's tasks in the DB.
+ */
+export async function analyzeCurrentWeekTasks(
+  weekStartStr?: string
+): Promise<TaskAnalysis[]> {
+  try {
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const weekStartDate = new Date(now);
+    weekStartDate.setDate(diff);
+    const targetWeekStart = weekStartStr || weekStartDate.toISOString().split('T')[0];
+
+    const tasks = await getTaskAnalyses(targetWeekStart);
+    if (tasks.length === 0) return [];
+
+    const eventsToAnalyze: CalendarEventItem[] = tasks.map((t) => {
+      const startTime = t.scheduled_start_time || '09:00';
+      const endTime = t.scheduled_end_time || '10:00';
+      return {
+        id: t.calendar_event_id || t.id,
+        title: t.title,
+        startDate: `${t.scheduled_date}T${startTime}:00`,
+        endDate: `${t.scheduled_date}T${endTime}:00`,
+      };
+    });
+
+    const perceivedStress = await getBaseline();
+    const { analyzeCalendarTasks } = await import('@/services/aiService');
+    const analyzedTasks = await analyzeCalendarTasks(eventsToAnalyze, {
+      perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
+    });
+
+    for (const t of tasks) {
+      const analyzed =
+        analyzedTasks.find((a) => a.id === t.calendar_event_id || a.id === t.id) ||
+        analyzedTasks.find((a) => a.title.toLowerCase().trim() === t.title.toLowerCase().trim());
+
+      if (analyzed) {
+        await updateTaskAnalysis(
+          t.id,
+          {
+            category: analyzed.category || t.category,
+            priority: analyzed.priority || t.priority,
+            estimated_duration_hours: analyzed.estimated_duration_hours || t.estimated_duration_hours,
+            stress_score: analyzed.stress_score ?? t.stress_score,
+            ai_reasoning: analyzed.ai_reasoning || t.ai_reasoning,
+            rank: analyzed.rank || t.rank,
+          },
+          true
+        );
+      }
+    }
+
+    await recomputeCurrentWeekDerivedData(targetWeekStart);
+    return await getTaskAnalyses(targetWeekStart);
+  } catch (err) {
+    console.error('analyzeCurrentWeekTasks error:', err);
+    return await getTaskAnalyses(weekStartStr);
+  }
+}
+
+/**
  * Syncs calendar events for the active week with differential matching:
  * - Match task/calendar ID
  * - New -> insert into DB and run AI analysis
@@ -1786,168 +1967,14 @@ export async function syncAndAnalyzeCalendar(): Promise<{
   capacityAnalyzed: boolean;
 }> {
   try {
-    const connections = await getCalendarConnections();
-    const hasConnection = connections.some((c) => c.connected);
-    if (!hasConnection) return { tasksCreated: 0, tasksUpdated: 0, capacityAnalyzed: false };
-
-    const now = new Date();
-    const day = now.getDay();
-    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-    const weekStartDate = new Date(now);
-    weekStartDate.setDate(diff);
-    const weekStartStr = weekStartDate.toISOString().split('T')[0];
-
-    // Purge previous/next-week data so the DB only holds the current week
-    await deleteTasksOutsideWeek(weekStartStr);
-
-    const allEvents = await syncCalendarEvents();
-    if (!allEvents || allEvents.length === 0) {
-      await recomputeCurrentWeekDerivedData(weekStartStr);
-      return { tasksCreated: 0, tasksUpdated: 0, capacityAnalyzed: true };
+    const syncRes = await syncCalendarToDb();
+    if (syncRes.totalEvents > 0) {
+      await analyzeCurrentWeekTasks();
     }
-
-    // DB is the source of truth
-    const existingTasks = await getTaskAnalyses(weekStartStr);
-
-    // Differential sync: match task / calendar ID
-    const newEvents: CalendarEventItem[] = [];
-    const changedEvents: { event: CalendarEventItem; existingTask: TaskAnalysis }[] = [];
-    let unchangedCount = 0;
-
-    for (const ev of allEvents) {
-      const existing = existingTasks.find(
-        (t) => (t.calendar_event_id && t.calendar_event_id === ev.id) || t.id === ev.id
-      );
-
-      if (!existing) {
-        newEvents.push(ev);
-      } else {
-        const evStartDate = ev.startDate ? new Date(ev.startDate).toISOString().split('T')[0] : '';
-        const evStartTime = ev.startDate ? new Date(ev.startDate).toTimeString().slice(0, 5) : '';
-        const evEndTime = ev.endDate ? new Date(ev.endDate).toTimeString().slice(0, 5) : undefined;
-
-        const isChanged =
-          existing.title !== ev.title ||
-          existing.scheduled_date !== evStartDate ||
-          (existing.scheduled_start_time || '') !== evStartTime ||
-          (existing.scheduled_end_time || '') !== (evEndTime || '');
-
-        if (isChanged) {
-          changedEvents.push({ event: ev, existingTask: existing });
-        } else {
-          unchangedCount++;
-        }
-      }
-    }
-
-    // AI only runs for new or actually changed tasks
-    const eventsToAnalyze = [...newEvents, ...changedEvents.map((c) => c.event)];
-
-    if (eventsToAnalyze.length > 0) {
-      const perceivedStress = await getBaseline();
-      const { analyzeCalendarTasks } = await import('@/services/aiService');
-
-      let analyzedTasks: TaskAnalysis[] = [];
-      try {
-        analyzedTasks = await analyzeCalendarTasks(eventsToAnalyze, {
-          perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
-        });
-      } catch (aiErr) {
-        console.error('syncAndAnalyzeCalendar AI analysis error:', aiErr);
-      }
-
-      // Handle new tasks: insert into DB
-      for (const newEv of newEvents) {
-        const analyzed =
-          analyzedTasks.find((t) => t.calendar_event_id === newEv.id || t.id === newEv.id) ||
-          analyzedTasks.find((t) => t.title === newEv.title);
-
-        const start = new Date(newEv.startDate);
-        const end = newEv.endDate ? new Date(newEv.endDate) : undefined;
-        const durationHours =
-          start && end && end.getTime() > start.getTime()
-            ? Math.max(0.5, Math.round(((end.getTime() - start.getTime()) / (1000 * 60 * 60)) * 10) / 10)
-            : 1;
-
-        const taskRecord: TaskAnalysis = {
-          id: analyzed?.id || uid(),
-          title: analyzed?.title || newEv.title || 'Untitled Task',
-          category: analyzed?.category || 'academic',
-          priority: analyzed?.priority || 'medium',
-          estimated_duration_hours: analyzed?.estimated_duration_hours || durationHours,
-          scheduled_date: start.toISOString().split('T')[0],
-          scheduled_start_time: start.toTimeString().slice(0, 5),
-          scheduled_end_time: end ? end.toTimeString().slice(0, 5) : undefined,
-          capacity_hours: analyzed?.estimated_duration_hours || durationHours,
-          rank: analyzed?.rank || existingTasks.length + 1,
-          ai_reasoning: analyzed?.ai_reasoning || 'Auto-analyzed from calendar event.',
-          stress_score: analyzed?.stress_score ?? 50,
-          status: 'pending',
-          calendar_event_id: newEv.id,
-          calendar_provider: 'device',
-          week_start: weekStartStr,
-        };
-
-        try {
-          await saveTaskAnalysis(taskRecord);
-        } catch (saveErr) {
-          console.error('syncAndAnalyzeCalendar: failed to save new task:', saveErr);
-        }
-      }
-
-      // Handle changed tasks: update in DB
-      for (const changed of changedEvents) {
-        const analyzed =
-          analyzedTasks.find(
-            (t) => t.calendar_event_id === changed.event.id || t.id === changed.event.id
-          ) || analyzedTasks.find((t) => t.title === changed.event.title);
-
-        const start = new Date(changed.event.startDate);
-        const end = changed.event.endDate ? new Date(changed.event.endDate) : undefined;
-        const durationHours =
-          start && end && end.getTime() > start.getTime()
-            ? Math.max(0.5, Math.round(((end.getTime() - start.getTime()) / (1000 * 60 * 60)) * 10) / 10)
-            : changed.existingTask.estimated_duration_hours;
-
-        try {
-          await updateTaskAnalysis(
-            changed.existingTask.id,
-            {
-              title: changed.event.title,
-              scheduled_date: start.toISOString().split('T')[0],
-              scheduled_start_time: start.toTimeString().slice(0, 5),
-              scheduled_end_time: end ? end.toTimeString().slice(0, 5) : undefined,
-              category: analyzed?.category || changed.existingTask.category,
-              priority: analyzed?.priority || changed.existingTask.priority,
-              estimated_duration_hours: analyzed?.estimated_duration_hours || durationHours,
-              stress_score: analyzed?.stress_score ?? changed.existingTask.stress_score,
-              ai_reasoning: analyzed?.ai_reasoning || changed.existingTask.ai_reasoning,
-            },
-            true
-          );
-        } catch (updateErr) {
-          console.error('syncAndAnalyzeCalendar: failed to update changed task:', updateErr);
-        }
-      }
-    }
-
-    // Recompute all derived data after task changes
-    await recomputeCurrentWeekDerivedData(weekStartStr);
-
-    if (hasSupabase) {
-      const userId = await currentUserId();
-      if (userId) {
-        await supabase
-          .from('calendar_connections')
-          .update({ last_synced_at: new Date().toISOString() })
-          .eq('user_id', userId)
-          .eq('provider', 'device');
-      }
-    }
-
+    await recomputeCurrentWeekDerivedData();
     return {
-      tasksCreated: newEvents.length,
-      tasksUpdated: changedEvents.length,
+      tasksCreated: syncRes.tasksCreated,
+      tasksUpdated: syncRes.tasksUpdated,
       capacityAnalyzed: true,
     };
   } catch (err) {

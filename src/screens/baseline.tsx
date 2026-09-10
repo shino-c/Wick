@@ -28,13 +28,15 @@ import {
 } from '@/services/calendarSync';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import {
+  analyzeCurrentWeekTasks,
   approveTaskAnalysis,
   getBaseline,
   getTaskAnalyses,
   hasQuestionnaireAnswers,
   latestSelfReport,
+  recomputeCurrentWeekDerivedData,
   saveSelfReport,
-  syncAndAnalyzeCalendar,
+  syncCalendarToDb,
   updateTaskAnalysis,
 } from '@/services/repository';
 import { colors } from '@/theme';
@@ -121,7 +123,7 @@ export default function BaselineScreen() {
     setCalendarPermission(permissionStatus);
 
     if (tasks.length > 0) {
-      setSyncInfo(`${tasks.length} task(s) analyzed for this week`);
+      setSyncInfo(`${tasks.length} task(s) synced for this week`);
     }
   }, [currentWeekStart]);
 
@@ -137,13 +139,12 @@ export default function BaselineScreen() {
     setSyncing(true);
     try {
       await connectCalendar();
-      const syncRes = await syncAndAnalyzeCalendar();
+      const syncRes = await syncCalendarToDb(currentWeekStart);
       await refresh();
-      const currentTasks = await getTaskAnalyses(currentWeekStart);
-      if (currentTasks.length === 0) {
+      if (syncRes.totalEvents === 0) {
         setSyncInfo('Calendar connected (0 tasks found for this week)');
       } else {
-        setSyncInfo(`${currentTasks.length} task(s) analyzed for this week`);
+        setSyncInfo(`${syncRes.totalEvents} task(s) synced for this week`);
       }
     } catch (error) {
       console.error('Calendar connection error:', error);
@@ -156,12 +157,11 @@ export default function BaselineScreen() {
   const handleContinue = async () => {
     setSaving(true);
     try {
-      // Sync and analyze calendar tasks for current week
-      await syncAndAnalyzeCalendar();
-      const currentTasks = await getTaskAnalyses(currentWeekStart);
+      // AI analysis only starts work when user clicks continue to dashboard
+      const analyzedTasks = await analyzeCurrentWeekTasks(currentWeekStart);
 
-      if (currentTasks.length > 0) {
-        setTasksToReview(currentTasks);
+      if (analyzedTasks && analyzedTasks.length > 0) {
+        setTasksToReview(analyzedTasks);
         setShowReviewModal(true);
         setSaving(false);
         return;
@@ -189,6 +189,7 @@ export default function BaselineScreen() {
       for (const t of tasksToReview) {
         await approveTaskAnalysis(t.id, true);
       }
+      await recomputeCurrentWeekDerivedData(currentWeekStart);
       await saveSelfReport(Math.round(stress), null);
       await markOnboarded();
       setShowReviewModal(false);

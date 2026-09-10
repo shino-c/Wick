@@ -175,6 +175,18 @@ function calculateStressScore(priority: string, category: string, hours: number)
 
 /* ── Public AI API Functions ──────────────────────────────────────────────── */
 
+export function normalizeCategory(cat?: string): string {
+  if (!cat) return 'academic';
+  const lower = cat.toLowerCase().trim();
+  if (lower.includes('acad') || lower.includes('study') || lower.includes('exam') || lower.includes('assign') || lower.includes('class') || lower.includes('course') || lower.includes('homework')) return 'academic';
+  if (lower.includes('work') || lower.includes('job') || lower.includes('meet') || lower.includes('office') || lower.includes('client') || lower.includes('sprint') || lower.includes('project')) return 'work';
+  if (lower.includes('soc') || lower.includes('friend') || lower.includes('party') || lower.includes('hangout') || lower.includes('dinner') || lower.includes('lunch') || lower.includes('coffee')) return 'social';
+  if (lower.includes('phys') || lower.includes('gym') || lower.includes('health') || lower.includes('sport') || lower.includes('workout') || lower.includes('run') || lower.includes('doctor')) return 'physical';
+  if (lower.includes('ment') || lower.includes('mind') || lower.includes('meditat') || lower.includes('relax') || lower.includes('down') || lower.includes('breath') || lower.includes('sleep')) return 'mental';
+  if (lower.includes('errand') || lower.includes('chore') || lower.includes('clean') || lower.includes('shop') || lower.includes('buy') || lower.includes('grocer') || lower.includes('misc') || lower.includes('other')) return 'errands';
+  return 'academic';
+}
+
 /**
  * Batched analysis of calendar events for the week.
  * Analyzes title, category, priority, duration, day, capacity hours, stress score, and ranks them.
@@ -189,17 +201,12 @@ export async function analyzeCalendarTasks(
   const prompt = `Analyze these ${events.length} calendar events for the current week. Return a JSON array with:
   - id: matching event id
   - title: clear, concise task title
-  - category: a short, descriptive category name (dynamically determined based on the event context, but reuse existing category names where applicable to keep the total number of unique categories under 6)
+  - category: one of ["academic", "work", "social", "physical", "mental", "errands"]
   - priority: one of ["high", "medium", "low"]
   - estimated_duration_hours: number (0.5 to 8)
   - stress_score: number (0 to 100)
   - rank: number (1 is highest priority/urgency)
   - ai_reasoning: short sentence explaining why this task has this rank and priority
-
-  Guidelines for category:
-  - Do not use a fixed list of categories.
-  - Invent intuitive, concise category names (1-2 words, e.g., "Engineering", "Health", "Social") as needed.
-  - Group similar events together by intentionally reusing category names across multiple items instead of creating a new category for every single event.
 
 Events: ${JSON.stringify(events.map(e => ({ id: e.id, title: e.title, start: e.startDate, end: e.endDate })))}
 
@@ -216,11 +223,12 @@ OUTPUT STRICT VALID JSON ONLY (no markdown fences, just [ ... ]).`;
           const original = events.find(e => e.id === item.id) || events[idx];
           const start = original ? new Date(original.startDate) : new Date();
           const end = original?.endDate ? new Date(original.endDate) : undefined;
+          const category = normalizeCategory(item.category);
           return {
             id: item.id || `task-${idx}-${Date.now()}`,
             title: item.title || original?.title || 'Untitled Task',
-            category: item.category || 'academic',
-            priority: item.priority || 'medium',
+            category,
+            priority: (item.priority === 'high' || item.priority === 'low' ? item.priority : 'medium') as 'high' | 'medium' | 'low',
             estimated_duration_hours: Number(item.estimated_duration_hours) || 1,
             scheduled_date: start.toISOString().split('T')[0],
             scheduled_start_time: start.toTimeString().slice(0, 5),
@@ -305,16 +313,24 @@ export async function analyzeWeeklyCapacity(
   const capacityPct = Math.round((usedCapacityRounded / totalCapacityHours) * 100);
   const overloadWarning = capacityPct >= 85;
 
-  // Calculate category breakdown percentages
-  const catHours: Record<string, number> = {};
+  // Calculate category breakdown percentages across standard categories
+  const standardCategories = ['academic', 'work', 'social', 'physical', 'mental', 'errands'];
+  const catHours: Record<string, number> = {
+    academic: 0,
+    work: 0,
+    social: 0,
+    physical: 0,
+    mental: 0,
+    errands: 0,
+  };
   for (const t of tasks) {
-    const c = t.category || 'academic';
+    const c = normalizeCategory(t.category);
     catHours[c] = (catHours[c] || 0) + (Number(t.estimated_duration_hours) || 1);
   }
 
   const breakdown: Record<string, number> = {};
-  for (const [c, h] of Object.entries(catHours)) {
-    breakdown[c] = usedCapacityHours > 0 ? Math.round((h / usedCapacityHours) * 100) : 0;
+  for (const c of standardCategories) {
+    breakdown[c] = usedCapacityHours > 0 ? Math.round(((catHours[c] || 0) / usedCapacityHours) * 100) : 0;
   }
 
   // Composite weekly stress score
@@ -336,8 +352,10 @@ export async function analyzeWeeklyCapacity(
   }
 
   const now = new Date();
+  const day = now.getDay();
+  const diff = now.getDate() - day + (day === 0 ? -6 : 1);
   const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - now.getDay() + 1);
+  weekStart.setDate(diff);
 
   return {
     week_start: weekStart.toISOString().split('T')[0],
@@ -381,10 +399,11 @@ OUTPUT STRICT JSON ONLY.`;
       const clean = rawAi.trim().replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
       const parsed = JSON.parse(clean);
       if (parsed && parsed.title) {
+        const category = normalizeCategory(parsed.category);
         return {
           title: parsed.title,
-          category: parsed.category || 'academic',
-          priority: parsed.priority || 'medium',
+          category,
+          priority: (parsed.priority === 'high' || parsed.priority === 'low' ? parsed.priority : 'medium') as 'high' | 'medium' | 'low',
           estimated_duration_hours: Number(parsed.estimated_duration_hours) || 1,
           scheduled_date: parsed.scheduled_date || new Date().toISOString().split('T')[0],
           scheduled_start_time: parsed.scheduled_start_time || '09:00',
