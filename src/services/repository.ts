@@ -29,13 +29,13 @@ import type {
   WorkloadItem
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
-import { toISODate } from '@/services/dateUtils';
 import {
   addEventToDeviceCalendar,
   deleteEventFromDeviceCalendar,
   syncCalendarEvents,
   updateEventOnDeviceCalendar,
 } from '@/services/calendarSync';
+import { toISODate } from '@/services/dateUtils';
 import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
 import { PPGService, type PPGResult, type StressClassification } from './ppgService';
 
@@ -2108,10 +2108,33 @@ export async function getGardenItems(): Promise<GardenItem[]> {
       emoji: r.emoji,
       kind: r.kind,
       placedAt: r.created_at ?? r.placed_at,
+      position: r.position ?? undefined,
     }));
   }
   const db = await readDb();
   return db.gardenItems ?? [];
+}
+
+/** Updates the position of a garden item (drag-to-decorate). */
+export async function updateGardenItemPosition(
+  itemId: string,
+  position: { x: number; y: number }
+): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return;
+    await supabase
+      .from('garden_items')
+      .update({ position })
+      .eq('id', itemId)
+      .eq('user_id', userId);
+    return;
+  }
+  await writeDb((db) => {
+    db.gardenItems = (db.gardenItems ?? []).map((item) =>
+      item.id === itemId ? { ...item, position } : item
+    );
+  });
 }
 
 /** Spends seeds on a catalogue item and adds it to the garden. */
@@ -2124,9 +2147,12 @@ export async function purchaseGardenItem(
     if (!userId) throw new Error('Sign in to grow your garden.');
     const wallet = await getGardenWallet();
     if (wallet.seeds < cost) throw new Error('Not enough seeds yet. Complete a recovery activity to earn more.');
+    // Default position: grid layout based on existing item count
+    const existing = await getGardenItems();
+    const position = defaultPositionForIndex(existing.length);
     const { data, error } = await supabase
       .from('garden_items')
-      .insert({ user_id: userId, item_key: item.key, name: item.name, emoji: item.emoji, kind: item.kind })
+      .insert({ user_id: userId, item_key: item.key, name: item.name, emoji: item.emoji, kind: item.kind, position })
       .select()
       .single();
     if (error) throw error;
@@ -2138,6 +2164,7 @@ export async function purchaseGardenItem(
       emoji: data.emoji,
       kind: data.kind,
       placedAt: data.created_at,
+      position: data.position ?? position,
     };
   }
   let created!: GardenItem;
@@ -2152,10 +2179,22 @@ export async function purchaseGardenItem(
       emoji: item.emoji,
       kind: item.kind,
       placedAt: new Date().toISOString(),
+      position: defaultPositionForIndex(db.gardenItems?.length ?? 0),
     };
     db.gardenItems = [...(db.gardenItems ?? []), created];
   });
   return created;
+}
+
+/** Compute a default grid position for the nth garden item (0-indexed). */
+function defaultPositionForIndex(index: number): { x: number; y: number } {
+  const cols = 4;
+  const col = index % cols;
+  const row = Math.floor(index / cols);
+  // Spread items across the garden area (10% margin, evenly spaced)
+  const x = 10 + col * (80 / (cols - 1 || 1));
+  const y = 10 + row * 25;
+  return { x, y };
 }
 
 /** Gives the very first starter item when the garden is empty. */
@@ -2166,9 +2205,10 @@ export async function ensureStarterGardenItem(): Promise<GardenItem | null> {
     const items = await getGardenItems();
     if (items.length > 0) return null;
     await earnSeeds(20);
+    const position = { x: 50, y: 50 };
     const { data, error } = await supabase
       .from('garden_items')
-      .insert({ user_id: userId, item_key: 'starter', name: 'Your first sprout', emoji: '🌱', kind: 'plant' })
+      .insert({ user_id: userId, item_key: 'starter', name: 'Your first sprout', emoji: '🌱', kind: 'plant', position })
       .select()
       .single();
     if (error) throw error;
@@ -2179,6 +2219,7 @@ export async function ensureStarterGardenItem(): Promise<GardenItem | null> {
       emoji: data.emoji,
       kind: data.kind,
       placedAt: data.created_at,
+      position: data.position ?? position,
     };
   }
   const db = await readDb();
@@ -2193,6 +2234,7 @@ export async function ensureStarterGardenItem(): Promise<GardenItem | null> {
       emoji: '🌱',
       kind: 'plant',
       placedAt: new Date().toISOString(),
+      position: { x: 50, y: 50 },
     };
     inner.gardenItems = [created];
   });

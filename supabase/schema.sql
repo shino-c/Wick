@@ -948,6 +948,8 @@ create table if not exists garden_items (
   name text not null,
   emoji text not null,
   kind text not null check (kind in ('plant', 'flower', 'pet', 'decoration')),
+  /** Relative position in garden as jsonb {x,y} (0-100%). Null = use default layout. */
+  position jsonb,
   created_at timestamptz not null default now()
 );
 

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	ActivityIndicator,
 	Modal,
+	PanResponder,
 	Pressable,
 	ScrollView,
 	StyleSheet,
@@ -35,6 +36,7 @@ import {
 	getGardenWallet,
 	purchaseGardenItem,
 	toggleChallenge,
+	updateGardenItemPosition,
 } from "@/services/repository";
 import {
 	ensureStepPermission,
@@ -87,11 +89,92 @@ export default function RecoveryScreen() {
 	const [toast, setToast] = useState<string | null>(null);
 	const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+	// Garden drag-to-position
+	const gardenSizeRef = useRef({ width: 300, height: 150 });
+
 	const showToast = useCallback((message: string) => {
 		setToast(message);
 		if (toastTimer.current) clearTimeout(toastTimer.current);
 		toastTimer.current = setTimeout(() => setToast(null), 2400);
 	}, []);
+
+/** A single draggable garden item. Each item owns its own PanResponder. */
+    const DraggableItem = useCallback(
+        ({ item }: { item: GardenItem }) => {
+            const startPosRef = useRef(item.position ?? { x: 50, y: 50 });
+            const [currentPos, setCurrentPos] = useState(item.position ?? { x: 50, y: 50 });
+
+            useEffect(() => {
+                const newPos = item.position ?? { x: 50, y: 50 };
+                setCurrentPos(newPos);
+            }, [item.position?.x, item.position?.y]);
+
+            const responder = useMemo(
+                () =>
+                    PanResponder.create({
+                        onStartShouldSetPanResponder: () => true,
+                        onMoveShouldSetPanResponder: () => true,
+                        onStartShouldSetPanResponderCapture: () => true,
+                        onMoveShouldSetPanResponderCapture: () => true,
+                        onPanResponderTerminationRequest: () => false,
+                        onShouldBlockNativeResponder: () => true,
+                        onPanResponderGrant: () => {
+                            startPosRef.current = item.position ?? { x: 50, y: 50 };
+                        },
+                        onPanResponderMove: (_evt, gesture) => {
+                            // 获取容器实际宽高，若未加载完给个默认兜底高度防除以零
+                            const width = gardenSizeRef.current.width || 300;
+                            const height = gardenSizeRef.current.height || 200;
+                            
+                            const newX = startPosRef.current.x + (gesture.dx / width) * 100;
+                            const newY = startPosRef.current.y + (gesture.dy / height) * 100;
+                            
+                            const cx = Math.max(0, Math.min(100, newX));
+                            const cy = Math.max(0, Math.min(100, newY));
+                            
+                            setCurrentPos({ x: cx, y: cy });
+                        },
+                        onPanResponderRelease: (_evt, gesture) => {
+                            const width = gardenSizeRef.current.width || 300;
+                            const height = gardenSizeRef.current.height || 200;
+
+                            const newX = startPosRef.current.x + (gesture.dx / width) * 100;
+                            const newY = startPosRef.current.y + (gesture.dy / height) * 100;
+                            const cx = Math.max(0, Math.min(100, newX));
+                            const cy = Math.max(0, Math.min(100, newY));
+
+                            const finalPos = { x: cx, y: cy };
+                            setCurrentPos(finalPos);
+
+                            setGarden((prev) =>
+                                prev.map((g) => (g.id === item.id ? { ...g, position: finalPos } : g))
+                            );
+                            updateGardenItemPosition(item.id, finalPos);
+                        },
+                    }),
+                [item.id, item.position, updateGardenItemPosition]
+            );
+
+            return (
+                <View
+                    {...responder.panHandlers}
+                    style={[
+                        styles.plant,
+                        {
+                            position: 'absolute',
+                            left: `${currentPos.x}%`,
+                            top: `${currentPos.y}%`,
+                            transform: [{ translateX: -17 }, { translateY: -17 }],
+                            zIndex: 99,
+                        },
+                    ]}
+                >
+                    <Emoji size={34}>{item.emoji}</Emoji>
+                </View>
+            );
+        },
+        [updateGardenItemPosition]
+    );
 
 	const load = useCallback(async () => {
 		setLoading(true);
@@ -241,7 +324,15 @@ export default function RecoveryScreen() {
 							</Row>
 						</View>
 
-						<View style={styles.grass}>
+						<View
+							style={styles.grass}
+							onLayout={(e) => {
+								const { width, height } = e.nativeEvent.layout;
+								if (width > 0 && height > 0) {
+									gardenSizeRef.current = { width, height };
+								}
+							}}
+						>
 							{garden.length === 0 ? (
 								<View style={styles.emptyGarden}>
 									<Emoji size={46}>🌱</Emoji>
@@ -252,18 +343,9 @@ export default function RecoveryScreen() {
 								</View>
 							) : (
 								<View style={styles.gardenBed}>
-									<View style={styles.rowGap}>
-										{garden.map((item) => (
-											<View key={item.id} style={styles.plant}>
-												<Emoji size={34}>{item.emoji}</Emoji>
-											</View>
-										))}
-									</View>
-									<View style={styles.gardenBase}>
-										<Emoji size={20}>🪨</Emoji>
-										<Emoji size={20}>🌿</Emoji>
-										<Emoji size={18}>🌼</Emoji>
-									</View>
+									{garden.map((item) => (
+										<DraggableItem key={item.id} item={item} />
+									))}
 								</View>
 							)}
 						</View>
@@ -281,7 +363,7 @@ export default function RecoveryScreen() {
 					{/* TODAY'S PLAN */}
 					<Card>
 						<Row>
-							<Badge label="Today" fg={colors.calm} bg={colors.calmWash} />
+							<Badge label="Today's Recovery Plan" fg={colors.calm} bg={colors.calmWash} />
 							{doneToday > 0 && (
 								<Txt v="small" color={colors.inkFaint} style={{ marginLeft: spacing(2) }}>
 									{doneToday} small pause{doneToday === 1 ? '' : 's'} today
@@ -292,11 +374,10 @@ export default function RecoveryScreen() {
 						<Txt
 							center
 							v="body"
-							color={colors.ink}
-							numberOfLines={1}
+							color={colors.inkSoft}
 							style={[styles.gentleLine, { marginTop: spacing(3), lineHeight: 20, fontSize: 12 }]}
 						>
-							{plan?.note ?? 'Here are ideas, never obligations.'}
+							{plan?.note ?? 'Here are ideas, never obligations.'} Finish a plan to earn 10 seeds!
 						</Txt>
 
 						<View style={styles.slots}>
@@ -524,68 +605,74 @@ function PlanDetailModal({
 	const completed = session?.status === "completed";
 
 	return (
-		<Modal visible transparent animationType="slide" onRequestClose={onClose}>
+		<Modal visible transparent animationType="fade" onRequestClose={onClose}>
 			<Pressable style={styles.sheetBackdrop} onPress={onClose}>
-				<Pressable style={styles.sheet} onPress={(event) => event.stopPropagation()}>
-					<View style={styles.sheetHandle} />
-
-					<Row style={styles.sheetHeader}>
-						<View style={styles.sheetEmoji}>
-							<Emoji size={34}>{(suggestion as RecoverySuggestion).emoji}</Emoji>
-						</View>
-						<View style={{ flex: 1, minWidth: 0 }}>
-							<Txt v="title" color={colors.ink} numberOfLines={2}>
-								{suggestion.title}
-							</Txt>
-						</View>
-						<Pressable
-							accessibilityLabel="Close plan"
-							onPress={onClose}
-							style={({ pressed }) => [styles.sheetClose, pressed && styles.pressed]}
-						>
-							<Txt v="heading" color={colors.inkFaint}>✕</Txt>
-						</Pressable>
-					</Row>
-
-					{suggestion.detail ? (
-						<Txt v="body" color={colors.ink} style={[styles.gentleLine, { marginTop: spacing(3) }]}>
-							{suggestion.detail}
-						</Txt>
-					) : null}
-
-					<Row gap={2} style={[styles.miniChips, { marginTop: spacing(2) }]}>
-						<View style={styles.miniChip}>
-							<Txt v="small" color={colors.inkSoft}>
-								🎯 {formatTarget(suggestion)}
-							</Txt>
-						</View>
-						<View style={styles.miniChip}>
-							<Txt v="small" color={colors.inkSoft}>
-								🕒 {formatMin(suggestion.minutes)}
-							</Txt>
-						</View>
-						{suggestion.slot ? (
-							<View style={styles.miniChip}>
-								<Txt v="small" color={colors.calm}>
-									⏳ {suggestion.slot.start}
+				<Pressable
+					style={styles.sheet}
+					onPress={(event) => event.stopPropagation()}
+				>
+					<ScrollView
+						showsVerticalScrollIndicator={false}
+						contentContainerStyle={styles.sheetScrollContent}
+					>
+						<Row style={styles.sheetHeader}>
+							<View style={styles.sheetEmoji}>
+								<Emoji size={34}>{(suggestion as RecoverySuggestion).emoji}</Emoji>
+							</View>
+							<View style={{ flex: 1, minWidth: 0 }}>
+								<Txt v="title" color={colors.ink} numberOfLines={2}>
+									{suggestion.title}
 								</Txt>
 							</View>
+							<Pressable
+								accessibilityLabel="Close plan"
+								onPress={onClose}
+								style={({ pressed }) => [styles.sheetClose, pressed && styles.pressed]}
+							>
+								<Txt v="heading" color={colors.inkFaint}>✕</Txt>
+							</Pressable>
+						</Row>
+
+						{suggestion.detail ? (
+							<Txt v="body" color={colors.ink} style={[styles.gentleLine, { marginTop: spacing(3) }]}>
+								{suggestion.detail}
+							</Txt>
 						) : null}
-					</Row>
 
-					{suggestion.reason ? (
-						<Txt v="small" color={colors.inkFaint} style={{ marginTop: spacing(2), lineHeight: 17 }}>
-							{suggestion.reason}
-						</Txt>
-					) : null}
+						<Row gap={2} style={[styles.miniChips, { marginTop: spacing(2) }]}>
+							<View style={styles.miniChip}>
+								<Txt v="small" color={colors.inkSoft}>
+									🎯 {formatTarget(suggestion)}
+								</Txt>
+							</View>
+							<View style={styles.miniChip}>
+								<Txt v="small" color={colors.inkSoft}>
+									🕒 {formatMin(suggestion.minutes)}
+								</Txt>
+							</View>
+							{suggestion.slot ? (
+								<View style={styles.miniChip}>
+									<Txt v="small" color={colors.calm}>
+										⏳ {suggestion.slot.start}
+									</Txt>
+								</View>
+							) : null}
+						</Row>
 
-					{completed ? (
-						<CompletedPlanCard suggestion={suggestion} session={session} onClose={onClose} />
-					) : suggestion.targetType === "steps" ? (
-						<StepTracker suggestion={suggestion} session={session} onCompleted={onPlanChanged} />
-					) : (
-						<MinuteTracker suggestion={suggestion} session={session} onCompleted={onPlanChanged} />
-					)}
+						{suggestion.reason ? (
+							<Txt v="small" color={colors.inkFaint} style={{ marginTop: spacing(2), lineHeight: 17 }}>
+								{suggestion.reason}
+							</Txt>
+						) : null}
+
+						{completed ? (
+							<CompletedPlanCard suggestion={suggestion} session={session} onClose={onClose} />
+						) : suggestion.targetType === "steps" ? (
+							<StepTracker suggestion={suggestion} session={session} onCompleted={onPlanChanged} />
+						) : (
+							<MinuteTracker suggestion={suggestion} session={session} onCompleted={onPlanChanged} />
+						)}
+					</ScrollView>
 				</Pressable>
 			</Pressable>
 		</Modal>
@@ -928,12 +1015,20 @@ function ShopModal({
 	);
 
 	return (
-		<Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-			<Pressable style={styles.sheetBackdrop} onPress={onClose}>
-				<Pressable style={[styles.sheet, styles.sheetTall]} onPress={(event) => event.stopPropagation()}>
-					<View style={styles.sheetHandle} />
+		<Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+		<View style={styles.sheetBackdrop}>
+			<Pressable
+				style={StyleSheet.absoluteFill}
+				onPress={onClose}
+			/>
 
-					<Row style={styles.sheetHeader}>
+			<View
+				style={[styles.sheet, styles.sheetTall]}
+				onStartShouldSetResponder={() => false}
+				onMoveShouldSetResponder={() => false}
+		>
+
+					<Row style={[styles.sheetHeader, { justifyContent: 'space-between', width: '100%' }]}>
 						<Badge label="Shop" fg={colors.warn} bg={colors.warnWash} />
 						<Row style={styles.walletPill}>
 							<Emoji size={16}>🌱</Emoji>
@@ -950,11 +1045,16 @@ function ShopModal({
 						</Pressable>
 					</Row>
 
-					<Txt v="small" color={colors.inkFaint} style={{ marginTop: spacing(1) }}>
+					<Txt v="small" center color={colors.inkFaint} style={{ marginTop: spacing(1)}}>
 						Spend seeds to grow your space
 					</Txt>
 
-					<ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+					<ScrollView
+						style={{ flex: 1, marginTop: spacing(3) }}
+						contentContainerStyle={{ paddingBottom: spacing(10) }}
+						showsVerticalScrollIndicator={true}
+						nestedScrollEnabled={true}
+					>
 						<View style={styles.shopGrid}>
 							{GARDEN_CATALOG.filter((item) => item.key !== 'starter').map((item) => {
 								const affordable = (wallet?.seeds ?? 0) >= item.seeds;
@@ -1029,8 +1129,8 @@ function ShopModal({
 							)}
 						</View>
 					</ScrollView>
-				</Pressable>
-			</Pressable>
+				</View>
+			</View>
 		</Modal>
 	);
 }
@@ -1039,6 +1139,7 @@ const styles = StyleSheet.create({
 	scrollContent: { padding: spacing(5), paddingBottom: spacing(10) },
 	center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing(6), gap: spacing(2) },
 
+	cardTitle: { fontSize: 18, fontWeight: '700', color: colors.ink},
 	gardenCard: { padding: 0, overflow: 'hidden', marginBottom: spacing(4) },
 	sky: {
 		backgroundColor: '#FDF3C8',
@@ -1063,14 +1164,10 @@ const styles = StyleSheet.create({
 		borderTopColor: colors.line,
 		minHeight: 150,
 	},
-	gardenBed: { gap: spacing(2) },
-	rowGap: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing(2) },
+	gardenBed: { position: 'relative' },
 	plant: {
-		backgroundColor: colors.surface,
-		borderRadius: radius.md,
-		padding: spacing(1.5),
-		borderWidth: 1,
-		borderColor: colors.line,
+		/* No background — the emoji floats freely in the garden for drag-to-decorate. */
+		padding: spacing(0.5),
 	},
 	gardenBase: { flexDirection: 'row', gap: spacing(2), opacity: 0.7 },
 	emptyGarden: { alignItems: 'center', gap: spacing(2), paddingVertical: spacing(3) },
@@ -1223,29 +1320,27 @@ const styles = StyleSheet.create({
 	},
 	playButtonText: { fontWeight: '700' },
 
-	/* Sheets / modals */
+	/* Sheets / modals — centered on screen with internal scroll for long content */
 	sheetBackdrop: {
 		flex: 1,
 		backgroundColor: 'rgba(34,32,28,0.22)',
-		justifyContent: 'flex-end',
+		justifyContent: 'center',
+		alignItems: 'center',
 	},
 	sheet: {
 		backgroundColor: colors.cream,
-		borderTopLeftRadius: 28,
-		borderTopRightRadius: 28,
+		borderRadius: radius.lg,
 		padding: spacing(5),
-		paddingBottom: spacing(8),
-		maxHeight: '86%',
+		maxWidth: '92%',
+		width: 420,
+		maxHeight: '80%',
 	},
-	sheetTall: { height: '82%' },
+	sheetTall: { height: '80%', width: '92%' },
 	sheetHandle: {
-		alignSelf: 'center',
-		width: 44,
-		height: 5,
-		borderRadius: 3,
-		backgroundColor: colors.lineStrong,
-		marginBottom: spacing(4),
+		/* No handle needed for centered sheet */
+		display: 'none',
 	},
+	sheetScrollContent: { paddingBottom: spacing(6) },
 	sheetHeader: { alignItems: 'center', gap: spacing(3) },
 	sheetEmoji: {
 		width: 58,

@@ -939,7 +939,7 @@ export default function Home() {
       </View>
 
       {/* ── AI REVIEW MODAL (Triggered for newly synced weekly tasks) ─────── */}
-      <Modal visible={showReviewModal} transparent animationType="slide">
+      <Modal visible={showReviewModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
@@ -1113,7 +1113,7 @@ export default function Home() {
       </Modal>
 
       {/* ── QUICK ADD NLP CHATBOT MODAL (2-Way Calendar Sync) ─────────────── */}
-      <Modal visible={showAddModal} transparent animationType="slide">
+      <Modal visible={showAddModal} transparent animationType="fade">
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={{ flex: 1 }}
@@ -1453,9 +1453,9 @@ const styles = StyleSheet.create({
   resyncSubtext: { fontSize: 11, color: '#713F12' },
   resyncButton: { backgroundColor: '#854D0E', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
   resyncButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
-  /* Modals */
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '85%' },
+  /* Modals — centered on screen with internal scroll for long content */
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
+  modalContent: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, maxHeight: '85%', maxWidth: '92%', width: 420 },
   modalScrollContent: { paddingBottom: 12 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },

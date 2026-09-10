@@ -1,4 +1,4 @@
-import * as Haptics from "expo-haptics";
+﻿import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -10,10 +10,14 @@ import {
 	View,
 } from "react-native";
 import { NavBar, Screen } from "../components/base";
+import { earnSeeds } from "../services/repository";
 import { recordGameMinute } from "../services/recoveryService";
 
 const BUBBLE_COUNT = 25;
 const REWARD_SECONDS = 60;
+/** Play for 30 seconds, earn 5 seeds (one reward per session). */
+const SEED_REWARD_SECONDS = 30;
+const SEED_REWARD_AMOUNT = 5;
 
 const PALETTE = [
 	{
@@ -154,11 +158,13 @@ export default function BubblePopScreen() {
 
 	const [popped, setPopped] = useState<number[]>(INITIAL_POPPED);
 	const [elapsed, setElapsed] = useState(0);
-	const [rewardedMinutes, setRewardedMinutes] = useState(0);
+		const [rewardedMinutes, setRewardedMinutes] = useState(0);
 	const [hapticsOn, setHapticsOn] = useState(true);
+	const [seedsEarned, setSeedsEarned] = useState(false);
 
 	const rewardedMinutesRef = useRef(0);
 	const rewardInFlightRef = useRef(false);
+	const seedsAwardedRef = useRef(false);
 
 	useEffect(() => {
 		const timer = setInterval(() => {
@@ -188,7 +194,20 @@ export default function BubblePopScreen() {
 			.finally(() => {
 				rewardInFlightRef.current = false;
 			});
-	}, [elapsed, rewardedMinutes]);
+		}, [elapsed, rewardedMinutes]);
+
+	useEffect(() => {
+		if (elapsed >= SEED_REWARD_SECONDS && !seedsAwardedRef.current) {
+			seedsAwardedRef.current = true;
+			earnSeeds(SEED_REWARD_AMOUNT)
+				.then(() => {
+					setSeedsEarned(true);
+				})
+				.catch(() => {
+					/* seeds best-effort: still show milestone */
+				});
+		}
+	}, [elapsed]);
 
 	const popBubble = async (index: number) => {
 		setPopped((current) =>
@@ -264,8 +283,8 @@ export default function BubblePopScreen() {
 				</View>
 
 				<Text style={styles.reminder}>
-					Play Bubble Pop for at least 1 minute to add recovery
-					capacity.
+					Play Bubble Pop for at least 30 seconds to add recovery
+					capacity and earn seeds for the garden.
 				</Text>
 
 				{/* ========================= */}
@@ -357,6 +376,35 @@ export default function BubblePopScreen() {
 					</Text>
 				</View>
 			</ScrollView>
+
+			<View style={styles.rewardCard}>
+				<View style={styles.rewardHeader}>
+					<View>
+						<Text style={styles.rewardLabel}>SEEDS FOR THE GARDEN</Text>
+						<Text style={styles.rewardTitle}>
+							{seedsEarned ? '+5 seeds earned' : 'Play 30s to grow seeds'}
+						</Text>
+					</View>
+					{seedsEarned ? (<Text style={styles.rewardCheck}>✔</Text>) : null}
+				</View>
+				<View style={styles.rewardTrack}>
+					<View
+						style={[
+							styles.rewardFill,
+							{
+								width: `${(Math.min(elapsed, SEED_REWARD_SECONDS) /
+									SEED_REWARD_SECONDS) *
+								100}%`,
+							},
+						]}
+					/>
+				</View>
+				<Text style={styles.rewardText}>
+					{seedsEarned
+						? '5 seeds added — check your garden!'
+						: `${SEED_REWARD_SECONDS - elapsed}s until +5 seeds`}
+				</Text>
+			</View>
 		</Screen>
 	);
 }

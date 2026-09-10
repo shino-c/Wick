@@ -375,5 +375,7 @@ export interface GardenItem {
   emoji: string;
   kind: 'plant' | 'flower' | 'pet' | 'decoration';
   placedAt?: string;
+  /** Relative position in the garden (0-100% of width/height). Used for drag-to-decorate. */
+  position?: { x: number; y: number };
 }
 

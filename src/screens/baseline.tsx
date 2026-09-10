@@ -471,7 +471,7 @@ export default function BaselineScreen() {
       </View>
 
       {/* ── AI TASK REVIEW MODAL (Triggered on Continue to Dashboard) ──────── */}
-      <Modal visible={showReviewModal} transparent animationType="slide">
+      <Modal visible={showReviewModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
@@ -788,9 +788,9 @@ const styles = StyleSheet.create({
   pressedButton: { opacity: 0.9, transform: [{ scale: 0.98 }] },
   disabledButton: { opacity: 0.6 },
   disabledContinue: { backgroundColor: '#A89F91' },
-  /* Modal Styles */
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '85%' },
+  /* Modal Styles — centered on screen with internal scroll for long content */
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
+  modalContent: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, maxHeight: '85%', maxWidth: '92%', width: 420 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
   modalSubtitle: { fontSize: 12, color: '#6B7280', marginTop: 2 },
