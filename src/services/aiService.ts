@@ -173,6 +173,38 @@ function calculateStressScore(priority: string, category: string, hours: number)
   return Math.max(10, Math.min(95, base));
 }
 
+function parseEventDate(
+  value: string | undefined,
+  eventId: string,
+  field: string
+): Date {
+  if (!value) {
+    console.error(`Invalid ${field} date for calendar event ${eventId}:`, value);
+    return new Date();
+  }
+
+  // Normalize malformed AI output:
+  // 2026-09-11T15:00:00:00 -> 2026-09-11T15:00:00
+  const normalized = value.replace(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}):00$/,
+    "$1"
+  );
+
+  const parsed = new Date(normalized);
+
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
+  console.error(
+    `Invalid ${field} date for calendar event ${eventId}:`,
+    value
+  );
+
+  return new Date();
+}
+
+
 /* ── Public AI API Functions ──────────────────────────────────────────────── */
 
 export function normalizeCategory(cat?: string): string {
@@ -221,8 +253,11 @@ OUTPUT STRICT VALID JSON ONLY (no markdown fences, just [ ... ]).`;
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed.map((item, idx) => {
           const original = events.find(e => e.id === item.id) || events[idx];
-          const start = original ? new Date(original.startDate) : new Date();
-          const end = original?.endDate ? new Date(original.endDate) : undefined;
+          const eventId = original?.id || item.id || `task-${idx}`;
+          const start = parseEventDate(original?.startDate, eventId, 'start');
+          const end = original?.endDate
+            ? parseEventDate(original.endDate, eventId, 'end')
+            : undefined;
           const category = normalizeCategory(item.category);
           return {
             id: item.id || `task-${idx}-${Date.now()}`,
@@ -250,8 +285,8 @@ OUTPUT STRICT VALID JSON ONLY (no markdown fences, just [ ... ]).`;
 
   // Fallback: Deterministic NLP Heuristic Engine
   const mapped = events.map((ev, index) => {
-    const start = new Date(ev.startDate);
-    const end = ev.endDate ? new Date(ev.endDate) : null;
+    const start = parseEventDate(ev.startDate, ev.id, 'start');
+    const end = ev.endDate ? parseEventDate(ev.endDate, ev.id, 'end') : null;
     const durationHours =
       start && end && end.getTime() > start.getTime()
         ? Math.max(0.5, Math.round(((end.getTime() - start.getTime()) / (1000 * 60 * 60)) * 10) / 10)
