@@ -407,6 +407,40 @@ export async function analyzeWeeklyCapacity(
 }
 
 /**
+ * Monday of the current week, as an ISO date (local timezone).
+ */
+function currentWeekStartISO(): string {
+  const now = new Date();
+  const day = now.getDay();
+  const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+  now.setDate(diff);
+  return toISODate(now);
+}
+
+/** Sunday of the week that starts on `weekStartISO`, as an ISO date. */
+function weekEndISO(weekStartISO: string): string {
+  const d = new Date(weekStartISO + 'T00:00:00');
+  d.setDate(d.getDate() + 6);
+  return toISODate(d);
+}
+
+/**
+ * Clamps an ISO date into the current week (Mon–Sun).
+ *
+ * The database stores a single week of tasks and the home dashboard only reads
+ * the current week, so a parser resolving "next Friday" or an out-of-range date
+ * must never produce a task the app cannot persist or display. Dates before the
+ * week pull up to Monday; dates after it pull back to Sunday.
+ */
+function clampToCurrentWeek(iso: string, weekStart = currentWeekStartISO()): string {
+  if (!iso) return weekStart;
+  const weekEnd = weekEndISO(weekStart);
+  if (iso < weekStart) return weekStart;
+  if (iso > weekEnd) return weekEnd;
+  return iso;
+}
+
+/**
  * Natural language parser for quick-adding tasks.
  * Example inputs: "2 assignment due Fri", "Exam Thursday 2pm", "Clean kitchen tonight".
  */
@@ -423,13 +457,16 @@ export async function parseQuickTaskNLP(
  * Example: "exam Fri 2pm, Travel Sunday, Gym 3pm" → 3 separate task objects.
  * Example: "2 assignment due Fri" → 1 task object.
  *
- * Always returns an array of at least one task.
+ * Always returns an array of at least one task. Every returned date is clamped
+ * into the current week (Mon–Sun): the database stores one week at a time and
+ * the home dashboard only reads the current week.
  */
 export async function parseQuickTasksNLP(
   input: string,
   context?: { currentWeekStart?: string }
 ): Promise<Omit<TaskAnalysis, 'id' | 'createdAt'>[]> {
   const today = new Date().toISOString().split('T')[0];
+  const weekStart = context?.currentWeekStart ?? currentWeekStartISO();
   const prompt = `Parse the following user input into one or more structured task schedule objects.
 The input may contain multiple tasks separated by commas, semicolons, or "and".
 Examples:
@@ -445,14 +482,15 @@ Return a strict JSON ARRAY (always an array, even for 1 task). Each element:
   "category": one of ["academic","work","social","physical","mental","errands"],
   "priority": one of ["high","medium","low"],
   "estimated_duration_hours": number (0.5–8),
-  "scheduled_date": "YYYY-MM-DD for this or next week",
+  "scheduled_date": "YYYY-MM-DD within THIS CURRENT WEEK ONLY (Monday to Sunday of the current week — never next week or later)",
   "scheduled_start_time": "HH:MM" or null,
   "scheduled_end_time": "HH:MM" or null,
   "stress_score": 0–100,
   "ai_reasoning": "short rationale"
 }
 
-Reference current date: ${today}
+Reference current date: ${today} (current week starts on ${weekStart}).
+CLAMP every scheduled_date into the current week ${weekStart} to ${weekEndISO(weekStart)}. Never return a date after Sunday of this week.
 OUTPUT STRICT JSON ARRAY ONLY (no markdown, just [ ... ]).`;
 
   const rawAi = await callAI(prompt, 'You are an intelligent NLP task scheduling assistant. Always return a JSON array.');
@@ -471,7 +509,7 @@ OUTPUT STRICT JSON ARRAY ONLY (no markdown, just [ ... ]).`;
             category,
             priority,
             estimated_duration_hours: hours,
-            scheduled_date: item.scheduled_date || today,
+            scheduled_date: clampToCurrentWeek(item.scheduled_date || today, weekStart),
             scheduled_start_time: item.scheduled_start_time || '09:00',
             scheduled_end_time: item.scheduled_end_time || undefined,
             capacity_hours: hours,
@@ -561,7 +599,10 @@ function heuristicParseSegment(
     category,
     priority,
     estimated_duration_hours: hours,
-    scheduled_date: toISODate(targetDate),
+    // Only the current week can be stored/shown, so a mention like "next
+    // Monday" (which resolves past this week's Sunday) is clamped back into
+    // this week's Mon–Sun window.
+    scheduled_date: clampToCurrentWeek(toISODate(targetDate)),
     scheduled_start_time: startTime,
     scheduled_end_time: endTime,
     capacity_hours: hours,

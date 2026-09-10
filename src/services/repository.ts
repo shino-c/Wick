@@ -302,6 +302,26 @@ export async function latestSelfReport(): Promise<SelfReport | null> {
   return (await readDb()).selfReports[0] ?? null;
 }
 
+/** Most recent self reports, newest first — used for per-day stress synthesis. */
+export async function listSelfReports(limit = 30): Promise<SelfReport[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('self_reports')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    return (data ?? []).map((r) => ({
+      id: r.id,
+      score: r.score,
+      rawAnswers: r.raw_answers,
+      createdAt: r.created_at,
+    }));
+  }
+  return (await readDb()).selfReports.slice(0, limit);
+}
+
 /**
  * Whether the full questionnaire has ever been completed.
  *

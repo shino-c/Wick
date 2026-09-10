@@ -24,6 +24,7 @@ import TopNavigation from '@/components/topbar';
 import type {
   CalendarConnection,
   LoadBalanceSuggestion,
+  SelfReport,
   StressScoreRow,
   TaskAnalysis,
   WeeklyCapacityAnalysis,
@@ -39,6 +40,7 @@ import {
   getCalendarConnections,
   getTaskAnalyses,
   getWeeklyCapacity,
+  listSelfReports,
   listStressScores,
   recomputeCurrentWeekDerivedData,
   syncAndAnalyzeCalendar,
@@ -95,6 +97,100 @@ const PRIORITY_COLORS: Record<string, { bg: string; border: string; text: string
   low: { bg: '#DCFCE7', border: '#BBF7D0', text: '#16A34A' },
 };
 
+const WEEKDAY_NAMES = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+];
+
+/**
+ * Builds the "Early Warning Insight" banner for the stress chart.
+ *
+ * The copy is driven by the week's peak day and never tells the user to
+ * schedule something on a day that has already passed: recovery/rest
+ * recommendations are only offered when the peak is today or still ahead.
+ */
+function buildEarlyWarningInsight(
+  dayStress: { score: number; hasData: boolean }[],
+  todayIdx: number
+): { title: string; icon: 'warning' | 'notifications-active'; urgent: boolean; text: string } {
+  const today = dayStress[todayIdx];
+  const todayIn = (today?.hasData ?? false) ? (today?.score ?? 0) : null;
+
+  const scored = dayStress
+    .map((d, i) => ({ score: d.score, i, hasData: d.hasData }))
+    .filter((d) => d.hasData);
+  const peak = scored.reduce<{ score: number; i: number } | null>(
+    (best, d) => (best === null || d.score > best.score ? { score: d.score, i: d.i } : best),
+    null
+  );
+
+  const title = 'Early Warning Insight';
+
+  // No real readings at all yet.
+  if (!peak) {
+    return {
+      title,
+      icon: 'notifications-active',
+      urgent: false,
+      text: 'Still building this week\u2019s picture. Add a few tasks or a quick check-in and the stress read gets sharper.',
+    };
+  }
+
+  const peakDay = WEEKDAY_NAMES[peak.i];
+  const peakIsToday = peak.i === todayIdx;
+  const peakIsPast = peak.i < todayIdx;
+  const urgentToday = todayIn !== null && todayIn >= 60;
+
+  // Today itself is running hot — warn about it before anything else.
+  if (urgentToday && !peakIsToday) {
+    return {
+      title,
+      icon: 'warning',
+      urgent: true,
+      text: `Today is running hot at ${todayIn}/100 while ${peakDay} peaks at ${peak.score}/100. Pull today\u2019s load back and protect some recovery time.`,
+    };
+  }
+
+  if (peak.score >= 60) {
+    if (peakIsToday) {
+      return {
+        title,
+        icon: 'warning',
+        urgent: true,
+        text: `${peakDay} load is spiking severely at ${peak.score}/100. Make sure tomorrow\u2019s schedule supports active recovery blocks.`,
+      };
+    }
+    if (peakIsPast) {
+      return {
+        title,
+        icon: 'notifications-active',
+        urgent: false,
+        text: `${peakDay} spiked at ${peak.score}/100. That day has passed \u2014 the week is lighter now, and nothing new needs scheduling.`,
+      };
+    }
+    return {
+      title,
+      icon: 'notifications-active',
+      urgent: false,
+      text: `${peakDay} is shaping up to be this week\u2019s peak at ${peak.score}/100. Build a lighter day before it and leave a recovery block after.`,
+    };
+  }
+
+  // Moderate week — gentle steer, no alarm.
+  const todayLead = urgentToday ? `Today is at ${todayIn}/100. ` : '';
+  return {
+    title,
+    icon: 'notifications-active',
+    urgent: false,
+    text: `${todayLead}This week\u2019s stress is tracking ${peak.score <= 35 ? 'calmly' : 'moderately'} \u2014 keep small recovery moments in the mix.`,
+  };
+}
+
 export default function Home() {
   const router = useRouter();
 
@@ -104,7 +200,12 @@ export default function Home() {
   const [connections, setConnections] = useState<CalendarConnection[]>([]);
   const [loadSuggestions, setLoadSuggestions] = useState<LoadBalanceSuggestion[]>([]);
   const [stressScores, setStressScores] = useState<StressScoreRow[]>([]);
+  const [selfReports, setSelfReports] = useState<SelfReport[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Stress chart interaction
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
+  const [chartWidth, setChartWidth] = useState(0);
 
   // Review Modal for Unapproved Tasks (Current Week)
   const [pendingTasks, setPendingTasks] = useState<TaskAnalysis[]>([]);
@@ -127,16 +228,18 @@ export default function Home() {
 
   const loadDashboardData = useCallback(async () => {
     try {
-      const [allTasks, currentCapacity, allConns, scores] = await Promise.all([
+      const [allTasks, currentCapacity, allConns, scores, reports] = await Promise.all([
         getTaskAnalyses(currentWeekStart),
         getWeeklyCapacity(currentWeekStart),
         getCalendarConnections(),
         listStressScores(14),
+        listSelfReports(14),
       ]);
 
       setTasks(allTasks);
       setConnections(allConns);
       setStressScores(scores);
+      setSelfReports(reports);
 
       // Always derive capacity from the real task list for this week so the
       // ring and warning reflect exactly what is scheduled, even if the stored
@@ -282,7 +385,7 @@ export default function Home() {
     if (!quickInput.trim()) return;
     setParsingNLP(true);
     try {
-      const parsed = await parseQuickTasksNLP(quickInput);
+      const parsed = await parseQuickTasksNLP(quickInput, { currentWeekStart });
       setParsedTasks(parsed);
       setEditingParsedIdx(null);
     } catch (err) {
@@ -377,35 +480,55 @@ export default function Home() {
     errands: tasks.filter((t) => (t.category === 'errands' || t.category === 'work') && t.status !== 'deferred').length,
   };
 
-  // Map real stress scores & daily task workloads to Mon-Sun for the current week
+  // ── Per-day stress synthesis (biometric + self-report + AI task stress) ──
+  // A day's stress is a weighted read pulled from the three real signals the
+  // app owns — biometric scans, self reports, and the AI's task stress/load
+  // analysis — using the same 0.4 / 0.3 / 0.3 weights as fusionService.
+  // Days without any signal still place a 0 point on the graph (nothing hidden),
+  // but hasData stays false so they never count as the week's peak.
+  const WEEK_WEIGHTS = { biometric: 0.4, selfReport: 0.3, aiLoad: 0.3 } as const;
+  const dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
   const weekStartMs = new Date(currentWeekStart + 'T00:00:00').getTime();
-  const dayScores: (number | null)[] = [null, null, null, null, null, null, null];
 
+  const avgOf = (vals: (number | null)[]) => {
+    const real = vals.filter((v): v is number => typeof v === 'number');
+    return real.length > 0 ? real.reduce((a, b) => a + b, 0) / real.length : null;
+  };
+
+  const dayStress: { score: number; hasData: boolean }[] = [];
   for (let i = 0; i < 7; i++) {
     const dayDate = new Date(weekStartMs + i * 86400000);
     const dayDateStr = dayDate.toISOString().split('T')[0];
 
-    // 1. Check for recorded biometric / fused stress scores on this day
-    const scoresOnDay = stressScores.filter((s) => {
+    // 1. Fused rows carry the recorded biometric / self components
+    const rowsOnDay = stressScores.filter((s) => {
       const d = new Date(s.createdAt).toISOString().split('T')[0];
       return d === dayDateStr;
     });
+    const biometric = avgOf(rowsOnDay.map((s) => s.biometricScore));
+    const selfFromRows = avgOf(rowsOnDay.map((s) => s.selfReportScore));
+    const fused = avgOf(rowsOnDay.map((s) => s.fusedScore));
 
-    let dayScore: number | null = null;
-    if (scoresOnDay.length > 0) {
-      dayScore = Math.round(
-        scoresOnDay.reduce((acc, s) => acc + s.fusedScore, 0) / scoresOnDay.length
-      );
-    }
+    // Self-reports can exist even without a fused snapshot (e.g. baseline day)
+    const reportsOnDay = selfReports.filter((s) => {
+      const d = new Date(s.createdAt).toISOString().split('T')[0];
+      return d === dayDateStr;
+    });
+    const selfFromReports =
+      reportsOnDay.length > 0
+        ? reportsOnDay.reduce((a, b) => a + b.score, 0) / reportsOnDay.length
+        : null;
+    const selfScore = selfFromRows ?? selfFromReports;
 
-    // 2. Check for active tasks scheduled on this day
+    // 2. AI-analyzed stress + load from this day's tasks
     const dayTasks = tasks.filter(
       (t) =>
         t.scheduled_date === dayDateStr &&
         t.status !== 'deferred' &&
         t.status !== 'rejected'
     );
-
+    let aiLoad: number | null = null;
     if (dayTasks.length > 0) {
       const avgTaskStress =
         dayTasks.reduce((acc, t) => acc + (t.stress_score ?? 50), 0) /
@@ -414,38 +537,35 @@ export default function Home() {
         (acc, t) => acc + (t.estimated_duration_hours || 1),
         0
       );
-      const taskLoadStress = Math.min(
+      aiLoad = Math.min(
         95,
         Math.round(avgTaskStress * 0.55 + Math.min(45, dayHours * 7))
       );
-
-      if (dayScore !== null) {
-        dayScore = Math.round(dayScore * 0.5 + taskLoadStress * 0.5);
-      } else {
-        dayScore = taskLoadStress;
-      }
     }
 
-    dayScores[i] = dayScore;
-  }
+    // 3. Weighted fusion of whichever signals exist for that day
+    const signals: { value: number; weight: number }[] = [];
+    if (biometric !== null) signals.push({ value: biometric, weight: WEEK_WEIGHTS.biometric });
+    if (selfScore !== null) signals.push({ value: selfScore, weight: WEEK_WEIGHTS.selfReport });
+    if (aiLoad !== null) signals.push({ value: aiLoad, weight: WEEK_WEIGHTS.aiLoad });
 
-  // If all days are null (e.g. no measurements and no scheduled tasks), default today
-  const todayDayIdx = (new Date().getDay() + 6) % 7;
-  const hasAnyDayScore = dayScores.some((s) => s !== null);
-  if (!hasAnyDayScore) {
-    dayScores[todayDayIdx] = capacity?.stress_score ?? 50;
-  }
-
-  // Find the latest day with data for the active-day highlight
-  let lastScoredDay = -1;
-  for (let i = dayScores.length - 1; i >= 0; i--) {
-    if (dayScores[i] !== null) {
-      lastScoredDay = i;
-      break;
+    let score = 0;
+    let hasData = signals.length > 0;
+    if (signals.length > 0) {
+      const weightSum = signals.reduce((a, b) => a + b.weight, 0);
+      score = Math.round(
+        signals.reduce((a, b) => a + b.value * b.weight, 0) / weightSum
+      );
+    } else if (fused !== null) {
+      // No components were recorded, but a fused snapshot exists — trust it.
+      score = Math.round(fused);
+      hasData = true;
     }
+
+    dayStress.push({ score, hasData });
   }
 
-  // Build SVG path from available data points
+  // Build SVG path — every day gets a point (score 0 when no data)
   // Chart area: x 20..365, y 100 (score=0) to 20 (score=100)
   const chartLeft = 20;
   const chartRight = 365;
@@ -453,30 +573,27 @@ export default function Home() {
   const chartBottom = 100;
   const xStep = (chartRight - chartLeft) / 6;
 
-  const points: { x: number; y: number; score: number }[] = [];
-  for (let i = 0; i < 7; i++) {
-    const score = dayScores[i];
-    const x = chartLeft + i * xStep;
-    if (score !== null) {
-      const clampedScore = Math.max(0, Math.min(100, score));
-      const y = chartBottom - (clampedScore / 100) * (chartBottom - chartTop);
-      points.push({ x, y, score: clampedScore });
-    }
-  }
+  const points = dayStress.map((d, i) => {
+    const clampedScore = Math.max(0, Math.min(100, d.score));
+    return {
+      x: chartLeft + i * xStep,
+      y: chartBottom - (clampedScore / 100) * (chartBottom - chartTop),
+      score: clampedScore,
+      hasData: d.hasData,
+      isToday: i === todayIdx,
+    };
+  });
 
-  // Generate smooth path through the points
-  let stressPath = '';
-  let stressGradientPath = '';
-  if (points.length >= 2) {
-    const lineParts = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`);
-    stressPath = lineParts.join(' ');
-    stressGradientPath =
-      stressPath +
-      ` L ${points[points.length - 1].x} ${chartBottom} L ${points[0].x} ${chartBottom} Z`;
-  } else if (points.length === 1) {
-    stressPath = `M ${Math.max(chartLeft, points[0].x - 16)} ${points[0].y} L ${Math.min(chartRight, points[0].x + 16)} ${points[0].y}`;
-    stressGradientPath = `M ${Math.max(chartLeft, points[0].x - 16)} ${points[0].y} L ${Math.min(chartRight, points[0].x + 16)} ${points[0].y} L ${Math.min(chartRight, points[0].x + 16)} ${chartBottom} L ${Math.max(chartLeft, points[0].x - 16)} ${chartBottom} Z`;
-  }
+  // Peak = highest real reading this week (no-data zeros are never the peak)
+  const peakIdx = dayStress.reduce(
+    (acc, d, i) => (d.hasData && d.score > (acc === -1 ? -1 : dayStress[acc].score) ? i : acc),
+    -1
+  );
+
+  const stressPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+  const stressGradientPath =
+    stressPath +
+    ` L ${points[points.length - 1].x} ${chartBottom} L ${points[0].x} ${chartBottom} Z`;
 
   const usedHours = capacity?.used_capacity_hours ?? 0;
   const totalHours = capacity?.total_capacity_hours ?? 40;
@@ -492,10 +609,12 @@ export default function Home() {
   const errandsPct = capacity?.category_breakdown?.errands ?? 0;
 
   /** Real cue for the recovery reminder — today's own data */
-  const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
-  const todayStress = dayScores[todayIdx];
+  const todayStress = dayStress[todayIdx];
   const recoveryReminderVisible =
-    isOverloaded || (todayStress !== null && todayStress >= 60);
+    isOverloaded || (todayStress.hasData && todayStress.score >= 60);
+
+  /** Early Warning Insight copy built from the week's per-day stress */
+  const earlyWarning = buildEarlyWarningInsight(dayStress, todayIdx);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -539,28 +658,32 @@ export default function Home() {
             </View>
 
             {/* Stress Line Chart */}
-            <View style={styles.chartContainer}>
-              <Svg height="120" width="100%" viewBox="0 0 380 120">
-                <Defs>
-                  <LinearGradient id="stressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <Stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.22" />
-                    <Stop offset="60%" stopColor="#fdcb9b" stopOpacity="0.1" />
-                    <Stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                  </LinearGradient>
-                </Defs>
+            <View
+              style={styles.chartContainer}
+              onLayout={(e) => {
+                const w = e.nativeEvent.layout.width;
+                if (w > 0) setChartWidth(w);
+              }}
+            >
+              <View style={styles.chartFrame}>
+                <Svg height="120" width="100%" viewBox="0 0 380 120">
+                  <Defs>
+                    <LinearGradient id="stressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                      <Stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.22" />
+                      <Stop offset="60%" stopColor="#fdcb9b" stopOpacity="0.1" />
+                      <Stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+                    </LinearGradient>
+                  </Defs>
 
-                {/* Grid lines */}
-                <Line x1="10" y1="20" x2="370" y2="20" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
-                <Line x1="10" y1="60" x2="370" y2="60" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
-                <Line x1="10" y1="100" x2="370" y2="100" stroke="#f2eede" strokeWidth="1" />
+                  {/* Grid lines */}
+                  <Line x1="10" y1="20" x2="370" y2="20" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
+                  <Line x1="10" y1="60" x2="370" y2="60" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
+                  <Line x1="10" y1="100" x2="370" y2="100" stroke="#f2eede" strokeWidth="1" />
 
-                {/* Gradient fill */}
-                {stressGradientPath ? (
+                  {/* Gradient fill */}
                   <Path d={stressGradientPath} fill="url(#stressGradient)" />
-                ) : null}
 
-                {/* Line */}
-                {stressPath ? (
+                  {/* Line */}
                   <Path
                     d={stressPath}
                     stroke="#7c5730"
@@ -569,55 +692,118 @@ export default function Home() {
                     strokeLinejoin="round"
                     fill="none"
                   />
-                ) : null}
 
-                {/* Data points */}
-                {points.map((p, i) => (
-                  <Circle
-                    key={i}
-                    cx={p.x}
-                    cy={p.y}
-                    r={p.x === chartLeft + lastScoredDay * xStep ? 6 : 3.5}
-                    fill={p.x === chartLeft + lastScoredDay * xStep ? '#ba1a1a' : '#81756c'}
-                    stroke={p.x === chartLeft + lastScoredDay * xStep ? '#ffffff' : 'none'}
-                    strokeWidth={p.x === chartLeft + lastScoredDay * xStep ? 2.5 : 0}
-                  />
-                ))}
+                  {/* Data points — every day has one; peak + today highlighted */}
+                  {points.map((p, i) => {
+                    const isPeak = i === peakIdx && p.hasData;
+                    const isSelected = i === selectedDayIdx;
+                    return (
+                      <Circle
+                        key={i}
+                        cx={p.x}
+                        cy={p.y}
+                        r={isPeak ? 6 : isSelected ? 4.5 : p.hasData ? 4 : 3}
+                        fill={
+                          isPeak
+                            ? '#ba1a1a'
+                            : isSelected
+                              ? '#E07A5F'
+                              : p.hasData
+                                ? '#7c5730'
+                                : '#FFFFFF'
+                        }
+                        stroke={
+                          isPeak || isSelected
+                            ? '#ffffff'
+                            : p.hasData
+                              ? '#7c5730'
+                              : '#B8B0A4'
+                        }
+                        strokeWidth={isPeak ? 2.5 : 1.5}
+                      />
+                    );
+                  })}
+                </Svg>
 
-                {/* Empty state: flat line at 50% */}
-                {points.length === 0 && (
-                  <Line x1="20" y1="60" x2="365" y2="60" stroke="#ddd" strokeWidth="1.5" strokeDasharray="6 4" />
+                {/* Tap zones — one column per day, tap to reveal the exact score */}
+                {chartWidth > 0 &&
+                  points.map((p, i) => {
+                    const zoneW = Math.max(22, (chartWidth / 380) * xStep);
+                    const left = (p.x / 380) * chartWidth - zoneW / 2;
+                    return (
+                      <Pressable
+                        key={`tap-${i}`}
+                        onPress={() => setSelectedDayIdx(selectedDayIdx === i ? null : i)}
+                        style={[styles.tapZone, { left, width: zoneW }]}
+                        hitSlop={4}
+                      />
+                    );
+                  })}
+
+                {/* Tooltip with the exact score for the tapped day */}
+                {selectedDayIdx !== null && points[selectedDayIdx] && chartWidth > 0 && (
+                  <View
+                    style={[
+                      styles.tooltip,
+                      {
+                        left: Math.max(
+                          6,
+                          Math.min(
+                            (points[selectedDayIdx].x / 380) * chartWidth - 46,
+                            chartWidth - 98
+                          )
+                        ),
+                      },
+                    ]}
+                  >
+                    <Text style={styles.tooltipDay}>{WEEKDAY_NAMES[selectedDayIdx]}</Text>
+                    <Text style={styles.tooltipScore}>
+                      {points[selectedDayIdx].score}
+                      <Text style={styles.tooltipUnit}> /100</Text>
+                    </Text>
+                    {!points[selectedDayIdx].hasData && (
+                      <Text style={styles.tooltipNote}>no data yet</Text>
+                    )}
+                  </View>
                 )}
-              </Svg>
+              </View>
 
               <View style={styles.daysRow}>
-                <Text style={styles.dayText}>M</Text>
-                <Text style={styles.dayText}>T</Text>
-                <Text style={styles.dayText}>W</Text>
-                <Text style={styles.dayText}>T</Text>
-                <Text style={styles.dayText}>F</Text>
-                <Text style={styles.dayText}>S</Text>
-                <Text style={styles.dayText}>S</Text>
+                {dayLabels.map((label, i) => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.dayLabelWrap,
+                      i === todayIdx && styles.dayLabelWrapActive,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.dayText,
+                        i === todayIdx && styles.dayTextActive,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </View>
+                ))}
               </View>
             </View>
 
             {/* Early Warning Banner */}
-            <View style={styles.insightBanner}>
+            <View style={[styles.insightBanner, earlyWarning.urgent && styles.insightBannerUrgent]}>
               <View style={styles.insightIconContainer}>
                 <MaterialIcons
-                  name={isOverloaded ? 'warning' : 'notifications-active'}
+                  name={earlyWarning.urgent ? 'warning' : 'notifications-active'}
                   size={18}
-                  color={isOverloaded ? '#DC2626' : '#E07A5F'}
+                  color={earlyWarning.urgent ? '#DC2626' : '#E07A5F'}
                 />
               </View>
               <View style={styles.insightContent}>
-                <Text style={styles.insightTitle}>
-                  {isOverloaded ? 'Cognitive Load Warning' : 'Workload Insight'}
+                <Text style={[styles.insightTitle, earlyWarning.urgent && styles.insightTitleUrgent]}>
+                  {earlyWarning.title}
                 </Text>
-                <Text style={styles.insightText}>
-                  {capacity?.ai_reasoning ||
-                    'Your weekly cognitive load is being tracked from active calendar events and baseline metrics.'}
-                </Text>
+                <Text style={styles.insightText}>{earlyWarning.text}</Text>
               </View>
             </View>
           </View>
@@ -1502,13 +1688,47 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
   adaptiveBadge: { backgroundColor: '#F3E8FF', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
   adaptiveText: { fontSize: 12, fontWeight: '600', color: '#7E22CE' },
-  chartContainer: { alignItems: 'center', marginBottom: 12 },
-  daysRow: { flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: 8, paddingHorizontal: 10 },
+  chartContainer: { alignItems: 'center', marginBottom: 12, width: '100%' },
+  chartFrame: { width: '100%', height: 120 },
+  tapZone: { position: 'absolute', top: 0, bottom: 0 },
+  tooltip: {
+    position: 'absolute',
+    top: 2,
+    backgroundColor: colors.brown,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    alignItems: 'center',
+    minWidth: 92,
+    zIndex: 5,
+    elevation: 4,
+  },
+  tooltipDay: {
+    color: '#F8EEDE',
+    fontSize: 9,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  tooltipScore: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
+  tooltipUnit: { fontSize: 10, color: '#F8EEDE', fontWeight: '600' },
+  tooltipNote: { fontSize: 9, color: '#F8EEDE', fontStyle: 'italic', marginTop: 1 },
+  daysRow: { flexDirection: 'row', width: '100%', marginTop: 8, paddingHorizontal: 10 },
+  dayLabelWrap: { flex: 1, alignItems: 'center' },
+  dayLabelWrapActive: {
+    backgroundColor: colors.brown,
+    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
   dayText: { fontSize: 13, color: '#81756C', fontWeight: '500' },
+  dayTextActive: { color: colors.cream, fontWeight: '700' },
   insightBanner: { flexDirection: 'row', backgroundColor: '#FFF5F0', borderRadius: 12, padding: 12, marginTop: 4 },
+  insightBannerUrgent: { backgroundColor: '#FEE2E2', borderWidth: 1, borderColor: '#FECACA' },
   insightIconContainer: { marginRight: 8, marginTop: 2 },
   insightContent: { flex: 1 },
   insightTitle: { fontSize: 14, fontWeight: '700', color: '#E07A5F', marginBottom: 2 },
+  insightTitleUrgent: { color: '#DC2626' },
   insightText: { fontSize: 12, color: '#6B7280', lineHeight: 18 },
   recoveryReminder: {
     flexDirection: 'row',

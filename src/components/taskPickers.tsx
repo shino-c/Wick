@@ -2,10 +2,10 @@
  * taskPickers.tsx — Shared chip pickers used by the task edit modals on Home
  * and Baseline.
  *
- * Each picker shows tappable preset chips (week-days / time slots) alongside an
- * "Other…" chip that opens a free-text fallback, so uncommon dates or times
- * never force the user to scroll through a raw TextInput. The fallback only
- * commits when the typed value matches the expected format.
+ * DateChipPicker shows only the current week's Mon–Sun chips (the database
+ * stores a single week, so next-week tasks can't be logged). TimeChipPicker
+ * shows preset time slots plus an "Other…" chip that opens an HH:MM text
+ * fallback for uncommon times.
  */
 
 import { useState } from 'react';
@@ -28,7 +28,6 @@ export const PRESET_TIMES = [
   '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00',
 ];
 
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 /** ISO dates (YYYY-MM-DD) for the current week, Monday first. */
@@ -45,9 +44,11 @@ function getCurrentWeekDates(): string[] {
 }
 
 /**
- * Mon–Sun of the current week as tappable chips, plus an "Other…" chip that
- * reveals a YYYY-MM-DD text fallback (auto-opens when the value is outside
- * the current week, e.g. a deferred next-week date).
+ * Mon–Sun of the current week as tappable chips.
+ *
+ * Only the current week can be scheduled: the database stores a single week's
+ * data and the home dashboard only reads the current week. There is therefore
+ * intentionally no "Other…" / next-week fallback here.
  */
 export function DateChipPicker({
   value,
@@ -56,77 +57,36 @@ export function DateChipPicker({
   value?: string;
   onChange: (iso: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(value ?? '');
-
   const weekDates = getCurrentWeekDates();
-  const notInWeek = !!value && !weekDates.includes(value);
-  const showFallback = open || notInWeek;
-
-  const toggleFallback = () => {
-    const next = !showFallback;
-    setOpen(next);
-    if (next && !notInWeek) setDraft(value ?? '');
-  };
+  const selectedInWeek = !!value && weekDates.includes(value);
 
   return (
-    <View>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        <View style={styles.row}>
-          {weekDates.map((iso, i) => {
-            const d = new Date(iso + 'T00:00:00');
-            const isSelected = value === iso && !showFallback;
-            return (
-              <Pressable
-                key={iso}
-                onPress={() => {
-                  onChange(iso);
-                  setOpen(false);
-                }}
-                style={[styles.chip, isSelected && styles.chipActive]}
-              >
-                <Text style={[styles.chipText, isSelected && styles.chipTextActive]}>
-                  {DAY_NAMES[i]}
-                </Text>
-                <Text
-                  style={[styles.chipSub, isSelected && styles.chipTextActive]}
-                >
-                  {d.getDate()}/{d.getMonth() + 1}
-                </Text>
-              </Pressable>
-            );
-          })}
-          <Pressable
-            onPress={toggleFallback}
-            style={[styles.chip, showFallback && styles.chipActive]}
-          >
-            <Text style={[styles.chipText, showFallback && styles.chipTextActive]}>
-              Other…
-            </Text>
-          </Pressable>
-        </View>
-      </ScrollView>
-
-      {showFallback && (
-        <TextInput
-          style={styles.fallbackInput}
-          value={draft}
-          onChangeText={(text) => {
-            setDraft(text);
-            if (ISO_DATE_RE.test(text)) onChange(text);
-          }}
-          placeholder="e.g. 2026-09-18"
-          placeholderTextColor={colors.inkFaint}
-          autoCapitalize="none"
-          autoCorrect={false}
-          scrollEnabled={false}
-        />
-      )}
-    </View>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={styles.row}>
+        {weekDates.map((iso, i) => {
+          const d = new Date(iso + 'T00:00:00');
+          const isSelected = value === iso && selectedInWeek;
+          return (
+            <Pressable
+              key={iso}
+              onPress={() => onChange(iso)}
+              style={[styles.chip, isSelected && styles.chipActive]}
+            >
+              <Text style={[styles.chipText, isSelected && styles.chipTextActive]}>
+                {DAY_NAMES[i]}
+              </Text>
+              <Text style={[styles.chipSub, isSelected && styles.chipTextActive]}>
+                {d.getDate()}/{d.getMonth() + 1}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </ScrollView>
   );
 }
 /**
