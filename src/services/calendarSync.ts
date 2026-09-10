@@ -271,7 +271,7 @@ export async function syncCalendarEvents(): Promise<CalendarSyncResult> {
 
       const payload = {
         title,
-        category: 'calendar',
+        category: 'errands',
         priority: 'medium' as const,
         estimated_duration_hours: durationHours,
         scheduled_date: start.toISOString().split('T')[0],
@@ -315,6 +315,7 @@ export async function syncCalendarEvents(): Promise<CalendarSyncResult> {
     }
 
     return createSyncResult(mappedEvents, saved, existing);
+    return createSyncResult(mappedEvents, mappedEvents.length, 0);
   } catch (err: any) {
     console.error('Calendar sync error:', err);
     return createSyncResult([], 0, 0, err.message ?? 'Unknown error');

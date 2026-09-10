@@ -4,17 +4,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 type TabName = 'Home' | 'Desk' | 'Recovery' | 'Social';
 
-/*
- * RECOVERY TAB — reserved for Shino.
- *
- * The icon stays so the bar keeps its intended shape, but `route` is null and
- * the tab is dimmed and non-interactive. That is the important difference from
- * how this shipped the first time: then it pointed at '/recovery' when no such
- * route existed, so tapping it silently did nothing and looked broken. Now it
- * reads as a place that is not ready yet.
- *
- * To wire it up: create src/app/recovery.tsx and set `route: '/recovery'`.
- */
+/* Wired up: Recovery is the garden tab. */
 
 interface BottomNavigationProps {
   activeTab?: TabName;
@@ -46,7 +36,7 @@ export default function BottomNavigation({
     },
     {
       name: 'Recovery',
-      route: null,
+      route: '/recovery',
       activeIcon: 'heart-pulse',
       inactiveIcon: 'heart-pulse',
     },

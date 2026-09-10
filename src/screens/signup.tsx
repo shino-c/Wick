@@ -139,17 +139,21 @@ export default function SignupScreen() {
       if (error) throw error;
 
       // If email confirmation is required, Supabase returns a user but
-      // no session. In that case we inform the user to check their email.
+      // no session. Inform the user and send them to login.
       if (data.user && !data.session) {
         setServerError(
           'A confirmation email has been sent. Please verify your email and then log in.',
         );
         setLoading(false);
+        // Navigate to login after a brief delay so the user can read the message.
+        setTimeout(() => router.replace('/login'), 2000);
         return;
       }
 
-      // Success — go to baseline.
-      router.replace('/baseline');
+      // Sign out so the user lands on the login screen (Supabase may
+      // auto-sign-in on signup when email confirmation is disabled).
+      await supabase.auth.signOut();
+      router.replace('/login');
     } catch (err: any) {
       const msg = err?.message ?? 'Sign up failed. Please try again.';
       // Make common Supabase error messages friendlier.

@@ -27,7 +27,7 @@ import type {
     TaskAnalysis,
     WeeklyCapacityAnalysis,
 } from '@/data/types';
-import { parseQuickTaskNLP, suggestLoadBalance } from '@/services/aiService';
+import { analyzeWeeklyCapacity, parseQuickTaskNLP, suggestLoadBalance } from '@/services/aiService';
 import { isNewWeek } from '@/services/calendarSync';
 import {
     approveTaskAnalysis,
@@ -38,7 +38,9 @@ import {
     getTaskAnalyses,
     getWeeklyCapacity,
     listStressScores,
-    syncAndAnalyzeCalendar
+    recomputeCurrentWeekDerivedData,
+    syncAndAnalyzeCalendar,
+    updateTaskAnalysis
 } from '@/services/repository';
 import { colors } from '@/theme';
 
@@ -71,6 +73,26 @@ function getWeekStart(date = new Date()): string {
   return d.toISOString().split('T')[0];
 }
 
+const CATEGORY_EMOJI: Record<string, string> = {
+  academic: '📚',
+  work: '💼',
+  social: '🌱',
+  physical: '🏃',
+  mental: '🧘',
+  errands: '🛒',
+  other: '📌',
+};
+
+function getCategoryEmoji(cat: string): string {
+  return CATEGORY_EMOJI[cat] || '📌';
+}
+
+const PRIORITY_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+  high: { bg: '#FEE2E2', border: '#FECDD3', text: '#E11D48' },
+  medium: { bg: '#FEF3C7', border: '#FDE68A', text: '#B45309' },
+  low: { bg: '#DCFCE7', border: '#BBF7D0', text: '#16A34A' },
+};
+
 export default function Home() {
   const router = useRouter();
 
@@ -86,12 +108,14 @@ export default function Home() {
   const [pendingTasks, setPendingTasks] = useState<TaskAnalysis[]>([]);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [editingTask, setEditingTask] = useState<TaskAnalysis | null>(null);
 
   // Quick Add NLP Chatbot Modal State
   const [showAddModal, setShowAddModal] = useState(false);
   const [quickInput, setQuickInput] = useState('');
   const [parsingNLP, setParsingNLP] = useState(false);
   const [parsedPreview, setParsedPreview] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'> | null>(null);
+  const [editPreview, setEditPreview] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'> | null>(null);
   const [addingTask, setAddingTask] = useState(false);
 
   // Sync state
@@ -109,9 +133,23 @@ export default function Home() {
       ]);
 
       setTasks(allTasks);
-      setCapacity(currentCapacity);
       setConnections(allConns);
       setStressScores(scores);
+
+      // Always derive capacity from the real task list for this week so the
+      // ring and warning reflect exactly what is scheduled, even if the stored
+      // analysis is stale or missing.
+      let capacityValue = currentCapacity;
+      if (!currentCapacity || currentCapacity.week_start !== currentWeekStart) {
+        try {
+          capacityValue = await analyzeWeeklyCapacity(allTasks);
+          capacityValue.week_start = currentWeekStart;
+          capacityValue = await recomputeCurrentWeekDerivedData(currentWeekStart);
+        } catch {
+          capacityValue = currentCapacity;
+        }
+      }
+      setCapacity(capacityValue);
 
       // Check for unapproved / newly synced tasks for this week
       const unapproved = allTasks.filter((t) => t.status === 'pending');
@@ -123,7 +161,7 @@ export default function Home() {
       }
 
       // Generate AI Load Balance Suggestions
-      const suggestions = await suggestLoadBalance(allTasks, currentCapacity || undefined);
+      const suggestions = await suggestLoadBalance(allTasks, capacityValue || undefined);
       setLoadSuggestions(suggestions);
     } catch (err) {
       console.error('Error loading dashboard data:', err);
@@ -175,10 +213,57 @@ export default function Home() {
   const handleRejectTask = async (id: string) => {
     try {
       await approveTaskAnalysis(id, false);
-      setPendingTasks((prev) => prev.filter((p) => p.id !== id));
+      setPendingTasks((prev) => {
+        const updated = prev.filter((p) => p.id !== id);
+        if (updated.length === 0) setShowReviewModal(false);
+        return updated;
+      });
       await loadDashboardData();
     } catch (err) {
       console.error('Error rejecting task:', err);
+    }
+  };
+
+  // Edit a single pending task's field
+  const handleEditField = (field: keyof TaskAnalysis, value: unknown) => {
+    setEditingTask(prev => prev ? { ...prev, [field]: value } : prev);
+  };
+
+  // Save edits to a pending task
+  const handleSaveTaskEdit = async () => {
+    if (!editingTask) return;
+    try {
+      await updateTaskAnalysis(editingTask.id, {
+        title: editingTask.title,
+        category: editingTask.category,
+        priority: editingTask.priority,
+        rank: editingTask.rank,
+        estimated_duration_hours: editingTask.estimated_duration_hours,
+        scheduled_date: editingTask.scheduled_date,
+        scheduled_start_time: editingTask.scheduled_start_time,
+        status: editingTask.status,
+      });
+      setPendingTasks(prev => prev.map(t => t.id === editingTask.id ? editingTask : t));
+      setEditingTask(null);
+      await loadDashboardData();
+    } catch (err) {
+      console.error('Error saving task edit:', err);
+    }
+  };
+  // Toggle a task between completed and approved (strikethrough + drop to last rank)
+  const handleToggleComplete = async (task: TaskAnalysis) => {
+    const completing = task.status !== 'completed';
+    try {
+      if (completing) {
+        // Move to last rank when completing
+        const maxRank = Math.max(0, ...tasks.map((t) => t.rank || 0));
+        await updateTaskAnalysis(task.id, { status: 'completed', rank: maxRank + 1 });
+      } else {
+        await updateTaskAnalysis(task.id, { status: 'approved' });
+      }
+      await loadDashboardData();
+    } catch (err) {
+      console.error('Error toggling task completion:', err);
     }
   };
 
@@ -189,6 +274,7 @@ export default function Home() {
     try {
       const parsed = await parseQuickTaskNLP(quickInput);
       setParsedPreview(parsed);
+      setEditPreview(parsed);
     } catch (err) {
       console.error('Error parsing task input:', err);
     } finally {
@@ -198,12 +284,13 @@ export default function Home() {
 
   // Confirm Add Task (Syncs to Phone Calendar + DB)
   const handleConfirmAddTask = async () => {
-    if (!parsedPreview) return;
+    if (!editPreview) return;
     setAddingTask(true);
     try {
-      await createAndSyncTask(parsedPreview);
+      await createAndSyncTask(editPreview);
       setQuickInput('');
       setParsedPreview(null);
+      setEditPreview(null);
       setShowAddModal(false);
       await loadDashboardData();
       Alert.alert('Task Created', 'Task has been logged and synced to your phone calendar.');
@@ -336,6 +423,12 @@ export default function Home() {
   const capacityPct = Math.min(100, Math.round((usedHours / totalHours) * 100));
   const isOverloaded = capacity?.overload_warning || capacityPct >= 85;
 
+  /** Real cue for the recovery reminder — today's own data, never hardcoded. */
+  const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
+  const todayStress = dayScores[todayIdx];
+  const recoveryReminderVisible =
+    isOverloaded || (todayStress !== null && todayStress >= 60);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
@@ -462,6 +555,27 @@ export default function Home() {
               </View>
             </View>
           </View>
+
+          {/* Gentle recovery reminder — only when today's real data warrants it */}
+          {recoveryReminderVisible && (
+            <Pressable
+              onPress={() => router.push('/recovery')}
+              style={({ pressed }) => [styles.recoveryReminder, pressed && styles.pressed]}
+            >
+              <View style={styles.recoveryReminderIcon}>
+                <Text style={{ fontSize: 20 }}>🌱</Text>
+              </View>
+              <View style={styles.recoveryReminderBody}>
+                <Text style={styles.recoveryReminderTitle}>A softer moment, if you want one</Text>
+                <Text style={styles.recoveryReminderText}>
+                  {isOverloaded
+                    ? 'This week is carrying a lot. Your garden has a few gentle, optional ideas — no pressure.'
+                    : 'Today is measuring a bit heavier than usual. A small pause in your garden might feel nice.'}
+                </Text>
+              </View>
+              <Text style={styles.recoveryReminderArrow}>›</Text>
+            </Pressable>
+          )}
 
           {/* 2. Weekly Capacity */}
           <View style={styles.card}>
@@ -632,27 +746,51 @@ export default function Home() {
                 </Pressable>
               </View>
             ) : (
-              tasks.map((task) => (
-                <View key={task.id} style={styles.taskCard}>
-                  <View style={styles.taskRankBadge}>
-                    <Text style={styles.taskRankText}>#{task.rank}</Text>
-                  </View>
-                  <View style={styles.taskBody}>
-                    <Text style={styles.taskTitleText}>{task.title}</Text>
-                    <View style={styles.taskTagsRow}>
-                      <View style={[styles.priorityPill, task.priority === 'high' ? styles.pillHigh : task.priority === 'medium' ? styles.pillMed : styles.pillLow]}>
-                        <Text style={styles.pillText}>{task.priority.toUpperCase()}</Text>
+              tasks.map((task) => {
+                const done = task.status === 'completed';
+                const catEmoji = getCategoryEmoji(task.category);
+                const priorityStyle = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.medium;
+                return (
+                  <Pressable
+                    key={task.id}
+                    onPress={() => {
+                      setEditingTask({ ...task });
+                      setShowReviewModal(true);
+                    }}
+                    style={({ pressed }) => [styles.taskCard, done && styles.taskCardDone, pressed && styles.pressed]}
+                  >
+                    <View style={[styles.taskLeftBorder, done && { backgroundColor: colors.inkFaint }]} />
+                    <Pressable
+                      onPress={() => handleToggleComplete(task)}
+                      style={[styles.taskRankBadge, done && styles.taskRankBadgeDone]}
+                      hitSlop={6}
+                    >
+                      <Text style={[styles.taskRankText, done && styles.taskRankTextDone]}>{done ? '✓' : `#${task.rank}`}</Text>
+                    </Pressable>
+                    <View style={styles.taskBody}>
+                      <View style={styles.taskTitleRow}>
+                        <Text style={styles.taskCatEmoji}>{catEmoji}</Text>
+                        <Text style={[styles.taskTitleText, done && styles.taskTitleDone]} numberOfLines={1}>
+                          {task.title}
+                        </Text>
                       </View>
-                      <Text style={styles.taskSubDetail}>
-                        {task.category} • {task.estimated_duration_hours}h • {task.scheduled_date} {task.scheduled_start_time || ''}
-                      </Text>
+                      <View style={styles.taskTagsRow}>
+                        <View style={[styles.priorityPill, { backgroundColor: priorityStyle.bg, borderColor: priorityStyle.border }]}>
+                          <Text style={[styles.pillText, { color: priorityStyle.text }]}>{task.priority.toUpperCase()}</Text>
+                        </View>
+                        <Text style={[styles.taskSubDetail, done && styles.taskSubDone]}>
+                          {task.category} • {task.estimated_duration_hours}h
+                          {task.scheduled_start_time ? ` • ${task.scheduled_start_time}` : ''}
+                          {task.scheduled_date ? ` • ${task.scheduled_date}` : ''}
+                        </Text>
+                      </View>
                     </View>
-                  </View>
-                  <Pressable onPress={() => handleDeleteTask(task)} style={styles.deleteButton} hitSlop={8}>
-                    <MaterialIcons name="delete-outline" size={20} color="#9CA3AF" />
+                    <Pressable onPress={() => handleDeleteTask(task)} style={styles.deleteButton} hitSlop={8}>
+                      <MaterialIcons name="delete-outline" size={18} color={colors.inkFaint} />
+                    </Pressable>
                   </Pressable>
-                </View>
-              ))
+                );
+              })
             )}
           </View>
 
@@ -703,57 +841,171 @@ export default function Home() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Workload Review</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>
+                  {editingTask ? 'Edit Task' : 'Workload Review'}
+                </Text>
                 <Text style={styles.modalSubtitle}>
-                  Current week tasks auto-detected from your native calendar
+                  {editingTask ? 'Change details below, then save' : 'Tap Edit to change any detail, then Approve'}
                 </Text>
               </View>
+              {editingTask && (
+                <Pressable onPress={() => setEditingTask(null)} hitSlop={8} style={{ padding: 4 }}>
+                  <Ionicons name="close" size={22} color={colors.inkSoft} />
+                </Pressable>
+              )}
             </View>
 
-            <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
-              {pendingTasks.map((task) => (
-                <View key={task.id} style={styles.reviewTaskItem}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <View style={styles.reviewRankPill}>
-                      <Text style={styles.reviewRankText}>Rank #{task.rank}</Text>
-                    </View>
-                    <View style={[styles.priorityPill, task.priority === 'high' ? styles.pillHigh : styles.pillMed]}>
-                      <Text style={styles.pillText}>{task.priority.toUpperCase()}</Text>
+            {editingTask ? (
+              /* ── Inline Task Editor ─── */
+              <ScrollView style={{ maxHeight: 480 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                <View style={styles.reviewEditorCard}>
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Rank</Text>
+                    <TextInput
+                      style={[styles.reviewEditorInput, { width: 70 }]}
+                      value={String(editingTask.rank)}
+                      onChangeText={(v) => handleEditField('rank', parseInt(v) || 1)}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Title</Text>
+                    <TextInput
+                      style={styles.reviewEditorInput}
+                      value={editingTask.title}
+                      onChangeText={(v) => handleEditField('title', v)}
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Category</Text>
+                    <TextInput
+                      style={styles.reviewEditorInput}
+                      value={editingTask.category}
+                      onChangeText={(v) => handleEditField('category', v)}
+                    />
+                  </View>
+                  <Text style={styles.reviewEditorHint}>academic, work, social, physical, mental, errands</Text>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Priority</Text>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      {(['high', 'medium', 'low'] as const).map(p => (
+                        <Pressable
+                          key={p}
+                          onPress={() => handleEditField('priority', p)}
+                          style={[styles.reviewPriorityBtn, editingTask.priority === p && styles.reviewPriorityBtnActive]}
+                        >
+                          <Text style={[styles.reviewPriorityBtnText, editingTask.priority === p && { color: colors.cream }]}>
+                            {p.toUpperCase()}
+                          </Text>
+                        </Pressable>
+                      ))}
                     </View>
                   </View>
-                  <Text style={styles.reviewTaskTitle}>{task.title}</Text>
-                  <Text style={styles.reviewTaskDetails}>
-                    📅 {task.scheduled_date} ({task.scheduled_start_time || 'All Day'}) • {task.estimated_duration_hours}h load
-                  </Text>
-                  <Text style={styles.reviewTaskStress}>
-                    Stress Impact: {task.stress_score}% • Category: {task.category}
-                  </Text>
-                  {task.ai_reasoning ? (
-                    <Text style={styles.reviewTaskReasoning}>{task.ai_reasoning}</Text>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Hours</Text>
+                    <TextInput
+                      style={[styles.reviewEditorInput, { width: 70 }]}
+                      value={String(editingTask.estimated_duration_hours)}
+                      onChangeText={(v) => handleEditField('estimated_duration_hours', parseFloat(v) || 1)}
+                      keyboardType="decimal-pad"
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Date</Text>
+                    <TextInput
+                      style={styles.reviewEditorInput}
+                      value={editingTask.scheduled_date}
+                      onChangeText={(v) => handleEditField('scheduled_date', v)}
+                      placeholder="YYYY-MM-DD"
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Start Time</Text>
+                    <TextInput
+                      style={[styles.reviewEditorInput, { width: 90 }]}
+                      value={editingTask.scheduled_start_time || ''}
+                      onChangeText={(v) => handleEditField('scheduled_start_time', v)}
+                      placeholder="HH:MM"
+                    />
+                  </View>
+
+                  {editingTask.ai_reasoning ? (
+                    <Text style={styles.reviewEditorReasoning}>AI: {editingTask.ai_reasoning}</Text>
                   ) : null}
-                  <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 6 }}>
-                    <Pressable onPress={() => handleRejectTask(task.id)} style={styles.rejectBtn}>
-                      <Text style={styles.rejectBtnText}>Skip</Text>
+
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                    <Pressable onPress={() => setEditingTask(null)} style={styles.reviewCancelBtn}>
+                      <Text style={styles.reviewCancelBtnText}>Cancel</Text>
+                    </Pressable>
+                    <Pressable onPress={handleSaveTaskEdit} style={styles.reviewSaveBtn}>
+                      <Text style={styles.reviewSaveBtnText}>Save Changes</Text>
                     </Pressable>
                   </View>
                 </View>
-              ))}
-            </ScrollView>
+              </ScrollView>
+            ) : (
+              /* ── Task List View ─── */
+              <ScrollView style={{ maxHeight: 480 }} showsVerticalScrollIndicator={false}>
+                {pendingTasks.map((task) => (
+                  <View key={task.id} style={styles.reviewTaskItem}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <View style={styles.reviewRankPill}>
+                        <Text style={styles.reviewRankText}>#{task.rank}</Text>
+                      </View>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <View style={[styles.priorityPill, task.priority === 'high' ? styles.pillHigh : task.priority === 'medium' ? styles.pillMed : styles.pillLow]}>
+                          <Text style={styles.pillText}>{task.priority.toUpperCase()}</Text>
+                        </View>
+                        <Pressable onPress={() => setEditingTask({ ...task })} style={styles.reviewEditBtn}>
+                          <Ionicons name="pencil" size={14} color={colors.brown} />
+                          <Text style={styles.reviewEditText}>Edit</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                    <Text style={styles.reviewTaskTitle}>{task.title}</Text>
+                    <Text style={styles.reviewTaskDetails}>
+                      {task.category} • {task.estimated_duration_hours}h • {task.scheduled_date} {task.scheduled_start_time || 'All Day'}
+                    </Text>
+                    {task.stress_score != null && (
+                      <Text style={styles.reviewTaskStress}>Stress Impact: {task.stress_score}%</Text>
+                    )}
+                    {task.ai_reasoning ? (
+                      <Text style={styles.reviewTaskReasoning}>{task.ai_reasoning}</Text>
+                    ) : null}
+                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 6 }}>
+                      <Pressable onPress={() => handleRejectTask(task.id)} style={styles.rejectBtn}>
+                        <Text style={styles.rejectBtnText}>Skip</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
 
-            <View style={styles.modalActions}>
-              <Pressable
-                onPress={handleApproveAllPending}
-                disabled={approving}
-                style={[styles.primaryModalBtn, approving && { opacity: 0.7 }]}
-              >
-                {approving ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.primaryModalBtnText}>Approve & Save Analysis</Text>
-                )}
-              </Pressable>
-            </View>
+            {!editingTask && (
+              <View style={styles.modalActions}>
+                <Pressable
+                  onPress={handleApproveAllPending}
+                  disabled={approving || pendingTasks.length === 0}
+                  style={[styles.primaryModalBtn, (approving || pendingTasks.length === 0) && { opacity: 0.7 }]}
+                >
+                  {approving ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.primaryModalBtnText}>
+                      {pendingTasks.length > 0 ? `Approve & Save (${pendingTasks.length})` : 'All Tasks Reviewed'}
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+            )}
           </View>
         </View>
       </Modal>
@@ -761,76 +1013,143 @@ export default function Home() {
       {/* ── QUICK ADD NLP CHATBOT MODAL (2-Way Calendar Sync) ─────────────── */}
       <Modal visible={showAddModal} transparent animationType="slide">
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
         >
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Quick Task Logger</Text>
-                <Text style={styles.modalSubtitle}>
-                  Type naturally (e.g. "2 assignment due Fri", "Exam Thu 2pm")
-                </Text>
-              </View>
-              <Pressable onPress={() => setShowAddModal(false)} hitSlop={8}>
-                <Ionicons name="close" size={24} color="#6B7280" />
-              </Pressable>
-            </View>
-
-            <ScrollView
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={styles.modalScrollContent}
-            >
-              <TextInput
-                style={styles.chatInput}
-                placeholder="e.g. 2 assignment due Fri, Gym tomorrow 6pm..."
-                value={quickInput}
-                onChangeText={setQuickInput}
-                multiline
-              />
-
-              <Pressable
-                onPress={handleParseNLP}
-                disabled={parsingNLP || !quickInput.trim()}
-                style={[styles.nlpParseButton, (!quickInput.trim() || parsingNLP) && { opacity: 0.6 }]}
-              >
-                {parsingNLP ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.nlpParseButtonText}>Analyze</Text>
-                )}
-              </Pressable>
-
-              {/* Structured Details Preview */}
-              {parsedPreview && (
-                <View style={styles.previewBox}>
-                  <Text style={styles.previewHeader}>DETAILS DETECTED</Text>
-                  <Text style={styles.previewTitle}>📌 {parsedPreview.title}</Text>
-                  <Text style={styles.previewDetail}>
-                    Category: <Text style={{ fontWeight: '600' }}>{parsedPreview.category}</Text> • Priority: <Text style={{ fontWeight: '600' }}>{parsedPreview.priority.toUpperCase()}</Text>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { maxHeight: '92%' }]}>
+              <View style={styles.modalHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.modalTitle}>Quick Task Logger</Text>
+                  <Text style={styles.modalSubtitle}>
+                    Type naturally (e.g. "2 assignment due Fri", "Exam Thu 2pm")
                   </Text>
-                  <Text style={styles.previewDetail}>
-                    Date: {parsedPreview.scheduled_date} ({parsedPreview.scheduled_start_time || '09:00'}) • {parsedPreview.estimated_duration_hours}h
-                  </Text>
-                  <Text style={styles.previewDetail}>
-                    Estimated Stress Impact: {parsedPreview.stress_score}%
-                  </Text>
-
-                  <Pressable
-                    onPress={handleConfirmAddTask}
-                    disabled={addingTask}
-                    style={[styles.primaryModalBtn, { marginTop: 12 }, addingTask && { opacity: 0.7 }]}
-                  >
-                    {addingTask ? (
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    ) : (
-                      <Text style={styles.primaryModalBtnText}>Approve & Sync to Calendar</Text>
-                    )}
-                  </Pressable>
                 </View>
-              )}
-            </ScrollView>
+                <Pressable onPress={() => { setShowAddModal(false); setParsedPreview(null); setEditPreview(null); setQuickInput(''); }} hitSlop={8} style={{ padding: 4 }}>
+                  <Ionicons name="close" size={22} color={colors.inkSoft} />
+                </Pressable>
+              </View>
+
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ paddingBottom: 16 }}
+              >
+                <TextInput
+                  style={styles.chatInput}
+                  placeholder="e.g. 2 assignment due Fri, Gym tomorrow 6pm..."
+                  placeholderTextColor={colors.inkFaint}
+                  value={quickInput}
+                  onChangeText={setQuickInput}
+                  multiline
+                />
+
+                <Pressable
+                  onPress={handleParseNLP}
+                  disabled={parsingNLP || !quickInput.trim()}
+                  style={[styles.nlpParseButton, (!quickInput.trim() || parsingNLP) && { opacity: 0.6 }]}
+                >
+                  {parsingNLP ? (
+                    <ActivityIndicator size="small" color={colors.cream} />
+                  ) : (
+                    <Text style={styles.nlpParseButtonText}>Analyze</Text>
+                  )}
+                </Pressable>
+
+                {/* Editable Details Preview */}
+                {editPreview && (
+                  <View style={styles.previewBox}>
+                    <Text style={styles.previewHeader}>DETAILS DETECTED</Text>
+
+                    <View style={styles.previewFieldRow}>
+                      <Text style={styles.previewFieldLabel}>Title</Text>
+                      <TextInput
+                        style={styles.previewInput}
+                        value={editPreview.title}
+                        onChangeText={(v) => setEditPreview(p => p ? { ...p, title: v } : p)}
+                      />
+                    </View>
+
+                    <View style={styles.previewFieldRow}>
+                      <Text style={styles.previewFieldLabel}>Category</Text>
+                      <TextInput
+                        style={styles.previewInput}
+                        value={editPreview.category}
+                        onChangeText={(v) => setEditPreview(p => p ? { ...p, category: v } : p)}
+                      />
+                    </View>
+                    <Text style={styles.previewFieldHint}>academic, work, social, physical, mental, errands</Text>
+
+                    <View style={styles.previewFieldRow}>
+                      <Text style={styles.previewFieldLabel}>Priority</Text>
+                      <View style={styles.previewPriorityRow}>
+                        {(['high', 'medium', 'low'] as const).map(p => (
+                          <Pressable
+                            key={p}
+                            onPress={() => setEditPreview(prev => prev ? { ...prev, priority: p } : prev)}
+                            style={[styles.previewPriorityBtn, editPreview.priority === p && styles.previewPriorityBtnActive]}
+                          >
+                            <Text style={[styles.previewPriorityBtnText, editPreview.priority === p && styles.previewPriorityBtnTextActive]}>
+                              {p.toUpperCase()}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </View>
+
+                    <View style={styles.previewFieldRow}>
+                      <Text style={styles.previewFieldLabel}>Hours</Text>
+                      <TextInput
+                        style={[styles.previewInput, { width: 60 }]}
+                        value={String(editPreview.estimated_duration_hours)}
+                        onChangeText={(v) => setEditPreview(p => p ? { ...p, estimated_duration_hours: parseFloat(v) || 1 } : p)}
+                        keyboardType="decimal-pad"
+                      />
+                    </View>
+
+                    <View style={styles.previewFieldRow}>
+                      <Text style={styles.previewFieldLabel}>Date</Text>
+                      <TextInput
+                        style={styles.previewInput}
+                        value={editPreview.scheduled_date}
+                        onChangeText={(v) => setEditPreview(p => p ? { ...p, scheduled_date: v } : p)}
+                        placeholder="YYYY-MM-DD"
+                        placeholderTextColor={colors.inkFaint}
+                      />
+                    </View>
+
+                    <View style={styles.previewFieldRow}>
+                      <Text style={styles.previewFieldLabel}>Time</Text>
+                      <TextInput
+                        style={[styles.previewInput, { width: 80 }]}
+                        value={editPreview.scheduled_start_time || ''}
+                        onChangeText={(v) => setEditPreview(p => p ? { ...p, scheduled_start_time: v } : p)}
+                        placeholder="HH:MM"
+                        placeholderTextColor={colors.inkFaint}
+                      />
+                    </View>
+
+                    <View style={styles.previewFieldRow}>
+                      <Text style={styles.previewFieldLabel}>Stress</Text>
+                      <Text style={styles.previewStressValue}>{editPreview.stress_score}%</Text>
+                    </View>
+
+                    <Pressable
+                      onPress={handleConfirmAddTask}
+                      disabled={addingTask}
+                      style={[styles.primaryModalBtn, { marginTop: 12 }, addingTask && { opacity: 0.7 }]}
+                    >
+                      {addingTask ? (
+                        <ActivityIndicator size="small" color={colors.cream} />
+                      ) : (
+                        <Text style={styles.primaryModalBtnText}>Approve & Sync to Calendar</Text>
+                      )}
+                    </Pressable>
+                  </View>
+                )}
+              </ScrollView>
+            </View>
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -927,6 +1246,29 @@ const styles = StyleSheet.create({
   insightContent: { flex: 1 },
   insightTitle: { fontSize: 14, fontWeight: '700', color: '#E07A5F', marginBottom: 2 },
   insightText: { fontSize: 12, color: '#6B7280', lineHeight: 18 },
+  recoveryReminder: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF4E6',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#D9E5C8',
+  },
+  recoveryReminderIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  recoveryReminderBody: { flex: 1 },
+  recoveryReminderTitle: { fontSize: 14, fontWeight: '700', color: '#3F5A2A', marginBottom: 2 },
+  recoveryReminderText: { fontSize: 12, color: '#5C6F44', lineHeight: 18 },
+  recoveryReminderArrow: { fontSize: 22, color: '#7C9460', marginLeft: 8, marginTop: -2 },
   sectionLabel: { fontSize: 12, fontWeight: '700', color: '#6B7280', letterSpacing: 0.5 },
   nearLimitBadge: { backgroundColor: '#FEF3C7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
   nearLimitText: { fontSize: 12, fontWeight: '700', color: '#D97706' },
@@ -968,19 +1310,28 @@ const styles = StyleSheet.create({
   emptyTasksText: { fontSize: 13, color: '#9CA3AF', marginBottom: 10 },
   addFirstTaskBtn: { backgroundColor: COLORS.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
   addFirstTaskText: { color: '#FFFFFF', fontSize: 13, fontWeight: '600' },
-  taskCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FAF8F5', borderRadius: 12, padding: 10, marginBottom: 8 },
-  taskRankBadge: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#EFEBE4', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  taskRankText: { fontSize: 12, fontWeight: '700', color: COLORS.text },
-  taskBody: { flex: 1 },
-  taskTitleText: { fontSize: 14, fontWeight: '700', color: COLORS.text },
-  taskTagsRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  priorityPill: { paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4, marginRight: 6 },
-  pillHigh: { backgroundColor: '#FEE2E2' },
-  pillMed: { backgroundColor: '#FEF3C7' },
-  pillLow: { backgroundColor: '#DCFCE7' },
-  pillText: { fontSize: 9, fontWeight: '700' },
-  taskSubDetail: { fontSize: 11, color: '#6B7280' },
-  deleteButton: { padding: 6 },
+  /* Task Card */
+  taskCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.surface, borderRadius: 14, marginBottom: 8, overflow: 'hidden', borderWidth: 1, borderColor: colors.line },
+  taskCardDone: { opacity: 0.55, backgroundColor: '#FAFAF8' },
+  taskLeftBorder: { width: 4, alignSelf: 'stretch', backgroundColor: colors.brown, borderTopLeftRadius: 14, borderBottomLeftRadius: 14 },
+  taskRankBadge: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.yellowWash, alignItems: 'center', justifyContent: 'center', marginHorizontal: 10 },
+  taskRankText: { fontSize: 12, fontWeight: '800', color: colors.brown },
+  taskRankBadgeDone: { backgroundColor: colors.calmWash },
+  taskRankTextDone: { fontSize: 14, fontWeight: '800', color: colors.calm },
+  taskBody: { flex: 1, paddingVertical: 10, paddingRight: 4 },
+  taskTitleRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
+  taskCatEmoji: { fontSize: 14, marginRight: 6 },
+  taskTitleText: { fontSize: 14, fontWeight: '700', color: COLORS.text, flex: 1 },
+  taskTitleDone: { textDecorationLine: 'line-through', color: colors.inkFaint },
+  taskTagsRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  priorityPill: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, borderWidth: 1 },
+  pillHigh: { backgroundColor: '#FEE2E2', borderColor: '#FECDD3' },
+  pillMed: { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' },
+  pillLow: { backgroundColor: '#DCFCE7', borderColor: '#BBF7D0' },
+  pillText: { fontSize: 9, fontWeight: '700', color: colors.inkSoft },
+  taskSubDetail: { fontSize: 11, color: colors.inkSoft, flexShrink: 1 },
+  taskSubDone: { color: colors.inkFaint },
+  deleteButton: { padding: 8 },
   spikeBadge: { backgroundColor: '#FEE2E2', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
   spikeText: { fontSize: 10, fontWeight: '800', color: '#DC2626' },
   loadDescription: { fontSize: 13, color: '#6B7280', marginBottom: 12, lineHeight: 18 },
@@ -999,29 +1350,59 @@ const styles = StyleSheet.create({
   resyncSubtext: { fontSize: 11, color: '#713F12' },
   resyncButton: { backgroundColor: '#854D0E', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
   resyncButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  /* Modals */
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '85%' },
   modalScrollContent: { paddingBottom: 12 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
   modalSubtitle: { fontSize: 12, color: '#6B7280', marginTop: 2 },
-  reviewTaskItem: { backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: '#EFEBE4' },
-  reviewRankPill: { backgroundColor: '#EFEBE4', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
-  reviewRankText: { fontSize: 11, fontWeight: '700', color: COLORS.text },
+  /* Review Modal */
+  reviewTaskItem: { backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  reviewRankPill: { backgroundColor: colors.yellowWash, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
+  reviewRankText: { fontSize: 11, fontWeight: '700', color: colors.brown },
   reviewTaskTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text, marginTop: 6 },
   reviewTaskDetails: { fontSize: 12, color: '#6B7280', marginTop: 2 },
   reviewTaskStress: { fontSize: 12, color: '#B45309', fontWeight: '600', marginTop: 2 },
   reviewTaskReasoning: { fontSize: 11, color: '#4B5563', fontStyle: 'italic', marginTop: 4 },
+  reviewEditBtn: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: '#F8EEDE' },
+  reviewEditText: { fontSize: 11, fontWeight: '600', color: colors.brown },
   rejectBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, backgroundColor: '#F3F4F6' },
   rejectBtnText: { fontSize: 11, color: '#6B7280', fontWeight: '600' },
   modalActions: { marginTop: 14 },
   primaryModalBtn: { backgroundColor: COLORS.primary, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
   primaryModalBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
-  chatInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, padding: 12, fontSize: 14, minHeight: 60, textAlignVertical: 'top', color: COLORS.text },
-  nlpParseButton: { backgroundColor: '#7C5730', borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginTop: 10 },
-  nlpParseButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
+  /* Review Editor */
+  reviewEditorCard: { backgroundColor: '#FAF8F5', borderRadius: 14, padding: 14, borderWidth: 1, borderColor: colors.line },
+  reviewEditorField: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  reviewEditorLabel: { fontSize: 13, fontWeight: '600', color: colors.ink, minWidth: 80 },
+  reviewEditorInput: { flex: 1, height: 36, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 10, fontSize: 13, color: colors.ink, textAlign: 'right' },
+  reviewEditorHint: { fontSize: 10, color: colors.inkFaint, marginTop: -2, marginBottom: 6, textAlign: 'right' },
+  reviewEditorReasoning: { fontSize: 11, color: colors.inkSoft, fontStyle: 'italic', marginTop: 10, lineHeight: 16 },
+  reviewPriorityBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFFFF' },
+  reviewPriorityBtnActive: { backgroundColor: colors.brown, borderColor: colors.brown },
+  reviewPriorityBtnText: { fontSize: 10, fontWeight: '700', color: colors.inkSoft },
+  reviewCancelBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.line, alignItems: 'center' },
+  reviewCancelBtnText: { fontSize: 13, fontWeight: '600', color: colors.inkSoft },
+  reviewSaveBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.brown, alignItems: 'center' },
+  reviewSaveBtnText: { fontSize: 13, fontWeight: '700', color: colors.cream },
+  /* Quick Add Modal */
+  chatInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, fontSize: 14, minHeight: 60, textAlignVertical: 'top', color: COLORS.text },
+  nlpParseButton: { backgroundColor: colors.brown, borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginTop: 10 },
+  nlpParseButtonText: { color: colors.cream, fontSize: 13, fontWeight: '700' },
+  /* Editable Preview */
   previewBox: { backgroundColor: '#F0FDF4', borderRadius: 12, padding: 12, marginTop: 14, borderWidth: 1, borderColor: '#BBF7D0' },
-  previewHeader: { fontSize: 11, fontWeight: '700', color: '#166534', letterSpacing: 0.5, marginBottom: 4 },
+  previewHeader: { fontSize: 11, fontWeight: '700', color: '#166534', letterSpacing: 0.5, marginBottom: 8 },
+  previewFieldRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#E8F5E9' },
+  previewFieldLabel: { fontSize: 12, fontWeight: '600', color: '#374151', minWidth: 70 },
+  previewFieldHint: { fontSize: 10, color: colors.inkFaint, marginTop: -2, marginBottom: 4, textAlign: 'right' },
+  previewInput: { flex: 1, height: 32, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#C8E6C9', borderRadius: 6, paddingHorizontal: 8, fontSize: 12, color: '#1B5E20', textAlign: 'right' },
+  previewPriorityRow: { flexDirection: 'row', gap: 6 },
+  previewPriorityBtn: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, borderWidth: 1, borderColor: '#C8E6C9', backgroundColor: '#FFFFFF' },
+  previewPriorityBtnActive: { backgroundColor: '#166534', borderColor: '#166534' },
+  previewPriorityBtnText: { fontSize: 10, fontWeight: '700', color: '#374151' },
+  previewPriorityBtnTextActive: { color: '#FFFFFF' },
+  previewStressValue: { fontSize: 12, fontWeight: '700', color: '#B45309' },
   previewTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text, marginBottom: 2 },
   previewDetail: { fontSize: 12, color: '#374151', marginTop: 2 },
 });

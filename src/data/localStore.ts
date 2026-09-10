@@ -16,8 +16,12 @@ import type {
     ChallengeRow,
     FocusSessionRow,
     FriendSummary,
+    GardenItem,
+    GardenWallet,
     IncomingRequest,
     PpgScan,
+    RecoveryDay,
+    RecoveryPlanSession,
     SelfReport,
     StressScoreRow,
     SupportNudge,
@@ -46,6 +50,10 @@ export interface LocalDb {
   weeklyCapacities: WeeklyCapacityAnalysis[];
   workloadItems: WorkloadItem[];
   calendarConnections: CalendarConnection[];
+  recoveryDays: RecoveryDay[];
+  recoveryPlanSessions: RecoveryPlanSession[];
+  gardenWallet: GardenWallet;
+  gardenItems: GardenItem[];
 }
 
 export const uid = () =>
@@ -76,6 +84,10 @@ function emptyDb(): LocalDb {
     weeklyCapacities: [],
     workloadItems: [],
     calendarConnections: [],
+    recoveryDays: [],
+    recoveryPlanSessions: [],
+    gardenWallet: { seeds: 0, updatedAt: new Date().toISOString() },
+    gardenItems: [],
   };
 }
 

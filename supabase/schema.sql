@@ -897,11 +897,71 @@ drop policy if exists "own recovery days" on recovery_days;
 create policy "own recovery days" on recovery_days for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+-- ── Recovery plan sessions ──────────────────────────────────────────────────
+-- A started recovery plan and its real, measured progress. Seeds are earned
+-- only when a plan's tracked progress reaches its target; the app never marks
+-- one finished on a button press. One live session per (day, plan).
+create table if not exists recovery_plan_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  recovery_date date not null,
+  plan_key text not null,
+  title text not null,
+  emoji text not null,
+  detail text,
+  target_type text not null check (target_type in ('steps', 'minutes', 'none')),
+  target_value integer not null default 0,
+  progress_value integer not null default 0,
+  status text not null default 'started' check (status in ('started', 'completed')),
+  started_at timestamptz not null default now(),
+  completed_at timestamptz,
+  reward_awarded boolean not null default false,
+  created_at timestamptz not null default now(),
+  unique (user_id, recovery_date, plan_key)
+);
+
+create index if not exists recovery_plan_sessions_user_date on recovery_plan_sessions (user_id, recovery_date);
+
+alter table recovery_plan_sessions enable row level security;
+drop policy if exists "own recovery plan sessions" on recovery_plan_sessions;
+create policy "own recovery plan sessions" on recovery_plan_sessions for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ── Garden: seed wallet & owned items ──────────────────────────────────────
+-- Completing a recovery activity earns seeds; seeds buy catalogue items that
+-- live permanently in the garden. Both are per-user and RLS-locked.
+create table if not exists garden_wallet (
+  user_id uuid primary key references auth.users on delete cascade,
+  seeds integer not null default 0,
+  updated_at timestamptz not null default now()
+);
+
+alter table garden_wallet enable row level security;
+drop policy if exists "own garden wallet" on garden_wallet;
+create policy "own garden wallet" on garden_wallet for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists garden_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  item_key text not null,
+  name text not null,
+  emoji text not null,
+  kind text not null check (kind in ('plant', 'flower', 'pet', 'decoration')),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists garden_items_user on garden_items (user_id, created_at);
+
+alter table garden_items enable row level security;
+drop policy if exists "own garden items" on garden_items;
+create policy "own garden items" on garden_items for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- ── Pillar 1: Calendar Sync & Workload Capacity ─────────────────────────────
 
 create table if not exists calendar_connections (
   user_id uuid not null references auth.users on delete cascade,
-  provider text not null check (provider in ('google', 'outlook')),
   provider text not null default 'device' check (provider in ('device', 'google', 'outlook')),
   connected boolean not null default true,
   account_email text,
@@ -930,15 +990,25 @@ create table if not exists workload_items (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users on delete cascade,
   title text not null,
-  category text not null check (category in ('academic', 'social', 'physical', 'errands', 'mental')),
+  category text not null default 'academic',
   estimated_hours double precision not null default 1.0,
-  priority text not null default 'medium' check (priority in ('low', 'medium', 'high')),
-  source text not null default 'manual' check (source in ('google', 'outlook', 'manual')),
-  status text not null default 'scheduled' check (status in ('scheduled', 'deferred', 'completed')),
+  priority text not null default 'medium',
+  source text not null default 'manual',
+  status text not null default 'scheduled',
   scheduled_start timestamptz,
   scheduled_end timestamptz,
+  calendar_event_id text,
   created_at timestamptz default now()
 );
+-- Loosen the fixed-list constraints that were rejecting AI-generated and
+-- calendar-synced categories/sources. The app writes free-form categories
+-- (e.g. "Engineering", "Health") and a "device" source; the old CHECK clauses
+-- silently dropped every row.
+alter table workload_items drop constraint if exists workload_items_category_check;
+alter table workload_items drop constraint if exists workload_items_source_check;
+alter table workload_items drop constraint if exists workload_items_status_check;
+alter table workload_items drop constraint if exists workload_items_priority_check;
+alter table workload_items add column if not exists calendar_event_id text;
 
 create index if not exists workload_items_user_time on workload_items (user_id, status, scheduled_start);
 
@@ -954,8 +1024,8 @@ create table if not exists ai_task_analysis (
   user_id uuid not null references auth.users on delete cascade,
   week_start date not null,
   title text not null,
-  category text not null check (category in ('academic', 'social', 'physical', 'errands', 'mental')),
-  priority text not null default 'medium' check (priority in ('low', 'medium', 'high')),
+  category text not null default 'academic',
+  priority text not null default 'medium',
   estimated_duration_hours double precision not null default 1.0,
   scheduled_date date not null,
   scheduled_start_time time,
@@ -963,11 +1033,18 @@ create table if not exists ai_task_analysis (
   capacity_hours double precision not null default 1.0,
   rank int not null default 0,
   ai_reasoning text,
-  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected', 'deferred', 'completed')),
+  stress_score double precision,
+  status text not null default 'pending',
   calendar_event_id text,
-  calendar_provider text check (calendar_provider in ('device', 'google', 'outlook')),
+  calendar_provider text,
   created_at timestamptz default now()
 );
+-- Loosen fixed-list constraints that reject AI-generated dynamic categories.
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_category_check;
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_priority_check;
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_status_check;
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_calendar_provider_check;
+alter table ai_task_analysis add column if not exists stress_score double precision;
 
 create index if not exists ai_task_analysis_user_week on ai_task_analysis (user_id, week_start, rank);
 

@@ -1,17 +1,23 @@
 import React, { useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
-  View
+  TextInput,
+  View,
 } from 'react-native';
 
+import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { NavBar, Screen } from '@/components/base';
+import type { TaskAnalysis } from '@/data/types';
 import { ITEMS } from '@/features/calibration/questionnaire';
 import { markOnboarded } from '@/lib/bootstrap';
 import { supabase } from '@/lib/supabaseClient';
@@ -19,17 +25,20 @@ import {
   connectCalendar,
   getCalendarConnections,
   getCalendarPermissionStatus,
-  syncCalendarEvents,
 } from '@/services/calendarSync';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import {
+  approveTaskAnalysis,
   getBaseline,
+  getTaskAnalyses,
   hasQuestionnaireAnswers,
   latestSelfReport,
   saveSelfReport,
   syncAndAnalyzeCalendar,
+  updateTaskAnalysis,
 } from '@/services/repository';
 import { colors } from '@/theme';
+
 type CalendarConnection = {
   provider: string;
   connected: boolean;
@@ -47,6 +56,29 @@ const COLORS = {
   orangeLight: '#F8EEDE',
   green: colors.calm,
 };
+
+function getWeekStart(date = new Date()): string {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  d.setDate(diff);
+  return d.toISOString().split('T')[0];
+}
+
+const CATEGORY_EMOJI: Record<string, string> = {
+  academic: '📚',
+  work: '💼',
+  social: '🌱',
+  physical: '🏃',
+  mental: '🧘',
+  errands: '🛒',
+  other: '📌',
+};
+
+function getCategoryEmoji(cat: string): string {
+  return CATEGORY_EMOJI[cat?.toLowerCase()] || '📌';
+}
+
 export default function BaselineScreen() {
   const router = useRouter();
   const [stress, setStress] = useState(45);
@@ -58,27 +90,40 @@ export default function BaselineScreen() {
   const [syncing, setSyncing] = useState(false);
   const [syncInfo, setSyncInfo] = useState<string | null>(null);
 
+  // Review Modal State for Analysed Tasks
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [tasksToReview, setTasksToReview] = useState<TaskAnalysis[]>([]);
+  const [editingTask, setEditingTask] = useState<TaskAnalysis | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const currentWeekStart = getWeekStart();
+
   const refresh = React.useCallback(async () => {
-  const [baseline, self, questionnaireCompleted, connections] = await Promise.all([
-    getBaseline(),
-    latestSelfReport(),
-    hasQuestionnaireAnswers(),
-    getCalendarConnections(),
-  ]);
+    const [baseline, self, questionnaireCompleted, connections, tasks] = await Promise.all([
+      getBaseline(),
+      latestSelfReport(),
+      hasQuestionnaireAnswers(),
+      getCalendarConnections(),
+      getTaskAnalyses(currentWeekStart),
+    ]);
 
-  const permissionStatus = await getCalendarPermissionStatus();
+    const permissionStatus = await getCalendarPermissionStatus();
 
-  setScanCount(baseline.calibrationScans);
-  setQuestionnaireDone(questionnaireCompleted);
+    setScanCount(baseline.calibrationScans);
+    setQuestionnaireDone(questionnaireCompleted);
 
-  // Restore the latest perceived-stress value.
-  if (self?.score != null) {
-    setStress(Number(self.score));
-  }
+    // Restore the latest perceived-stress value.
+    if (self?.score != null) {
+      setStress(Number(self.score));
+    }
 
-  setCalendarConnections(connections);
-  setCalendarPermission(permissionStatus);
-}, []);
+    setCalendarConnections(connections);
+    setCalendarPermission(permissionStatus);
+
+    if (tasks.length > 0) {
+      setSyncInfo(`${tasks.length} task(s) analyzed for this week`);
+    }
+  }, [currentWeekStart]);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -92,13 +137,13 @@ export default function BaselineScreen() {
     setSyncing(true);
     try {
       await connectCalendar();
-      const syncRes = await syncCalendarEvents();
+      const syncRes = await syncAndAnalyzeCalendar();
       await refresh();
-      if (syncRes.error) {
-        setSyncInfo('Calendar connected (demo mode/limited on this device)');
+      const currentTasks = await getTaskAnalyses(currentWeekStart);
+      if (currentTasks.length === 0) {
+        setSyncInfo('Calendar connected (0 tasks found for this week)');
       } else {
-        const total = (syncRes.saved || 0) + (syncRes.existing || 0);
-        setSyncInfo(`${total} task(s) found for this week`);
+        setSyncInfo(`${currentTasks.length} task(s) analyzed for this week`);
       }
     } catch (error) {
       console.error('Calendar connection error:', error);
@@ -108,14 +153,22 @@ export default function BaselineScreen() {
     }
   };
 
-
-
   const handleContinue = async () => {
     setSaving(true);
     try {
-      await saveSelfReport(Math.round(stress), null);
-      // Run AI workload analysis on current week calendar events before going to dashboard
+      // Sync and analyze calendar tasks for current week
       await syncAndAnalyzeCalendar();
+      const currentTasks = await getTaskAnalyses(currentWeekStart);
+
+      if (currentTasks.length > 0) {
+        setTasksToReview(currentTasks);
+        setShowReviewModal(true);
+        setSaving(false);
+        return;
+      }
+
+      // If no tasks, proceed directly
+      await saveSelfReport(Math.round(stress), null);
       await markOnboarded();
       router.replace('/home');
     } catch (error) {
@@ -129,13 +182,60 @@ export default function BaselineScreen() {
     }
   };
 
-  /**
-   * Back = leave setup entirely. Signing out (not router.back) is deliberate:
-   * baseline setup is per signed-in user, so stepping out of it means the
-   * session is over and the next entry has to sign in again — which re-runs
-   * bootstrap() and routes this user back here, data intact, because every
-   * step below is already persisted under their Supabase user id.
-   */
+  const handleConfirmAndSaveTasks = async () => {
+    setConfirming(true);
+    try {
+      // Approve all reviewed tasks
+      for (const t of tasksToReview) {
+        await approveTaskAnalysis(t.id, true);
+      }
+      await saveSelfReport(Math.round(stress), null);
+      await markOnboarded();
+      setShowReviewModal(false);
+      router.replace('/home');
+    } catch (error) {
+      console.error('Error confirming baseline tasks:', error);
+      Alert.alert('Error', 'Failed to save confirmed tasks. Please try again.');
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  const handleEditField = (field: keyof TaskAnalysis, value: unknown) => {
+    setEditingTask((prev) => (prev ? { ...prev, [field]: value } : prev));
+  };
+
+  const handleSaveTaskEdit = async () => {
+    if (!editingTask) return;
+    try {
+      await updateTaskAnalysis(editingTask.id, {
+        title: editingTask.title,
+        category: editingTask.category,
+        priority: editingTask.priority,
+        rank: editingTask.rank,
+        estimated_duration_hours: editingTask.estimated_duration_hours,
+        scheduled_date: editingTask.scheduled_date,
+        scheduled_start_time: editingTask.scheduled_start_time,
+        scheduled_end_time: editingTask.scheduled_end_time,
+      });
+      setTasksToReview((prev) =>
+        prev.map((t) => (t.id === editingTask.id ? editingTask : t))
+      );
+      setEditingTask(null);
+    } catch (err) {
+      console.error('Error saving task edit:', err);
+    }
+  };
+
+  const handleRejectTask = async (id: string) => {
+    try {
+      await approveTaskAnalysis(id, false);
+      setTasksToReview((prev) => prev.filter((t) => t.id !== id));
+    } catch (err) {
+      console.error('Error rejecting task:', err);
+    }
+  };
+
   const handleBackToLogin = async () => {
     await supabase.auth.signOut();
     router.replace('/login');
@@ -357,6 +457,249 @@ export default function BaselineScreen() {
           </View>
         )}
       </View>
+
+      {/* ── AI TASK REVIEW MODAL (Triggered on Continue to Dashboard) ──────── */}
+      <Modal visible={showReviewModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>
+                  {editingTask ? 'Edit Task' : 'AI Workload Review'}
+                </Text>
+                <Text style={styles.modalSubtitle}>
+                  {editingTask
+                    ? 'Adjust details below and save'
+                    : 'Review AI task analysis for this week before entering dashboard'}
+                </Text>
+              </View>
+              {editingTask && (
+                <Pressable
+                  onPress={() => setEditingTask(null)}
+                  hitSlop={8}
+                  style={{ padding: 4 }}
+                >
+                  <Ionicons name="close" size={22} color={colors.inkSoft} />
+                </Pressable>
+              )}
+            </View>
+
+            {editingTask ? (
+              /* ── Task Inline Editor ─── */
+              <ScrollView
+                style={{ maxHeight: 440 }}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+              >
+                <View style={styles.reviewEditorCard}>
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Rank</Text>
+                    <TextInput
+                      style={[styles.reviewEditorInput, { width: 70 }]}
+                      value={String(editingTask.rank)}
+                      onChangeText={(v) => handleEditField('rank', parseInt(v, 10) || 1)}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Title</Text>
+                    <TextInput
+                      style={styles.reviewEditorInput}
+                      value={editingTask.title}
+                      onChangeText={(v) => handleEditField('title', v)}
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Category</Text>
+                    <TextInput
+                      style={styles.reviewEditorInput}
+                      value={editingTask.category}
+                      onChangeText={(v) => handleEditField('category', v)}
+                    />
+                  </View>
+                  <Text style={styles.reviewEditorHint}>
+                    academic, work, social, physical, mental, errands
+                  </Text>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Priority</Text>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      {(['high', 'medium', 'low'] as const).map((p) => (
+                        <Pressable
+                          key={p}
+                          onPress={() => handleEditField('priority', p)}
+                          style={[
+                            styles.reviewPriorityBtn,
+                            editingTask.priority === p && styles.reviewPriorityBtnActive,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.reviewPriorityBtnText,
+                              editingTask.priority === p && { color: colors.cream },
+                            ]}
+                          >
+                            {p.toUpperCase()}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Hours</Text>
+                    <TextInput
+                      style={[styles.reviewEditorInput, { width: 70 }]}
+                      value={String(editingTask.estimated_duration_hours)}
+                      onChangeText={(v) =>
+                        handleEditField('estimated_duration_hours', parseFloat(v) || 1)
+                      }
+                      keyboardType="decimal-pad"
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Date</Text>
+                    <TextInput
+                      style={styles.reviewEditorInput}
+                      value={editingTask.scheduled_date}
+                      onChangeText={(v) => handleEditField('scheduled_date', v)}
+                      placeholder="YYYY-MM-DD"
+                    />
+                  </View>
+
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Start Time</Text>
+                    <TextInput
+                      style={[styles.reviewEditorInput, { width: 90 }]}
+                      value={editingTask.scheduled_start_time || ''}
+                      onChangeText={(v) => handleEditField('scheduled_start_time', v)}
+                      placeholder="HH:MM"
+                    />
+                  </View>
+
+                  {editingTask.ai_reasoning ? (
+                    <Text style={styles.reviewEditorReasoning}>
+                      AI: {editingTask.ai_reasoning}
+                    </Text>
+                  ) : null}
+
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                    <Pressable
+                      onPress={() => setEditingTask(null)}
+                      style={styles.reviewCancelBtn}
+                    >
+                      <Text style={styles.reviewCancelBtnText}>Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleSaveTaskEdit}
+                      style={styles.reviewSaveBtn}
+                    >
+                      <Text style={styles.reviewSaveBtnText}>Save Changes</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </ScrollView>
+            ) : (
+              /* ── Task List View ─── */
+              <ScrollView
+                style={{ maxHeight: 440 }}
+                showsVerticalScrollIndicator={false}
+              >
+                {tasksToReview.map((task) => (
+                  <View key={task.id} style={styles.reviewTaskItem}>
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <View style={styles.reviewRankPill}>
+                        <Text style={styles.reviewRankText}>#{task.rank}</Text>
+                      </View>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <View
+                          style={[
+                            styles.priorityPill,
+                            task.priority === 'high'
+                              ? styles.pillHigh
+                              : task.priority === 'medium'
+                                ? styles.pillMed
+                                : styles.pillLow,
+                          ]}
+                        >
+                          <Text style={styles.pillText}>{task.priority.toUpperCase()}</Text>
+                        </View>
+                        <Pressable
+                          onPress={() => setEditingTask({ ...task })}
+                          style={styles.reviewEditBtn}
+                        >
+                          <Ionicons name="pencil" size={14} color={colors.brown} />
+                          <Text style={styles.reviewEditText}>Edit</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+                      <Text style={{ fontSize: 16, marginRight: 6 }}>
+                        {getCategoryEmoji(task.category)}
+                      </Text>
+                      <Text style={styles.reviewTaskTitle}>{task.title}</Text>
+                    </View>
+                    <Text style={styles.reviewTaskDetails}>
+                      {task.category} • {task.estimated_duration_hours}h •{' '}
+                      {task.scheduled_date}{' '}
+                      {task.scheduled_start_time || 'All Day'}
+                    </Text>
+                    {task.stress_score != null && (
+                      <Text style={styles.reviewTaskStress}>
+                        Stress Impact: {task.stress_score}%
+                      </Text>
+                    )}
+                    {task.ai_reasoning ? (
+                      <Text style={styles.reviewTaskReasoning}>{task.ai_reasoning}</Text>
+                    ) : null}
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        justifyContent: 'flex-end',
+                        marginTop: 6,
+                      }}
+                    >
+                      <Pressable
+                        onPress={() => handleRejectTask(task.id)}
+                        style={styles.rejectBtn}
+                      >
+                        <Text style={styles.rejectBtnText}>Skip</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+
+            {!editingTask && (
+              <View style={styles.modalActions}>
+                <Pressable
+                  onPress={handleConfirmAndSaveTasks}
+                  disabled={confirming}
+                  style={[styles.primaryModalBtn, confirming && { opacity: 0.7 }]}
+                >
+                  {confirming ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.primaryModalBtnText}>
+                      Confirm & Save ({tasksToReview.length} Tasks) →
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
     </Screen>
   );
 }
@@ -433,4 +776,42 @@ const styles = StyleSheet.create({
   pressedButton: { opacity: 0.9, transform: [{ scale: 0.98 }] },
   disabledButton: { opacity: 0.6 },
   disabledContinue: { backgroundColor: '#A89F91' },
+  /* Modal Styles */
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  modalContent: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: '85%' },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
+  modalSubtitle: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  reviewTaskItem: { backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  reviewRankPill: { backgroundColor: colors.yellowWash, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
+  reviewRankText: { fontSize: 11, fontWeight: '700', color: colors.brown },
+  reviewTaskTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text, flex: 1 },
+  reviewTaskDetails: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  reviewTaskStress: { fontSize: 12, color: '#B45309', fontWeight: '600', marginTop: 2 },
+  reviewTaskReasoning: { fontSize: 11, color: '#4B5563', fontStyle: 'italic', marginTop: 4 },
+  reviewEditBtn: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: '#F8EEDE' },
+  reviewEditText: { fontSize: 11, fontWeight: '600', color: colors.brown },
+  priorityPill: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, borderWidth: 1 },
+  pillHigh: { backgroundColor: '#FEE2E2', borderColor: '#FECDD3' },
+  pillMed: { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' },
+  pillLow: { backgroundColor: '#DCFCE7', borderColor: '#BBF7D0' },
+  pillText: { fontSize: 9, fontWeight: '700', color: colors.inkSoft },
+  rejectBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, backgroundColor: '#F3F4F6' },
+  rejectBtnText: { fontSize: 11, color: '#6B7280', fontWeight: '600' },
+  modalActions: { marginTop: 14 },
+  primaryModalBtn: { backgroundColor: COLORS.brown, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
+  primaryModalBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  reviewEditorCard: { backgroundColor: '#FAF8F5', borderRadius: 14, padding: 14, borderWidth: 1, borderColor: colors.line },
+  reviewEditorField: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  reviewEditorLabel: { fontSize: 13, fontWeight: '600', color: colors.ink, minWidth: 80 },
+  reviewEditorInput: { flex: 1, height: 36, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 10, fontSize: 13, color: colors.ink, textAlign: 'right' },
+  reviewEditorHint: { fontSize: 10, color: colors.inkFaint, marginTop: -2, marginBottom: 6, textAlign: 'right' },
+  reviewEditorReasoning: { fontSize: 11, color: colors.inkSoft, fontStyle: 'italic', marginTop: 10, lineHeight: 16 },
+  reviewPriorityBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFFFF' },
+  reviewPriorityBtnActive: { backgroundColor: colors.brown, borderColor: colors.brown },
+  reviewPriorityBtnText: { fontSize: 10, fontWeight: '700', color: colors.inkSoft },
+  reviewCancelBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.line, alignItems: 'center' },
+  reviewCancelBtnText: { fontSize: 13, fontWeight: '600', color: colors.inkSoft },
+  reviewSaveBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.brown, alignItems: 'center' },
+  reviewSaveBtnText: { fontSize: 13, fontWeight: '700', color: colors.cream },
 });

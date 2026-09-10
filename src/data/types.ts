@@ -267,3 +267,101 @@ export interface LoadBalanceSuggestion {
   hoursSaved: number;
 }
 
+/* ── Pillar 5: recovery & garden ─────────────────────────────────── */
+
+/** One day of recovery activity, keyed by ISO date. */
+export interface RecoveryDay {
+  date: string;
+  completedPlanIds: string[];
+  gameCompleted?: boolean;
+  gameMinutes?: number;
+  outdoorCompleted?: boolean;
+  recoveryEventId?: string | null;
+  recoveryEventStart?: string | null;
+  recoveryPct?: number;
+  updatedAt?: string;
+}
+
+/** A real gap in today's schedule, as "HH:MM" label + minutes of freedom. */
+export interface AvailableSlot {
+  start: string;
+  end: string;
+  minutes: number;
+}
+
+/** One gentle, optional recovery suggestion matched to a free slot. */
+export interface RecoverySuggestion {
+  id: string;
+  emoji: string;
+  title: string;
+  detail: string;
+  minutes: number;
+  reason: string;
+  slot?: AvailableSlot;
+  /**
+   * How "done" is actually measured. A plan is never finished by tapping a
+   * button — `steps` is met by the pedometer, `minutes` by a real timer.
+   */
+  targetType: 'steps' | 'minutes';
+  /** The real target: number of steps, or number of minutes. */
+  targetValue: number;
+}
+
+/**
+ * A started recovery plan. Persisted so progress and completion survive
+ * reloads and reflect real tracking, never a guessed "done".
+ */
+export interface RecoveryPlanSession {
+  id: string;
+  /** The recovery day the plan belongs to (ISO date). */
+  date: string;
+  /** The plan / suggestion id this session belongs to. */
+  planKey: string;
+  title: string;
+  emoji: string;
+  detail?: string | null;
+  targetType: 'steps' | 'minutes' | 'none';
+  targetValue: number;
+  /** Current measured progress: steps taken, or minutes elapsed. */
+  progressValue: number;
+  status: 'started' | 'completed';
+  startedAt: string;
+  completedAt?: string | null;
+  /** Whether the one-time seed reward was already granted for this session. */
+  rewardAwarded?: boolean;
+  createdAt: string;
+}
+
+/** The day's plan: free time plus a few gentle optional suggestions. */
+export interface DailyRecoveryPlan {
+  date: string;
+  slots: AvailableSlot[];
+  suggestions: RecoverySuggestion[];
+  note: string;
+}
+
+/** Seed balance held by the user to grow their garden. */
+export interface GardenWallet {
+  seeds: number;
+  updatedAt?: string;
+}
+
+/** A purchasable garden object (static catalogue entry). */
+export interface GardenCatalogItem {
+  key: string;
+  name: string;
+  emoji: string;
+  kind: 'plant' | 'flower' | 'pet' | 'decoration';
+  seeds: number;
+}
+
+/** An item the user owns, persisted in the garden. */
+export interface GardenItem {
+  id: string;
+  itemKey: string;
+  name: string;
+  emoji: string;
+  kind: 'plant' | 'flower' | 'pet' | 'decoration';
+  placedAt?: string;
+}
+

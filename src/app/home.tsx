@@ -1,4 +1,4 @@
-import HomeScreen from '../screens/home'; // Import from your screens folder
+import HomeScreen from '../screens/home';
 
 export default function Page() {
   return <HomeScreen />;

@@ -10,88 +10,84 @@
  */
 
 import type {
+  AvailableSlot,
   CalendarEventItem,
+  DailyRecoveryPlan,
   LoadBalanceSuggestion,
+  RecoverySuggestion,
   TaskAnalysis,
   WeeklyCapacityAnalysis,
 } from '@/data/types';
 
-const OPENROUTER_KEY = process.env.EXPO_PUBLIC_OPENROUTER_API_KEY;
-const GEMINI_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
+
 
 /* ── AI Callers ─────────────────────────────────────────────────── */
 
-async function callOpenRouter(prompt: string, systemPrompt?: string): Promise<string | null> {
-  if (!OPENROUTER_KEY) return null;
+import { Groq } from 'groq-sdk';
+
+const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY;
+
+const groq = GROQ_API_KEY
+  ? new Groq({
+      apiKey: GROQ_API_KEY,
+      dangerouslyAllowBrowser: true,
+    })
+  : null;
+
+async function callGroq(
+  prompt: string,
+  systemPrompt?: string
+): Promise<string | null> {
+  if (!groq) return null;
+
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENROUTER_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://wick.app',
-        'X-Title': 'Wick Stress & Workload',
-      },
-      body: JSON.stringify({
-        model: 'nex-agi/nex-n2.5-pro:free',
-        messages: [
-          ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-          { role: 'user', content: prompt },
-        ],
-        temperature: 0.2,
-      }),
+    const completion = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-120b',
+
+      messages: [
+        ...(systemPrompt
+          ? [{ role: 'system' as const, content: systemPrompt }]
+          : []),
+        {
+          role: 'user' as const,
+          content: prompt,
+        },
+      ],
+
+      temperature: 0.2,
+      max_completion_tokens: 16384,
+      top_p: 0.95,
+
+      stream: false,
+
+      reasoning_effort: 'medium',
     });
-    if (!res.ok) {
-      console.warn(`OpenRouter HTTP ${res.status}:`, await res.text());
+
+    const message = completion.choices?.[0]?.message;
+
+    if (!message) {
+      console.error('Groq returned no message:', completion);
       return null;
     }
-    const json = await res.json();
-    return json?.choices?.[0]?.message?.content ?? null;
+
+    return message.content ?? null;
   } catch (err) {
-    console.warn('OpenRouter request failed, falling back to local NLP:', err);
+    console.error(
+      'Groq request failed, falling back to local NLP:',
+      err
+    );
     return null;
   }
 }
 
-async function callGeminiDirect(prompt: string, systemInstruction?: string): Promise<string | null> {
-  if (!GEMINI_KEY) return null;
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`;
-    const body: any = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
-    };
-    if (systemInstruction) {
-      body.systemInstruction = { parts: [{ text: systemInstruction }] };
-    }
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      console.warn(`Gemini Direct HTTP ${res.status}:`, await res.text());
-      return null;
-    }
-    const json = await res.json();
-    return json?.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
-  } catch (err) {
-    console.warn('Gemini request failed, falling back to local NLP:', err);
-    return null;
-  }
+async function callAI(
+  prompt: string,
+  systemPrompt?: string
+): Promise<string | null> {
+  return callGroq(prompt, systemPrompt);
 }
 
-async function callAI(prompt: string, systemPrompt?: string): Promise<string | null> {
-  if (OPENROUTER_KEY) {
-    const response = await callOpenRouter(prompt, systemPrompt);
-    if (response) return response;
-  }
-  if (GEMINI_KEY) {
-    const response = await callGeminiDirect(prompt, systemPrompt);
-    if (response) return response;
-  }
-  return null;
-}
+
 
 /* ── Rule-Based Deterministic NLP Heuristic Engine ────────────────────────── */
 
@@ -240,7 +236,7 @@ OUTPUT STRICT VALID JSON ONLY (no markdown fences, just [ ... ]).`;
         });
       }
     } catch (e) {
-      console.warn('Failed to parse AI output, proceeding with deterministic heuristic:', e);
+      console.error('Failed to parse AI output, proceeding with deterministic heuristic:', e);
     }
   }
 
@@ -402,7 +398,7 @@ OUTPUT STRICT JSON ONLY.`;
         };
       }
     } catch (e) {
-      console.warn('AI NLP parse error, falling back to local heuristic:', e);
+      console.error('AI NLP parse error, falling back to local heuristic:', e);
     }
   }
 
@@ -514,5 +510,160 @@ export async function suggestLoadBalance(
       hoursSaved: task.estimated_duration_hours || 1,
     };
   });
+}
+
+/* ── Daily recovery plan ─────────────────────────────────────────── */
+
+export interface RecoveryPlanContext {
+  /** ISO date the plan is for. */
+  date: string;
+  /** Real free windows computed from the day's scheduled tasks. */
+  slots: AvailableSlot[];
+  /** Share of the week's capacity already used, 0-100. */
+  capacityPct: number;
+  overloaded: boolean;
+  /** Latest measured stress score, 0-100, or null when none exists. */
+  stressScore: number | null;
+  /** Perceived stress baseline from onboarding, or null. */
+  baseline: number | null;
+  /** ids the user already completed today (not suggested again). */
+  completedToday: string[];
+}
+
+/** Gentle, optional activities grouped by the length of free time they fit in. */
+const GENTLE_ACTIVITIES: {
+  id: string;
+  emoji: string;
+  title: string;
+  detail: string;
+  minutes: number;
+  targetType: 'steps' | 'minutes';
+  targetValue: number;
+}[] = [
+  { id: 'breath', emoji: '🌬️', title: 'A slow minute of breathing', detail: 'In for four, out for four, wherever you are.', minutes: 5, targetType: 'minutes', targetValue: 5 },
+  { id: 'water', emoji: '💧', title: 'A full glass of water, really slowly', detail: 'No rush. Just you and the glass.', minutes: 5, targetType: 'minutes', targetValue: 5 },
+  { id: 'stretch', emoji: '🧎', title: 'A gentle stretch from your chair', detail: 'Reach up, roll your shoulders, let them drop.', minutes: 10, targetType: 'minutes', targetValue: 10 },
+  { id: 'tea', emoji: '🍵', title: 'A warm drink, no screens nearby', detail: 'Hold the cup with both hands. That is the whole task.', minutes: 15, targetType: 'minutes', targetValue: 15 },
+  { id: 'walk', emoji: '🌳', title: 'A short walk without a destination', detail: 'Pace is nothing. Leaving your desk is everything.', minutes: 20, targetType: 'steps', targetValue: 2000 },
+  { id: 'window', emoji: '🪟', title: 'Two minutes looking out a window', detail: 'Watch one thing move. A cloud, a tree, a street.', minutes: 10, targetType: 'minutes', targetValue: 10 },
+  { id: 'music', emoji: '🎧', title: 'One song, eyes closed', detail: 'Pick a song you love. Nothing else for its length.', minutes: 10, targetType: 'minutes', targetValue: 10 },
+  { id: 'journal', emoji: '📓', title: 'A few unpolished sentences', detail: 'Whatever is on your mind. No full sentences required.', minutes: 15, targetType: 'minutes', targetValue: 15 },
+  { id: 'stroll', emoji: '🚶', title: 'A slow stroll around the block', detail: 'If the weather agrees. If not, this can wait.', minutes: 30, targetType: 'steps', targetValue: 3000 },
+  { id: 'bath', emoji: '🛁', title: 'Unhurried time to reset', detail: 'Warm water, nothing else competing for your attention.', minutes: 45, targetType: 'minutes', targetValue: 45 },
+];
+
+/** Clamp an AI-provided number into something sensible for the target type. */
+function clampTarget(targetType: 'steps' | 'minutes', minutes: number, raw?: number): number {
+  if (targetType === 'steps') {
+    const steps = Math.round(Number(raw) || 0);
+    if (steps >= 500 && steps <= 10000) return steps;
+    return 2000;
+  }
+  return Math.max(1, Math.round(minutes));
+}
+
+function normalizeTargetType(raw: unknown): 'steps' | 'minutes' {
+  const value = String(raw ?? '').toLowerCase();
+  return value === 'steps' ? 'steps' : 'minutes';
+}
+
+export async function generateDailyRecoveryPlan(ctx: RecoveryPlanContext): Promise<DailyRecoveryPlan> {
+  const prompt = `Create a gentle, optional daily recovery plan for a stressed student.
+Today is ${ctx.date}. Their real free windows are: ${ctx.slots.length > 0 ? ctx.slots.map(s => `${s.start}-${s.end} (${s.minutes} min)`).join(', ') : 'none found'}.
+Weekly capacity used: ${ctx.capacityPct}%${ctx.overloaded ? ' (heavy week)' : ''}.
+Latest stress: ${ctx.stressScore ?? 'unknown'}/100. Baseline: ${ctx.baseline ?? 'unknown'}/100.
+Already done today: ${ctx.completedToday.length > 0 ? ctx.completedToday.join(', ') : 'nothing yet'}.
+
+Reply with STRICT JSON:
+{
+  "note": "one soft, caring sentence (no pressure, no 'you must')",
+  "suggestions": [
+    {
+      "id": "unique-slug",
+      "emoji": "one emoji",
+      "title": "15-45 char gentle activity title",
+      "detail": "one gentle sentence, optional and kind",
+      "minutes": 5-45 matching a free window's length,
+      "targetType": "steps" for walking plans, otherwise "minutes",
+      "targetValue": number (target action: for steps 500-5000 real steps, for minutes the same length as "minutes"),
+      "reason": "one soft sentence tied to their real situation"
+    }
+  ]
+}
+Rules: 3 suggestions max. Every suggestion must fit one of their free windows. For walking plans prefer a real step target (500-5000) that feels reachable today. Never use 'must', 'should', 'streak', 'complete this', 'don't break'. If there are no free windows, suggest only 1-2 micro-pauses (5 min) that fit anywhere.
+OUTPUT STRICT VALID JSON ONLY (no markdown fences).`;
+
+  const rawAi = await callAI(prompt, 'You are a kind, low-pressure recovery companion for stressed students.');
+  if (rawAi) {
+    try {
+      const clean = rawAi.trim().replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+      const parsed = JSON.parse(clean);
+      if (parsed && Array.isArray(parsed.suggestions)) {
+        const suggestions: RecoverySuggestion[] = parsed.suggestions
+          .slice(0, 3)
+          .map((s: any, idx: number) => {
+            const minutes = Number(s.minutes) || 10;
+            const targetType = normalizeTargetType(s.targetType);
+            return {
+              id: String(s.id || `ai-${idx}`),
+              emoji: String(s.emoji || '🌿'),
+              title: String(s.title || 'A small pause'),
+              detail: String(s.detail || ''),
+              minutes,
+              reason: String(s.reason || 'It just might feel nice.'),
+              targetType,
+              targetValue: clampTarget(targetType, minutes, Number(s.targetValue)),
+              slot: ctx.slots.find((slot) => slot.minutes >= minutes),
+            };
+          });
+        return {
+          date: ctx.date,
+          slots: ctx.slots,
+          suggestions: suggestions.length > 0 ? suggestions : heuristicSuggestions(ctx),
+          note: String(parsed.note || 'Here is one idea at a time. Take whatever feels okay.'),
+        };
+      }
+    } catch (e) {
+      console.error('Failed to parse AI recovery plan, using local heuristic:', e);
+    }
+  }
+  return { date: ctx.date, slots: ctx.slots, suggestions: heuristicSuggestions(ctx), note: heuristicNote(ctx) };
+}
+
+function heuristicNote(ctx: RecoveryPlanContext): string {
+  if (ctx.overloaded) return 'This week is carrying a lot. Even one tiny pause can soften it.';
+  if ((ctx.stressScore ?? 50) >= 60) return 'Things feel a little heavier than usual. A small reset might help.';
+  return 'You have some open time today. Here are ideas, not obligations.';
+}
+
+function heuristicSuggestions(ctx: RecoveryPlanContext): RecoverySuggestion[] {
+  const taken = ctx.completedToday;
+  const pool = GENTLE_ACTIVITIES.filter((a) => !taken.includes(a.id) && a.minutes <= (ctx.slots[0]?.minutes ?? a.minutes));
+  const picks = pool.slice(0, 3);
+  return picks.length > 0
+    ? picks.map((a) => ({
+        id: a.id,
+        emoji: a.emoji,
+        title: a.title,
+        detail: a.detail,
+        minutes: a.minutes,
+        targetType: a.targetType,
+        targetValue: a.targetValue,
+        reason: ctx.overloaded ? 'A tiny reset can soften a heavy week.' : 'You deserve a gentle pause.',
+        slot: ctx.slots.find((s) => s.minutes >= a.minutes),
+      }))
+    : [
+        {
+          id: 'breath',
+          emoji: '🌬️',
+          title: 'A slow minute of breathing',
+          detail: 'In for four, out for four, wherever you are.',
+          minutes: 5,
+          targetType: 'minutes',
+          targetValue: 5,
+          reason: 'A tiny reset can soften a heavy week.',
+          slot: ctx.slots[0],
+        },
+      ];
 }
 
