@@ -281,7 +281,6 @@ export default function BaselineScreen() {
 
   return (
     <Screen
-      header={<NavBar title="SET UP" onBack={handleBackToLogin} />}
       footer={
         <View style={styles.bottomContainer}>
           <Pressable
@@ -302,6 +301,7 @@ export default function BaselineScreen() {
         </View>
       }
     >
+      <NavBar title="SET UP" onBack={handleBackToLogin} />
       <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
 
       <View style={styles.titleSection}>
