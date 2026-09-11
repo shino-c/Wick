@@ -31,7 +31,7 @@ const POP_REPLAY_GAP_MS = 70;
  */
 function loadBubblePopSource() {
 	try {
-		return require("../assets/sounds/bubble-pop.mp3");
+		return require("../../assets/sounds/bubble-pop.wav");
 	} catch {
 		return null;
 	}
@@ -59,8 +59,11 @@ function useAudioPlayers(source: number | null) {
 				const player = [p0, p1, p2, p3, p4, p5][voice];
 				if (!player) return;
 				// A voice that just finished needs to rewind before it can re-fire.
-				if (player.playing) player.seekTo(0);
-				player.play();
+				if (player.playing) {
+					player.seekTo(0).then(() => player.play());
+				} else {
+					player.play();
+				}
 			},
 		}),
 		[p0, p1, p2, p3, p4, p5]
@@ -319,23 +322,7 @@ export default function BubblePopScreen() {
 			<NavBar
 				title="Bubble Pop"
 				onBack={() => router.back()}
-				right={
-					<Pressable
-						accessibilityLabel={
-							soundOn ? "Turn audio off" : "Turn audio on"
-						}
-						accessibilityRole="button"
-						accessibilityState={{ checked: soundOn }}
-						style={styles.audioIconButton}
-						onPress={() => setSoundOn((value) => !value)}
-					>
-						<Text style={styles.audioIcon}>
-							{soundOn ? "🔊" : "🔇"}
-						</Text>
-					</Pressable>
-				}
 			/>
-
 			<ScrollView
 				contentContainerStyle={styles.content}
 				showsVerticalScrollIndicator={false}
@@ -410,6 +397,18 @@ export default function BubblePopScreen() {
 					<View style={styles.controlActions}>
 						<Pressable
 							accessibilityLabel={
+								soundOn ? "Turn audio off" : "Turn audio on"
+							}
+							style={styles.resetButton}
+							onPress={() => setSoundOn((value) => !value)}
+						>
+							<Text style={styles.resetIcon}>
+								{soundOn ? "🔊" : "🔇"}
+							</Text>
+						</Pressable>
+
+						<Pressable
+							accessibilityLabel={
 								hapticsOn
 									? "Turn haptics off"
 									: "Turn haptics on"
@@ -441,30 +440,6 @@ const styles = StyleSheet.create({
 	screen: {
 		flex: 1,
 		backgroundColor: "#FFFBEB",
-	},
-
-	audioIconButton: {
-		width: 40,
-		height: 40,
-		borderRadius: 20,
-		backgroundColor: "#FFFFFF",
-		borderWidth: 1,
-		borderColor: "#F4EDE0",
-		alignItems: "center",
-		justifyContent: "center",
-
-		shadowColor: "#6B5036",
-		shadowOpacity: 0.06,
-		shadowRadius: 4,
-		shadowOffset: {
-			width: 0,
-			height: 2,
-		},
-		elevation: 2,
-	},
-
-	audioIcon: {
-		fontSize: 15,
 	},
 
 	content: {
