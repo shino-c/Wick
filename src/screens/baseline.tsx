@@ -17,7 +17,7 @@ import Slider from '@react-native-community/slider';
 import { useFocusEffect, useRouter } from 'expo-router';
 
 import { NavBar, Screen } from '@/components/base';
-import { DateChipPicker, TimeChipPicker } from '@/components/taskPickers';
+import { DateChipPicker, TimePicker } from '@/components/taskPickers';
 import type { TaskAnalysis } from '@/data/types';
 import { ITEMS } from '@/features/calibration/questionnaire';
 import { markOnboarded } from '@/lib/bootstrap';
@@ -601,7 +601,7 @@ export default function BaselineScreen() {
                   {/* Time Chips — preset slots + Other text fallback */}
                   <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
                     <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
-                    <TimeChipPicker
+                    <TimePicker
                       key={`${editingTask.id}-time`}
                       value={editingTask.scheduled_start_time}
                       onChange={(v) => handleEditField('scheduled_start_time', v)}

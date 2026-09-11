@@ -46,6 +46,9 @@ const DAY_START_MIN = 8 * 60;
 const DAY_END_MIN = 22 * 60;
 const MIN_FREE_MINUTES = 5;
 
+/** Seeds rewarded instantly when the user joins a shared circle challenge. */
+const CHALLENGE_JOIN_REWARD_SEEDS = 5;
+
 const blankDay = (date: string): RecoveryDay => ({
   date,
   completedPlanIds: [],
@@ -562,6 +565,10 @@ export async function setChallengeJoinedForToday(
   const updated = withChallengeState(plan, challengeId, joined);
   if (updated.suggestions.some((s) => s.challengeId === challengeId)) {
     await saveDailyRecoveryPlan(date, updated);
+    // Award seeds instantly the first time the user joins a shared challenge.
+    if (joined) {
+      await earnSeeds(CHALLENGE_JOIN_REWARD_SEEDS);
+    }
   }
   return updated;
 }

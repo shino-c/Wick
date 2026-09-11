@@ -89,8 +89,9 @@ export default function RecoveryScreen() {
 	const [toast, setToast] = useState<string | null>(null);
 	const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-	// Garden drag-to-position
-	const gardenSizeRef = useRef({ width: 300, height: 150 });
+	// Garden drag-to-position — default height must match grass minHeight so
+	// items placed near the bottom remain draggable even before onLayout fires.
+	const gardenSizeRef = useRef({ width: 300, height: 220 });
 
 	const showToast = useCallback((message: string) => {
 		setToast(message);
@@ -124,7 +125,7 @@ export default function RecoveryScreen() {
                         onPanResponderMove: (_evt, gesture) => {
                             // 获取容器实际宽高，若未加载完给个默认兜底高度防除以零
                             const width = gardenSizeRef.current.width || 300;
-                            const height = gardenSizeRef.current.height || 200;
+                            const height = gardenSizeRef.current.height || 220;
                             
                             const newX = startPosRef.current.x + (gesture.dx / width) * 100;
                             const newY = startPosRef.current.y + (gesture.dy / height) * 100;
@@ -136,7 +137,7 @@ export default function RecoveryScreen() {
                         },
                         onPanResponderRelease: (_evt, gesture) => {
                             const width = gardenSizeRef.current.width || 300;
-                            const height = gardenSizeRef.current.height || 200;
+                            const height = gardenSizeRef.current.height || 220;
 
                             const newX = startPosRef.current.x + (gesture.dx / width) * 100;
                             const newY = startPosRef.current.y + (gesture.dy / height) * 100;
@@ -261,8 +262,13 @@ export default function RecoveryScreen() {
 			setJoiningChallenge(true);
 			try {
 				await toggleChallenge(id);
-				setPlan(await setChallengeJoinedForToday(id, true));
-				showToast("Joined. Your circle is holding this time for you.");
+				const [updatedPlan, freshWallet] = await Promise.all([
+					setChallengeJoinedForToday(id, true),
+					getGardenWallet(),
+				]);
+				setPlan(updatedPlan);
+				setWallet(freshWallet);
+				showToast("Joined. +5 seeds for your garden, and your circle is holding this time for you.");
 			} catch (err) {
 				showToast(err instanceof Error ? err.message : "Could not join that challenge just yet.");
 			} finally {
@@ -1162,7 +1168,7 @@ const styles = StyleSheet.create({
 		padding: spacing(4),
 		borderTopWidth: 1,
 		borderTopColor: colors.line,
-		minHeight: 150,
+		minHeight: 220,
 	},
 	gardenBed: { position: 'relative' },
 	plant: {

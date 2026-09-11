@@ -19,7 +19,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-native-svg';
 
 import BottomNavigation from '@/components/bottombar';
-import { DateChipPicker, TimeChipPicker } from '@/components/taskPickers';
+import { DateChipPicker, TimePicker } from '@/components/taskPickers';
 import TopNavigation from '@/components/topbar';
 import type {
   CalendarConnection,
@@ -63,6 +63,7 @@ const COLORS = {
   warningText: '#854D0E',
   warningSubtext: '#713F12',
   academic: '#F87171',
+  work: '#FDBA74',
   social: '#BAE6FD',
   physical: '#BBF7D0',
   errands: '#FDE2E4',
@@ -477,7 +478,8 @@ export default function Home() {
     social: tasks.filter((t) => t.category === 'social' && t.status !== 'deferred').length,
     physical: tasks.filter((t) => t.category === 'physical' && t.status !== 'deferred').length,
     mental: tasks.filter((t) => t.category === 'mental' && t.status !== 'deferred').length,
-    errands: tasks.filter((t) => (t.category === 'errands' || t.category === 'work') && t.status !== 'deferred').length,
+    work: tasks.filter((t) => t.category === 'work' && t.status !== 'deferred').length,
+    errands: tasks.filter((t) => t.category === 'errands' && t.status !== 'deferred').length,
   };
 
   // ── Per-day stress synthesis (biometric + self-report + AI task stress) ──
@@ -997,12 +999,24 @@ export default function Home() {
                 badgeBackground="#E9D5FF"
                 badgeColor="#9333EA"
               />
+              <View style={[styles.categoryFull, { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }]}>
+                <View style={styles.otherLeft}>
+                  <Text style={styles.categoryEmoji}>💼</Text>
+                  <View style={{ marginLeft: 10 }}>
+                    <Text style={styles.categoryTitle}>Work</Text>
+                    <Text style={styles.categoryDescription}>Projects, Tasks & Meetings</Text>
+                  </View>
+                </View>
+                <View style={styles.otherBadge}>
+                  <Text style={styles.otherBadgeText}>{categoryCounts.work} Tasks</Text>
+                </View>
+              </View>
               <View style={[styles.categoryFull, { backgroundColor: '#FDF2F4', borderColor: '#FBCFE8' }]}>
                 <View style={styles.otherLeft}>
                   <Text style={styles.categoryEmoji}>🛒</Text>
                   <View style={{ marginLeft: 10 }}>
                     <Text style={styles.categoryTitle}>Others & Errands</Text>
-                    <Text style={styles.categoryDescription}>Chores, Meetings & Misc</Text>
+                    <Text style={styles.categoryDescription}>Chores & Misc</Text>
                   </View>
                 </View>
                 <View style={styles.otherBadge}>
@@ -1258,7 +1272,7 @@ export default function Home() {
                   {/* Time Chips — preset slots + Other text fallback */}
                   <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
                     <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
-                    <TimeChipPicker
+                    <TimePicker
                       key={`${editingTask.id}-time`}
                       value={editingTask.scheduled_start_time}
                       onChange={(v) => handleEditField('scheduled_start_time', v)}
@@ -1475,7 +1489,7 @@ export default function Home() {
                         {/* Time Chips */}
                         <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
                           <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
-                          <TimeChipPicker
+                          <TimePicker
                             key={`parsed-${editingParsedIdx}-time`}
                             value={task.scheduled_start_time}
                             onChange={(v) => updateField('scheduled_start_time', v)}

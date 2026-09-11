@@ -174,6 +174,25 @@ function calculateStressScore(priority: string, category: string, hours: number)
   return Math.max(10, Math.min(95, base));
 }
 
+/**
+ * True when a task reads like a deadline (something due "by" a day) rather
+ * than a flexible appointment. Deadlines usually land at the last possible
+ * moment — 11:59 PM of the named day.
+ */
+function isDeadlineTask(lower: string): boolean {
+  return (
+    lower.includes('assignment') ||
+    lower.includes('exam') ||
+    lower.includes('essay') ||
+    lower.includes('due') ||
+    lower.includes('deadline') ||
+    lower.includes('paper') ||
+    lower.includes('project') ||
+    lower.includes('submission') ||
+    lower.includes('report')
+  );
+}
+
 function parseEventDate(
   value: string | undefined,
   eventId: string,
@@ -573,14 +592,23 @@ function heuristicParseSegment(
 
   // Extract time if specified (e.g. "2pm", "14:00", "at 9")
   let startTime = '10:00';
+  let hasExplicitTime = false;
   const timeMatch = lower.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
   if (timeMatch && (timeMatch[3] || lower.includes('at '))) {
+    hasExplicitTime = true;
     let h = parseInt(timeMatch[1], 10);
     const m = timeMatch[2] || '00';
     const ampm = timeMatch[3];
     if (ampm === 'pm' && h < 12) h += 12;
     if (ampm === 'am' && h === 12) h = 0;
     startTime = `${h.toString().padStart(2, '0')}:${m}`;
+  }
+
+  // Academic deadlines are almost always due just before midnight. If the user
+  // names a day but no time ("Assignment Fri", "Essay due Thu"), guess 23:59
+  // instead of a morning slot — that is the hour a deadline is usually booked.
+  if (!hasExplicitTime && isDeadlineTask(lower)) {
+    startTime = '23:59';
   }
 
   // Calculate end time
