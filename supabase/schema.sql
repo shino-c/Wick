@@ -953,6 +953,12 @@ create table if not exists garden_items (
   created_at timestamptz not null default now()
 );
 
+-- Older projects created garden_items before drag-to-decorate existed, so the
+-- drawing position is added here as well: `create table if not exists` does
+-- nothing when the table is already there, and every path that reads or writes
+-- a placement would otherwise fail against a column that is missing.
+alter table garden_items add column if not exists position jsonb;
+
 create index if not exists garden_items_user on garden_items (user_id, created_at);
 
 alter table garden_items enable row level security;

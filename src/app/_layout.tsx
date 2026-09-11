@@ -14,6 +14,7 @@ import {
 import { bootstrap, type BootstrapResult } from '@/lib/bootstrap';
 import { colors } from '@/theme';
 import { BackendBanner } from '@/components/BackendBanner';
+import { NotificationProvider } from '@/components/NotificationProvider';
 
 /**
  * Root layout. Holds the two things every route needs before it can render:
@@ -53,8 +54,9 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <StatusBar style="dark" />
-      <Stack
+      <NotificationProvider>
+        <StatusBar style="dark" />
+        <Stack
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: colors.cream },
@@ -74,8 +76,9 @@ export default function RootLayout() {
             enforced pause depends on it. */}
         <Stack.Screen name="session" options={{ gestureEnabled: false, animation: 'fade' }} />
         <Stack.Screen name="summary" options={{ gestureEnabled: false }} />
-      </Stack>
-      <BackendBanner backend={boot.backend} warning={boot.warning} />
+        </Stack>
+        <BackendBanner backend={boot.backend} warning={boot.warning} />
+      </NotificationProvider>
     </SafeAreaProvider>
   );
 }

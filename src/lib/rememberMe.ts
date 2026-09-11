@@ -10,6 +10,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  * counts as remembered so existing installs keep working.
  */
 const KEY = 'wick.rememberMe';
+const IDENTIFIER_KEY = 'wick.rememberedIdentifier';
 
 export async function getRememberMe(): Promise<boolean> {
   try {
@@ -24,5 +25,26 @@ export async function setRememberMe(remember: boolean): Promise<void> {
     await AsyncStorage.setItem(KEY, remember ? 'true' : 'false');
   } catch {
     // Storage unavailable — default to remembered; worst case is an extra login.
+  }
+}
+
+export async function getRememberedIdentifier(): Promise<string> {
+  try {
+    return (await AsyncStorage.getItem(IDENTIFIER_KEY)) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export async function setRememberedIdentifier(identifier: string): Promise<void> {
+  try {
+    const value = identifier.trim();
+    if (value) {
+      await AsyncStorage.setItem(IDENTIFIER_KEY, value);
+    } else {
+      await AsyncStorage.removeItem(IDENTIFIER_KEY);
+    }
+  } catch {
+    // Storage unavailable — the login field remains usable without persistence.
   }
 }

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -13,10 +13,15 @@ import {
 } from 'react-native';
 
 import { useRouter } from 'expo-router';
-import Svg, { Path, Circle } from 'react-native-svg';
+import Svg, { Circle, Path } from 'react-native-svg';
 
-import { supabase, hasSupabase } from '@/lib/supabaseClient';
-import { getRememberMe, setRememberMe } from '@/lib/rememberMe';
+import {
+  getRememberedIdentifier,
+  getRememberMe,
+  setRememberedIdentifier,
+  setRememberMe,
+} from '@/lib/rememberMe';
+import { hasSupabase, supabase } from '@/lib/supabaseClient';
 import { colors, font, radius, shadow, spacing } from '@/theme';
 
 /* ─── validation helpers ────────────────────────────────────────────────── */
@@ -76,6 +81,21 @@ export default function LoginScreen() {
   // The user can type either their email or username.
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+
+  // Restore the last identifier whenever the login screen is opened again.
+  // Passwords are intentionally never stored. The checkbox controls whether
+  // the identifier is retained.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([getRememberMe(), getRememberedIdentifier()]).then(([savedRememberMe, savedIdentifier]) => {
+      if (cancelled) return;
+      setRemember(savedRememberMe);
+      if (savedRememberMe && savedIdentifier) setIdentifier(savedIdentifier);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
@@ -168,8 +188,12 @@ export default function LoginScreen() {
 
       if (error) throw error;
 
-      // Persist the "Remember me" choice for the next launch.
-      await setRememberMe(rememberMe);
+      // Persist the "Remember me" choice and the last identifier for the next
+      // launch or whenever the user returns to this screen.
+      await Promise.all([
+        setRememberMe(rememberMe),
+        setRememberedIdentifier(rememberMe ? identifier : ''),
+      ]);
       router.replace('/baseline');
     } catch (err: any) {
       const msg = err?.message ?? 'Login failed. Please try again.';

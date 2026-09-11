@@ -1,14 +1,14 @@
-import React, { useState } from 'react';
-import { MaterialIcons } from '@expo/vector-icons';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
-import Svg, { Circle, Path } from 'react-native-svg';
-import { useRouter } from 'expo-router';
+import { useNotifications } from '@/components/NotificationProvider';
+import { useState } from 'react';
+
 import { supabase } from '@/lib/supabaseClient';
 import { colors } from '@/theme';
+import { MaterialIcons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
+import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import Svg, { Circle, Path } from 'react-native-svg';
 
 interface TopNavigationProps {
-  onNotificationPress?: () => void;
-  hasUnreadNotifications?: boolean;
   onLogoutPress?: () => void;
   showLogout?: boolean;
 }
@@ -34,13 +34,13 @@ export function WickMark({ size = 20 }: { size?: number }) {
 }
 
 export default function TopNavigation({
-  onNotificationPress,
-  hasUnreadNotifications = true,
   onLogoutPress,
   showLogout = true,
 }: TopNavigationProps) {
   const router = useRouter();
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const { notifications, hasUnread, markRead, markAllRead } = useNotifications();
 
   // Logging out is the same from every tab: end the Supabase session and
   // return to the login screen. A screen can override this with onLogoutPress.
@@ -70,7 +70,7 @@ export default function TopNavigation({
         <View style={styles.trailingRow}>
           <Pressable
             accessibilityLabel="Notifications"
-            onPress={onNotificationPress}
+            onPress={() => setShowNotifications(true)}
             style={({ pressed }) => [
               styles.iconButton,
               pressed && styles.pressed,
@@ -79,7 +79,7 @@ export default function TopNavigation({
             <MaterialIcons name="notifications-none" size={22} color="#2C2B29" />
 
             {/* Notification Badge Dot */}
-            {hasUnreadNotifications && (
+            {hasUnread && (
               <View style={styles.badgeDotContainer}>
                 <View style={styles.badgeDot} />
               </View>
@@ -100,6 +100,51 @@ export default function TopNavigation({
           )}
         </View>
       </View>
+
+      {/* The notification modal and its state belong to the shared top bar, so
+          every route shows the same list and read state. */}
+      {(
+        <Modal
+          visible={showNotifications}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowNotifications(false)}
+        >
+          <View style={styles.confirmOverlay}>
+            <View style={styles.notificationCard}>
+              <View style={styles.notificationHeader}>
+                <View>
+                  <Text style={styles.confirmTitle}>Notifications</Text>
+                  <Text style={styles.notificationSubtitle}>
+                    {hasUnread ? `${notifications.filter((notification) => !notification.read).length} unread` : 'All caught up'}
+                  </Text>
+                </View>
+                <Pressable onPress={() => setShowNotifications(false)} hitSlop={8}>
+                  <MaterialIcons name="close" size={22} color={colors.inkSoft} />
+                </Pressable>
+              </View>
+              {notifications.map((notification) => (
+                <Pressable
+                  key={notification.id}
+                  onPress={() => markRead(notification.id)}
+                  style={styles.notificationItem}
+                >
+                  <View style={styles.notificationDot} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.notificationTitle}>{notification.title}</Text>
+                    <Text style={styles.notificationBody}>{notification.body}</Text>
+                    <Text style={styles.notificationTime}>{notification.time}</Text>
+                  </View>
+                </Pressable>
+              ))}
+              {hasUnread && <Pressable style={styles.notificationDone} onPress={markAllRead}>
+                <Text style={styles.notificationDoneText}>Mark all read</Text>
+              </Pressable>}
+          
+            </View>
+          </View>
+        </Modal>
+      )}
 
       {/* Logout confirmation — a destructive action deserves a pause */}
       <Modal
@@ -200,7 +245,7 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: '#FFFFFF', 
+    backgroundColor: '#FFFFFF',
     justifyContent: 'center',
   },
   badgeDot: {
@@ -209,8 +254,18 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: '#BA1A1A',
   },
-  /* Logout confirmation modal — centered, matching the app's modal language */
+  /* Shared modal styles — used by notifications and logout confirmation. */
   confirmOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
+  notificationCard: { backgroundColor: colors.surface, borderRadius: 24, padding: 20, maxWidth: '88%', width: 360 },
+  notificationHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 },
+  notificationSubtitle: { fontSize: 12, color: colors.inkSoft, marginTop: 3 },
+  notificationItem: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: colors.cream, borderRadius: 14, padding: 12, marginBottom: 10 },
+  notificationDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.alert, marginTop: 5, marginRight: 10 },
+  notificationTitle: { fontSize: 14, fontWeight: '700', color: colors.ink, marginBottom: 3 },
+  notificationBody: { fontSize: 13, lineHeight: 18, color: colors.inkSoft },
+  notificationTime: { fontSize: 11, color: colors.inkFaint, marginTop: 5 },
+  notificationDone: { alignItems: 'center', backgroundColor: colors.brown, borderRadius: 14, paddingVertical: 12, marginTop: 4 },
+  notificationDoneText: { fontSize: 14, fontWeight: '700', color: '#FFFFFF' },
   confirmCard: { backgroundColor: colors.surface, borderRadius: 24, padding: 24, maxWidth: '85%', width: 320, alignItems: 'center' },
   confirmIconWrap: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.alertWash, alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
   confirmTitle: { fontSize: 18, fontWeight: '700', color: colors.ink, marginBottom: 6 },

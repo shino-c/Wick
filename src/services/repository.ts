@@ -2170,11 +2170,20 @@ export async function purchaseGardenItem(
     // Default position: grid layout based on existing item count
     const existing = await getGardenItems();
     const position = defaultPositionForIndex(existing.length);
-    const { data, error } = await supabase
+    const base = { user_id: userId, item_key: item.key, name: item.name, emoji: item.emoji, kind: item.kind };
+    // The item is written first and the seeds are only spent once it exists:
+    // deducting first meant a failed insert silently ate the user's seeds and
+    // left nothing in the garden. `position` is added on a best-effort basis —
+    // a project whose garden_items predates that column still gets the item
+    // rather than an error, and it simply falls back to the default layout.
+    let { data, error } = await supabase
       .from('garden_items')
-      .insert({ user_id: userId, item_key: item.key, name: item.name, emoji: item.emoji, kind: item.kind, position })
+      .insert({ ...base, position })
       .select()
       .single();
+    if (error && /position/i.test(error.message)) {
+      ({ data, error } = await supabase.from('garden_items').insert(base).select().single());
+    }
     if (error) throw error;
     await earnSeeds(-cost);
     return {
@@ -2226,11 +2235,18 @@ export async function ensureStarterGardenItem(): Promise<GardenItem | null> {
     if (items.length > 0) return null;
     await earnSeeds(20);
     const position = { x: 50, y: 50 };
-    const { data, error } = await supabase
+    const base = { user_id: userId, item_key: 'starter', name: 'Your first sprout', emoji: '🌱', kind: 'plant' };
+    // Same fallback as purchaseGardenItem: if this project's garden_items has no
+    // `position` column yet, plant the starter without it instead of failing the
+    // whole garden load over an optional layout hint.
+    let { data, error } = await supabase
       .from('garden_items')
-      .insert({ user_id: userId, item_key: 'starter', name: 'Your first sprout', emoji: '🌱', kind: 'plant', position })
+      .insert({ ...base, position })
       .select()
       .single();
+    if (error && /position/i.test(error.message)) {
+      ({ data, error } = await supabase.from('garden_items').insert(base).select().single());
+    }
     if (error) throw error;
     return {
       id: data.id,

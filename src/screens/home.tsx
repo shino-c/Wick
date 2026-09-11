@@ -215,17 +215,13 @@ export default function Home() {
   const [editingTask, setEditingTask] = useState<TaskAnalysis | null>(null);
 
   // Quick Add NLP Chatbot Modal State
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<Array<{ id: string; title: string; body: string; time: string; read: boolean }>>([]);
+  const hasUnread = notifications.some((notification) => !notification.read);
   const [showAddModal, setShowAddModal] = useState(false);
   const [quickInput, setQuickInput] = useState('');
   const [parsingNLP, setParsingNLP] = useState(false);
 
-  // Notification Modal State
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [notifications, setNotifications] = useState<Array<{ id: string; title: string; body: string; time: string; read: boolean }>>([
-    { id: '1', title: 'Welcome to Wick', body: 'Start by adding your first task or completing a recovery session.', time: '2h ago', read: false },
-    { id: '2', title: 'Daily Recovery Available', body: 'Your personalized recovery plan is ready. Take a gentle pause today.', time: '5h ago', read: false },
-  ]);
-  const hasUnread = notifications.some(n => !n.read);
   const [parsedTasks, setParsedTasks] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'>[]>([]);
   const [editingParsedIdx, setEditingParsedIdx] = useState<number | null>(null);
   const [addingTask, setAddingTask] = useState(false);
@@ -642,10 +638,7 @@ export default function Home() {
       <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
 
       <View style={styles.container}>
-        <TopNavigation
-          onNotificationPress={() => setShowNotifications(true)}
-          hasUnreadNotifications={hasUnread}
-        />
+        <TopNavigation />
 
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
           {/* New Week Re-sync Reminder Banner */}
@@ -1054,7 +1047,7 @@ export default function Home() {
               </Pressable>
             </View>
 
-          
+
             {tasks.length === 0 ? (
               <View style={styles.emptyTasks}>
                 <Text style={styles.emptyTasksText}>No tasks logged for this week.</Text>
@@ -1168,7 +1161,7 @@ export default function Home() {
             )}
           </View>
 
-          <View style={{ height: 60 }} />
+          <View style={{ height: 20 }} />
         </ScrollView>
 
         {/* Bottom Navigation */}
@@ -1389,7 +1382,7 @@ export default function Home() {
                       ? 'Adjust details and tap Save'
                       : parsedTasks.length > 0
                         ? `${parsedTasks.length} task${parsedTasks.length > 1 ? 's' : ''} detected — review below`
-                        : 'Type naturally, e.g. "exam Fri 2pm, Travel Sunday, Gym 3pm"'}
+                        : 'From words to tasks. Instantly.'}
                   </Text>
                 </View>
                 <Pressable
@@ -1637,7 +1630,7 @@ export default function Home() {
       </Modal>
 
       {/* ── NOTIFICATIONS MODAL ─────────────────────────────────────────────── */}
-      <Modal visible={showNotifications} transparent animationType="fade" onRequestClose={() => setShowNotifications(false)}>
+      {false && (<Modal visible={false} transparent animationType="fade" onRequestClose={() => setShowNotifications(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
@@ -1694,7 +1687,7 @@ export default function Home() {
             </ScrollView>
           </View>
         </View>
-      </Modal>
+      </Modal>)}
     </SafeAreaView>
   );
 }
@@ -1808,13 +1801,13 @@ const styles = StyleSheet.create({
   daysRow: { flexDirection: 'row', width: '100%', marginTop: 8, paddingHorizontal: 10 },
   dayLabelWrap: { flex: 1, alignItems: 'center' },
   dayLabelWrapActive: {
-    backgroundColor: colors.brown,
-    borderRadius: 12,
-    paddingHorizontal: 6,
+    backgroundColor: colors.yellow,
+    borderRadius: 50,
+    paddingHorizontal: 2,
     paddingVertical: 2,
   },
   dayText: { fontSize: 13, color: '#81756C', fontWeight: '500' },
-  dayTextActive: { color: colors.cream, fontWeight: '700' },
+  dayTextActive: { color:'#81756C', fontWeight: '700' },
   insightBanner: { flexDirection: 'row', backgroundColor: '#FFF5F0', borderRadius: 12, padding: 12, marginTop: 4 },
   insightBannerUrgent: { backgroundColor: '#FEE2E2', borderWidth: 1, borderColor: '#FECACA' },
   insightIconContainer: { marginRight: 8, marginTop: 2 },
@@ -1917,7 +1910,7 @@ const styles = StyleSheet.create({
   taskEmoji: { fontSize: 20 },
   taskTitle: { fontSize: 14, fontWeight: '600', color: COLORS.text },
   taskSubtitle: { fontSize: 11, color: '#6B7280' },
-  deferButton: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: '#F3F4F6' },
+  deferButton: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: '#FDF1A9' },
   deferText: { fontSize: 12, fontWeight: '600', color: '#374151' },
   rebalanceButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.primary, borderRadius: 12, paddingVertical: 12, marginTop: 14 },
   rebalanceText: { fontSize: 14, fontWeight: '700', color: '#FFFFFF' },

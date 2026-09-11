@@ -2,6 +2,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	ActivityIndicator,
+	ImageBackground,
 	Modal,
 	PanResponder,
 	Pressable,
@@ -89,9 +90,14 @@ export default function RecoveryScreen() {
 	const [toast, setToast] = useState<string | null>(null);
 	const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-	// Garden drag-to-position — default height must match grass minHeight so
-	// items placed near the bottom remain draggable even before onLayout fires.
-	const gardenSizeRef = useRef({ width: 300, height: 150 });
+	// Garden drag-to-position. This measures the *garden bed* (the absolutely
+	// positioned layer the items live in), not the grass wrapper — the bed is
+	// what `left`/`top` percentages resolve against, so its height is what the
+	// up/down gesture must be scaled by. The draggable area is the complete,
+	// fixed garden scene: sky plus floor.
+	// Keeping this measurement on the scene (rather than on its content) prevents
+	// the floor from growing when items are absolutely positioned inside it.
+	const gardenSizeRef = useRef({ width: 300, height: 234 });
 
 	const showToast = useCallback((message: string) => {
 		setToast(message);
@@ -99,82 +105,82 @@ export default function RecoveryScreen() {
 		toastTimer.current = setTimeout(() => setToast(null), 2400);
 	}, []);
 
-/** A single draggable garden item. Each item owns its own PanResponder. */
-    const DraggableItem = useCallback(
-        ({ item }: { item: GardenItem }) => {
-            const startPosRef = useRef(item.position ?? { x: 50, y: 50 });
-            const [currentPos, setCurrentPos] = useState(item.position ?? { x: 50, y: 50 });
+	/** A single draggable garden item. Each item owns its own PanResponder. */
+	const DraggableItem = useCallback(
+		({ item }: { item: GardenItem }) => {
+			const startPosRef = useRef(item.position ?? { x: 50, y: 50 });
+			const [currentPos, setCurrentPos] = useState(item.position ?? { x: 50, y: 50 });
 
-            useEffect(() => {
-                const newPos = item.position ?? { x: 50, y: 50 };
-                setCurrentPos(newPos);
-            }, [item.position?.x, item.position?.y]);
+			useEffect(() => {
+				const newPos = item.position ?? { x: 50, y: 50 };
+				setCurrentPos(newPos);
+			}, [item.position?.x, item.position?.y]);
 
-            const responder = useMemo(
-                () =>
-                    PanResponder.create({
-                        onStartShouldSetPanResponder: () => true,
-                        onMoveShouldSetPanResponder: () => true,
-                        onStartShouldSetPanResponderCapture: () => true,
-                        onMoveShouldSetPanResponderCapture: () => true,
-                        onPanResponderTerminationRequest: () => false,
-                        onShouldBlockNativeResponder: () => true,
-                        onPanResponderGrant: () => {
-                            startPosRef.current = item.position ?? { x: 50, y: 50 };
-                        },
-                        onPanResponderMove: (_evt, gesture) => {
-                            const width = gardenSizeRef.current.width || 300;
-                            const height = gardenSizeRef.current.height || 150;
-                            
-                            const newX = startPosRef.current.x + (gesture.dx / width) * 100;
-                            const newY = startPosRef.current.y + (gesture.dy / height) * 100;
-                            
-                            const cx = Math.max(0, Math.min(100, newX));
-                            const cy = Math.max(0, Math.min(100, newY));
-                            
-                            setCurrentPos({ x: cx, y: cy });
-                        },
-                        onPanResponderRelease: (_evt, gesture) => {
-                            const width = gardenSizeRef.current.width || 300;
-                            const height = gardenSizeRef.current.height || 220;
+			const responder = useMemo(
+				() =>
+					PanResponder.create({
+						onStartShouldSetPanResponder: () => true,
+						onMoveShouldSetPanResponder: () => true,
+						onStartShouldSetPanResponderCapture: () => true,
+						onMoveShouldSetPanResponderCapture: () => true,
+						onPanResponderTerminationRequest: () => false,
+						onShouldBlockNativeResponder: () => true,
+						onPanResponderGrant: () => {
+							startPosRef.current = item.position ?? { x: 50, y: 50 };
+						},
+						onPanResponderMove: (_evt, gesture) => {
+							const width = gardenSizeRef.current.width || 300;
+							const height = gardenSizeRef.current.height || 150;
 
-                            const newX = startPosRef.current.x + (gesture.dx / width) * 100;
-                            const newY = startPosRef.current.y + (gesture.dy / height) * 100;
-                            const cx = Math.max(0, Math.min(100, newX));
-                            const cy = Math.max(0, Math.min(100, newY));
+							const newX = startPosRef.current.x + (gesture.dx / width) * 100;
+							const newY = startPosRef.current.y + (gesture.dy / height) * 100;
 
-                            const finalPos = { x: cx, y: cy };
-                            setCurrentPos(finalPos);
+							const cx = Math.max(0, Math.min(100, newX));
+							const cy = Math.max(0, Math.min(100, newY));
 
-                            setGarden((prev) =>
-                                prev.map((g) => (g.id === item.id ? { ...g, position: finalPos } : g))
-                            );
-                            updateGardenItemPosition(item.id, finalPos);
-                        },
-                    }),
-                [item.id, item.position, updateGardenItemPosition]
-            );
+							setCurrentPos({ x: cx, y: cy });
+						},
+						onPanResponderRelease: (_evt, gesture) => {
+							const width = gardenSizeRef.current.width || 300;
+							const height = gardenSizeRef.current.height || 150;
 
-            return (
-                <View
-                    {...responder.panHandlers}
-                    style={[
-                        styles.plant,
-                        {
-                            position: 'absolute',
-                            left: `${currentPos.x}%`,
-                            top: `${currentPos.y}%`,
-                            transform: [{ translateX: -17 }, { translateY: -17 }],
-                            zIndex: 99,
-                        },
-                    ]}
-                >
-                    <Emoji size={34}>{item.emoji}</Emoji>
-                </View>
-            );
-        },
-        [updateGardenItemPosition]
-    );
+							const newX = startPosRef.current.x + (gesture.dx / width) * 100;
+							const newY = startPosRef.current.y + (gesture.dy / height) * 100;
+							const cx = Math.max(0, Math.min(100, newX));
+							const cy = Math.max(0, Math.min(100, newY));
+
+							const finalPos = { x: cx, y: cy };
+							setCurrentPos(finalPos);
+
+							setGarden((prev) =>
+								prev.map((g) => (g.id === item.id ? { ...g, position: finalPos } : g))
+							);
+							updateGardenItemPosition(item.id, finalPos);
+						},
+					}),
+				[item.id, item.position, updateGardenItemPosition]
+			);
+
+			return (
+				<View
+					{...responder.panHandlers}
+					style={[
+						styles.plant,
+						{
+							position: 'absolute',
+							left: `${currentPos.x}%`,
+							top: `${currentPos.y}%`,
+							transform: [{ translateX: -17 }, { translateY: -17 }],
+							zIndex: 99,
+						},
+					]}
+				>
+					<Emoji size={34}>{item.emoji}</Emoji>
+				</View>
+			);
+		},
+		[updateGardenItemPosition]
+	);
 
 	const load = useCallback(async () => {
 		setLoading(true);
@@ -290,7 +296,7 @@ export default function RecoveryScreen() {
 		<Screen
 			scroll={false}
 			padded={false}
-			header={<TopNavigation onNotificationPress={() => {}} />}
+			header={<TopNavigation />}
 			footer={<BottomNavigation activeTab="Recovery" router={router} />}
 		>
 			{loading ? (
@@ -317,44 +323,38 @@ export default function RecoveryScreen() {
 					showsVerticalScrollIndicator={false}
 					contentContainerStyle={styles.scrollContent}
 				>
-				{/* GARDEN SCENE */}
-				<View style={{ marginBottom: spacing(2) }}>
-                    <Txt v="heading" style= {{fontSize: 25}}>Your Garden</Txt>
-                </View>
+					{/* GARDEN SCENE */}
+					<View style={styles.gardenHeader}>
+						<Txt v="heading" style={{ fontSize: 25 }}>Your Garden</Txt>
+					
+					<View style={styles.walletPill}>
+						<Emoji size={16}>🌱</Emoji>
+						<Txt v="small" color={colors.brown} style={{ fontWeight: "700" }}>
+							{wallet?.seeds ?? 0} seeds
+						</Txt>	
+					</View>
+					</View>		
 					<Card style={styles.gardenCard}>
-						<View style={styles.sky}>
-							<Emoji size={30} style={styles.sun}>🌤️</Emoji>
-							
-							<Row style={styles.walletPill}>
-								<Emoji size={16}>🌱</Emoji>
-								<Txt v="small" color={colors.brown} style={{ fontWeight: '700' }}>
-									{wallet?.seeds ?? 0} seeds
-								</Txt>
-							</Row>
-						</View>
-
-						<View
-							style={styles.grass}
-							onLayout={(e) => {
-								const { width, height } = e.nativeEvent.layout;
-								if (width > 0 && height > 0) {
-									gardenSizeRef.current = { width, height };
-								}
-							}}
+						<ImageBackground
+							source={require("../../assets/images/real-garden.png")}
+							style={styles.gardenScene}
+							imageStyle={styles.gardenBackground}
 						>
-							{garden.length === 0 ? (
+							
+
+							{garden.length === 0 && (
 								<View style={styles.emptyGarden}>
 									<Emoji size={46}>🌱</Emoji>
-									
-								</View>
-							) : (
-								<View style={styles.gardenBed}>
-									{garden.map((item) => (
-										<DraggableItem key={item.id} item={item} />
-									))}
 								</View>
 							)}
-						</View>
+
+							<View style={styles.gardenDragLayer} pointerEvents="box-none">
+								{garden.map((item) => (
+									<DraggableItem key={item.id} item={item} />
+								))}
+							</View>
+						</ImageBackground>
+
 
 						{/* ROUND SHOP BUTTON — the shop lives in a sheet, not on the page */}
 						<Pressable
@@ -370,11 +370,7 @@ export default function RecoveryScreen() {
 					<Card>
 						<Row>
 							<Badge label="Today's Recovery Plan" fg={colors.calm} bg={colors.calmWash} />
-							{doneToday > 0 && (
-								<Txt v="small" color={colors.inkFaint} style={{ marginLeft: spacing(2) }}>
-									{doneToday} small pause{doneToday === 1 ? '' : 's'} today
-								</Txt>
-							)}
+
 						</Row>
 
 						<Txt
@@ -1022,17 +1018,17 @@ function ShopModal({
 
 	return (
 		<Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-		<View style={styles.sheetBackdrop}>
-			<Pressable
-				style={StyleSheet.absoluteFill}
-				onPress={onClose}
-			/>
+			<View style={styles.sheetBackdrop}>
+				<Pressable
+					style={StyleSheet.absoluteFill}
+					onPress={onClose}
+				/>
 
-			<View
-				style={[styles.sheet, styles.sheetTall]}
-				onStartShouldSetResponder={() => false}
-				onMoveShouldSetResponder={() => false}
-		>
+				<View
+					style={[styles.sheet, styles.sheetTall]}
+					onStartShouldSetResponder={() => false}
+					onMoveShouldSetResponder={() => false}
+				>
 
 					<Row style={[styles.sheetHeader, { justifyContent: 'space-between', width: '100%' }]}>
 						<Badge label="Shop" fg={colors.warn} bg={colors.warnWash} />
@@ -1051,7 +1047,7 @@ function ShopModal({
 						</Pressable>
 					</Row>
 
-					<Txt v="small" center color={colors.inkFaint} style={{ marginTop: spacing(1)}}>
+					<Txt v="small" center color={colors.inkFaint} style={{ marginTop: spacing(1) }}>
 						Spend seeds to grow your space
 					</Txt>
 
@@ -1064,7 +1060,6 @@ function ShopModal({
 						<View style={styles.shopGrid}>
 							{GARDEN_CATALOG.filter((item) => item.key !== 'starter').map((item) => {
 								const affordable = (wallet?.seeds ?? 0) >= item.seeds;
-								const owned = garden.some((g) => g.itemKey === item.key);
 								return (
 									<View
 										key={item.key}
@@ -1082,19 +1077,14 @@ function ShopModal({
 										</Txt>
 										<Pressable
 											onPress={() => onBuy(item.key, item.seeds)}
-											disabled={!affordable || owned || purchasingKey === item.key}
+											disabled={!affordable || purchasingKey === item.key}
 											style={({ pressed }) => [
 												styles.buyButton,
 												!affordable && styles.buyButtonDisabled,
-												owned && styles.buyButtonOwned,
-												pressed && affordable && !owned && styles.pressed,
+												pressed && affordable && styles.pressed,
 											]}
 										>
-											{owned ? (
-												<Txt v="small" color={colors.calm} style={{ fontWeight: '700' }}>
-													Growing
-												</Txt>
-											) : purchasingKey === item.key ? (
+											{purchasingKey === item.key ? (
 												<ActivityIndicator size="small" color={colors.brown} />
 											) : (
 												<Txt
@@ -1145,8 +1135,16 @@ const styles = StyleSheet.create({
 	scrollContent: { padding: spacing(5), paddingBottom: spacing(10) },
 	center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing(6), gap: spacing(2) },
 
-	cardTitle: { fontSize: 18, fontWeight: '700', color: colors.ink},
+	cardTitle: { fontSize: 18, fontWeight: '700', color: colors.ink },
 	gardenCard: { padding: 0, overflow: 'hidden', marginBottom: spacing(4) },
+	// Fixed scene dimensions: the floor must never size itself from the
+	// absolutely positioned items, and the drag layer spans sky plus floor.
+	gardenScene: { position: 'relative', height: 234 },
+	gardenBackground: {resizeMode: "cover",},
+	gardenDragLayer: {
+		...StyleSheet.absoluteFill,
+		zIndex: 10,
+	},
 	sky: {
 		backgroundColor: '#FDF3C8',
 		minHeight: 84,
@@ -1166,13 +1164,26 @@ const styles = StyleSheet.create({
 		fontWeight: '700',
 		color: colors.brown,
 	},
-	sun: { position: 'absolute', top: spacing(3), left: spacing(4) },
-	walletPill: {
-		backgroundColor: colors.yellow,
-		paddingHorizontal: spacing(2.5),
-		paddingVertical: spacing(1),
-		borderRadius: radius.pill,
+	gardenHeader: {
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "space-between",
+		marginBottom: spacing(2),
 	},
+	walletPill: {
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "center",
+		gap: spacing(1),
+
+		height: 32,
+		paddingHorizontal: spacing(2.5),
+		borderRadius: radius.pill,
+		backgroundColor: colors.yellow,
+
+		transform: [{ translateY: -2 }],
+	},
+
 	grass: {
 		backgroundColor: colors.calmWash,
 		padding: spacing(4),
@@ -1180,7 +1191,12 @@ const styles = StyleSheet.create({
 		borderTopColor: colors.line,
 		minHeight: 150,
 	},
-	gardenBed: { position: 'relative' },
+	// The drag layer. It must occupy real space so a percentage `top` has
+	// something to resolve against — without a height here every item collapses
+	// onto one horizontal line and only left/right dragging has any effect.
+	// Its height is set inline from the measured grass content box (see onLayout);
+	// before that first measurement it falls back to the grass minHeight.
+	gardenBed: { position: 'relative', width: '100%', minHeight: 150 },
 	plant: {
 		/* No background — the emoji floats freely in the garden for drag-to-decorate. */
 		padding: spacing(0.5),
@@ -1262,7 +1278,7 @@ const styles = StyleSheet.create({
 	},
 	suggestionDoneEmoji: { backgroundColor: colors.calmWash },
 	suggestionBody: { flex: 1, minWidth: 0 },
-	suggestionTitle: {fontSize: 13},
+	suggestionTitle: { fontSize: 13 },
 	statusChip: {
 		borderRadius: radius.pill,
 		backgroundColor: colors.cream,
@@ -1329,13 +1345,13 @@ const styles = StyleSheet.create({
 	destressTitle: {},
 	destressSubtitle: { marginTop: spacing(0.5) },
 	playButton: {
-		backgroundColor: colors.brown,
+		backgroundColor: colors.yellow,
 		borderRadius: radius.pill,
 		paddingHorizontal: spacing(4),
 		paddingVertical: spacing(2),
 		alignItems: 'center',
 	},
-	playButtonText: { fontWeight: '700' },
+	playButtonText: { fontWeight: '700',color:colors.brown },
 
 	/* Sheets / modals — centered on screen with internal scroll for long content */
 	sheetBackdrop: {
@@ -1468,7 +1484,7 @@ const styles = StyleSheet.create({
 		paddingVertical: spacing(2),
 	},
 
-retryButton: {
+	retryButton: {
 		marginTop: spacing(2),
 		paddingHorizontal: spacing(5),
 		paddingVertical: spacing(2.5),
