@@ -489,9 +489,21 @@ export async function parseQuickTasksNLP(
   const prompt = `Parse the following user input into one or more structured task schedule objects.
 The input may contain multiple tasks separated by commas, semicolons, or "and".
 Examples:
-  - "2 assignment due Fri" → 1 task
+  - "assignment due Fri" → 1 task
+  - "2 assignments Fri" → 2 tasks
   - "exam Fri 2pm, Travel Sunday, Gym 3pm" → 3 tasks
   - "Meeting Mon 10am and gym Tue" → 2 tasks
+  - "2 assignments Fri 1 presentation Sun" → 3 tasks
+
+DEADLINE TIME RULES:
+- If a task is an academic deadline such as "assignment Fri",
+  "essay due Friday", "project due Thu", or "report Friday",
+  and the user does NOT provide an explicit time,
+  use "23:59" as scheduled_start_time. (except exam)
+- "assignment Fri" means the assignment is due Friday at 23:59.
+- "2 assignments Fri" means both assignments are due Friday at 23:59.
+- Do NOT use 23:59 when the user explicitly provides a different time.
+- "assignment Fri 3pm" means 15:00, not 23:59.
 
 Input: "${input}"
 
