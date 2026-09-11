@@ -1089,3 +1089,20 @@ alter table task_chat_logs enable row level security;
 drop policy if exists "own chat logs" on task_chat_logs;
 create policy "own chat logs" on task_chat_logs for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Allow the signup screen to probe username availability before submit.
+-- SECURITY DEFINER because the caller is unauthenticated at signup time;
+-- it returns only a boolean, never the profile row.
+create or replace function public.is_username_taken(p_username text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return exists (
+    select 1 from public.profiles
+    where lower(username) = lower(p_username)
+  );
+end;
+$$;

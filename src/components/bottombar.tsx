@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type TabName = 'Home' | 'Desk' | 'Recovery' | 'Social';
 
@@ -15,6 +16,13 @@ export default function BottomNavigation({
   activeTab = 'Home',
   router,
 }: BottomNavigationProps) {
+  // Phones with a system gesture bar (Android edge-to-edge) or a home
+  // indicator (iPhone) report a bottom frame inset; without this the bar's
+  // labels can sit under the system UI. Devices with hardware buttons report
+  // 0, so the bar keeps its plain 20px padding there. Reading it here — in
+  // the shared bar rather than per screen — is what keeps every tab aligned
+  // while still adapting to each device.
+  const insets = useSafeAreaInsets();
   const tabs: {
     name: TabName;
     /** null = reserved, rendered but not navigable. */
@@ -69,7 +77,7 @@ export default function BottomNavigation({
   };
 
   return (
-    <View style={styles.nav}>
+    <View style={[styles.nav, { paddingBottom: 20 + insets.bottom }]}>
       {tabs.map((tab) => {
         const isActive = activeTab === tab.name;
         const reserved = tab.route === null;
@@ -112,7 +120,7 @@ const styles = StyleSheet.create({
     width: '100%',
     paddingHorizontal: 16,
     paddingTop: 10,
-    paddingBottom: 20, // Bottom padding for safe area spacing
+    paddingBottom: 20, // Base spacing; the device's bottom inset is added on top at render time
     backgroundColor: '#FFFFFF',
     borderTopWidth: 1,
     borderTopColor: '#EAE5DB',

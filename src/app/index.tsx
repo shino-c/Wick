@@ -4,6 +4,7 @@ import { ActivityIndicator, View } from 'react-native';
 
 import { bootstrap } from '@/lib/bootstrap';
 import { hasSupabase, supabase } from '@/lib/supabaseClient';
+import { getRememberMe } from '@/lib/rememberMe';
 import { colors } from '@/theme';
 
 export default function Index() {
@@ -20,7 +21,14 @@ export default function Index() {
       }
 
       const { data } = await supabase.auth.getSession();
-      const loggedIn = !!data.session;
+      let loggedIn = !!data.session;
+
+      // "Remember me": an unremembered session is a leftover from a previous
+      // run — clear it so the user lands on the login screen instead.
+      if (loggedIn && !(await getRememberMe())) {
+        await supabase.auth.signOut();
+        loggedIn = false;
+      }
 
       if (!loggedIn) {
         if (!cancelled) setRoute('/login');

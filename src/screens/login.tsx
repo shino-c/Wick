@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -15,6 +16,7 @@ import { useRouter } from 'expo-router';
 import Svg, { Path, Circle } from 'react-native-svg';
 
 import { supabase, hasSupabase } from '@/lib/supabaseClient';
+import { getRememberMe, setRememberMe } from '@/lib/rememberMe';
 import { colors, font, radius, shadow, spacing } from '@/theme';
 
 /* ─── validation helpers ────────────────────────────────────────────────── */
@@ -59,8 +61,13 @@ export default function LoginScreen() {
   useEffect(() => {
     async function checkAuth() {
       const { data } = await supabase.auth.getUser();
-      if (data.user) {
+      if (!data.user) return;
+      // Honour "Remember me": an unremembered session is a leftover from a
+      // previous run — clear it instead of signing the user back in.
+      if (await getRememberMe()) {
         router.replace('/baseline');
+      } else {
+        await supabase.auth.signOut();
       }
     }
     checkAuth();
@@ -73,6 +80,16 @@ export default function LoginScreen() {
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+
+  // "Remember me" keeps the session across app restarts.
+  const [rememberMe, setRemember] = useState(false);
+
+  // Forgot-password modal state.
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotError, setForgotError] = useState<string | null>(null);
+  const [sentNotice, setSentNotice] = useState<string | null>(null);
 
   const errors: FieldErrors = {
     identifier: validateIdentifier(identifier),
@@ -95,7 +112,7 @@ export default function LoginScreen() {
     // Looks like an email — use as-is.
     if (EMAIL_RE.test(trimmed)) return trimmed;
 
-    // Try to look up the email by username via the profiles table.
+    // Try to look up the email by username via the get_email_for_username RPC.
     try {
       const { data, error } = await supabase.rpc('get_email_for_username', {
         lookup_username: trimmed,
@@ -103,6 +120,21 @@ export default function LoginScreen() {
       if (!error && data) return data as string;
     } catch {
       // RPC not deployed — fall through.
+    }
+
+    // Fallback: read the email straight off the profile row (works when the
+    // RPC is missing but profiles exposes an email column).
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('email')
+        .ilike('username', trimmed.replace(/([\\%_])/g, '\\$1'))
+        .limit(1);
+      if (!error && data && data.length > 0 && data[0].email) {
+        return data[0].email as string;
+      }
+    } catch {
+      // profiles unreadable — fall through.
     }
 
     // Last resort: let Supabase try it as an email (will fail with a clear
@@ -136,6 +168,8 @@ export default function LoginScreen() {
 
       if (error) throw error;
 
+      // Persist the "Remember me" choice for the next launch.
+      await setRememberMe(rememberMe);
       router.replace('/baseline');
     } catch (err: any) {
       const msg = err?.message ?? 'Login failed. Please try again.';
@@ -148,6 +182,42 @@ export default function LoginScreen() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  /* ── forgot password ───────────────────────────────────────────────────── */
+
+  const openForgot = () => {
+    // If the identifier already looks like an email, prefill the field.
+    const id = identifier.trim();
+    setForgotEmail(EMAIL_RE.test(id) ? id.toLowerCase() : '');
+    setForgotError(null);
+    setShowForgot(true);
+  };
+
+  const handleForgotPassword = async () => {
+    const email = forgotEmail.trim().toLowerCase();
+    if (!EMAIL_RE.test(email)) {
+      setForgotError('Enter a valid email address');
+      return;
+    }
+
+    setForgotLoading(true);
+    setForgotError(null);
+
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email);
+      if (error) throw error;
+
+      // Deliberately vague — never reveal whether an account exists.
+      setShowForgot(false);
+      setSentNotice(
+        `If an account exists for ${email}, a reset link is on its way. Check your inbox.`,
+      );
+    } catch (err: any) {
+      setForgotError(err?.message ?? 'Could not send the reset email. Please try again.');
+    } finally {
+      setForgotLoading(false);
     }
   };
 
@@ -179,6 +249,9 @@ export default function LoginScreen() {
           <Text style={styles.heading}>Log In</Text>
 
           {serverError && <Text style={styles.serverError}>{serverError}</Text>}
+          {!serverError && sentNotice && (
+            <Text style={styles.successNotice}>{sentNotice}</Text>
+          )}
 
           {/* Email or Username */}
           <View style={styles.fieldGroup}>
@@ -190,6 +263,7 @@ export default function LoginScreen() {
               onChangeText={(v) => {
                 setIdentifier(v);
                 setServerError(null);
+                setSentNotice(null);
               }}
               onBlur={() => markTouched('identifier')}
               autoCapitalize="none"
@@ -218,6 +292,7 @@ export default function LoginScreen() {
               onChangeText={(v) => {
                 setPassword(v);
                 setServerError(null);
+                setSentNotice(null);
               }}
               onBlur={() => markTouched('password')}
               secureTextEntry
@@ -230,6 +305,25 @@ export default function LoginScreen() {
             {touched.password && errors.password && (
               <Text style={styles.fieldError}>{errors.password}</Text>
             )}
+          </View>
+
+          {/* Remember me / Forgot password */}
+          <View style={styles.authRow}>
+            <Pressable
+              accessibilityLabel="Remember me"
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: rememberMe }}
+              onPress={() => setRemember((v) => !v)}
+              style={styles.rememberRow}
+            >
+              <View style={[styles.checkbox, rememberMe && styles.checkboxChecked]}>
+                {rememberMe && <Text style={styles.checkmark}>✓</Text>}
+              </View>
+              <Text style={styles.rememberText}>Remember me</Text>
+            </Pressable>
+            <Pressable onPress={openForgot} hitSlop={6}>
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </Pressable>
           </View>
 
           {/* Submit */}
@@ -261,6 +355,67 @@ export default function LoginScreen() {
           </Pressable>
         </View>
       </ScrollView>
+
+      {/* Forgot password modal */}
+      <Modal
+        visible={showForgot}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowForgot(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Reset password</Text>
+            <Text style={styles.modalMessage}>
+              Enter your account email and we'll send you a link to set a new
+              password.
+            </Text>
+            <TextInput
+              placeholder="you@example.com"
+              placeholderTextColor={colors.inkFaint}
+              value={forgotEmail}
+              onChangeText={(v) => {
+                setForgotEmail(v);
+                setForgotError(null);
+              }}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              textContentType="emailAddress"
+              style={[styles.input, forgotError ? styles.inputError : null]}
+            />
+            {forgotError && <Text style={styles.fieldError}>{forgotError}</Text>}
+            <View style={styles.modalActions}>
+              <Pressable
+                accessibilityLabel="Cancel"
+                onPress={() => setShowForgot(false)}
+                style={({ pressed }) => [
+                  styles.modalCancelBtn,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Send reset link"
+                onPress={handleForgotPassword}
+                disabled={forgotLoading}
+                style={({ pressed }) => [
+                  styles.modalSendBtn,
+                  pressed && styles.buttonPressed,
+                  forgotLoading && styles.buttonDisabled,
+                ]}
+              >
+                {forgotLoading ? (
+                  <ActivityIndicator color="#FFF" size="small" />
+                ) : (
+                  <Text style={styles.modalSendText}>Send reset link</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -404,5 +559,121 @@ const styles = StyleSheet.create({
   secondaryLink: {
     fontFamily: font.semibold,
     color: colors.brown,
+  },
+
+  /* Remember me + forgot password row */
+  authRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: spacing(1),
+    marginBottom: spacing(3),
+  },
+  rememberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: colors.lineStrong,
+    backgroundColor: colors.cream,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxChecked: {
+    backgroundColor: colors.brown,
+    borderColor: colors.brown,
+  },
+  checkmark: {
+    fontSize: 13,
+    lineHeight: 15,
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  rememberText: {
+    fontFamily: font.regular,
+    fontSize: 13,
+    color: colors.inkSoft,
+    marginLeft: spacing(2),
+  },
+  forgotText: {
+    fontFamily: font.medium,
+    fontSize: 13,
+    color: colors.brown,
+  },
+  successNotice: {
+    fontFamily: font.regular,
+    fontSize: 13,
+    color: colors.calm,
+    backgroundColor: colors.calmWash,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing(3),
+    paddingVertical: spacing(2),
+    marginBottom: spacing(4),
+    textAlign: 'center',
+    overflow: 'hidden',
+  },
+
+  /* Forgot-password modal */
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalCard: {
+    width: '88%',
+    maxWidth: 380,
+    backgroundColor: colors.surface,
+    borderRadius: 24,
+    padding: spacing(6),
+  },
+  modalTitle: {
+    fontFamily: font.semibold,
+    fontSize: 18,
+    color: colors.ink,
+    marginBottom: spacing(1),
+  },
+  modalMessage: {
+    fontFamily: font.regular,
+    fontSize: 13,
+    color: colors.inkSoft,
+    lineHeight: 19,
+    marginBottom: spacing(4),
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: spacing(4),
+  },
+  modalCancelBtn: {
+    flex: 1,
+    height: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCancelText: {
+    fontFamily: font.medium,
+    fontSize: 14,
+    color: colors.inkSoft,
+  },
+  modalSendBtn: {
+    flex: 1,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: colors.brown,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalSendText: {
+    fontFamily: font.semibold,
+    fontSize: 14,
+    color: '#FFFFFF',
   },
 });

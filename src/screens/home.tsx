@@ -218,6 +218,14 @@ export default function Home() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [quickInput, setQuickInput] = useState('');
   const [parsingNLP, setParsingNLP] = useState(false);
+
+  // Notification Modal State
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<Array<{ id: string; title: string; body: string; time: string; read: boolean }>>([
+    { id: '1', title: 'Welcome to Wick', body: 'Start by adding your first task or completing a recovery session.', time: '2h ago', read: false },
+    { id: '2', title: 'Daily Recovery Available', body: 'Your personalized recovery plan is ready. Take a gentle pause today.', time: '5h ago', read: false },
+  ]);
+  const hasUnread = notifications.some(n => !n.read);
   const [parsedTasks, setParsedTasks] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'>[]>([]);
   const [editingParsedIdx, setEditingParsedIdx] = useState<number | null>(null);
   const [addingTask, setAddingTask] = useState(false);
@@ -339,6 +347,14 @@ export default function Home() {
   // Edit a single pending task's field
   const handleEditField = (field: keyof TaskAnalysis, value: unknown) => {
     setEditingTask(prev => prev ? { ...prev, [field]: value } : prev);
+  };
+
+  // Cancel edit — go back to review list if there are pending tasks, otherwise close modal
+  const handleCancelEdit = () => {
+    setEditingTask(null);
+    if (pendingTasks.length === 0) {
+      setShowReviewModal(false);
+    }
   };
 
   // Save edits to a pending task
@@ -619,11 +635,17 @@ export default function Home() {
   const earlyWarning = buildEarlyWarningInsight(dayStress, todayIdx);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    // Only the top edge — the shared Screen does the same, so the bottom nav
+    // sits flush at the screen bottom on every tab instead of floating above
+    // the device's home-indicator inset on Home alone.
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
       <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
 
       <View style={styles.container}>
-        <TopNavigation onNotificationPress={() => {}} />
+        <TopNavigation
+          onNotificationPress={() => setShowNotifications(true)}
+          hasUnreadNotifications={hasUnread}
+        />
 
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
           {/* New Week Re-sync Reminder Banner */}
@@ -999,37 +1021,33 @@ export default function Home() {
                 badgeBackground="#E9D5FF"
                 badgeColor="#9333EA"
               />
-              <View style={[styles.categoryFull, { backgroundColor: '#FFF7ED', borderColor: '#FED7AA' }]}>
-                <View style={styles.otherLeft}>
-                  <Text style={styles.categoryEmoji}>💼</Text>
-                  <View style={{ marginLeft: 10 }}>
-                    <Text style={styles.categoryTitle}>Work</Text>
-                    <Text style={styles.categoryDescription}>Projects, Tasks & Meetings</Text>
-                  </View>
-                </View>
-                <View style={styles.otherBadge}>
-                  <Text style={styles.otherBadgeText}>{categoryCounts.work} Tasks</Text>
-                </View>
-              </View>
-              <View style={[styles.categoryFull, { backgroundColor: '#FDF2F4', borderColor: '#FBCFE8' }]}>
-                <View style={styles.otherLeft}>
-                  <Text style={styles.categoryEmoji}>🛒</Text>
-                  <View style={{ marginLeft: 10 }}>
-                    <Text style={styles.categoryTitle}>Others & Errands</Text>
-                    <Text style={styles.categoryDescription}>Chores & Misc</Text>
-                  </View>
-                </View>
-                <View style={styles.otherBadge}>
-                  <Text style={styles.otherBadgeText}>{categoryCounts.errands} Items</Text>
-                </View>
-              </View>
+              <CategoryCard
+                emoji="💼"
+                title="Work"
+                description="Projects, Tasks & Meetings"
+                badge={`${categoryCounts.work} Tasks`}
+                background="#FFF7ED"
+                border="#FED7AA"
+                badgeBackground="#FED7AA"
+                badgeColor="#C2410C"
+              />
+              <CategoryCard
+                  emoji="🛒"
+                  title="Others & Errands"
+                  description="Chores & Misc"
+                  badge={`${categoryCounts.errands} Items`}
+                  background="#FDF2F4"
+                  border="#FBCFE8"
+                  badgeBackground="#FCE7F3"
+                  badgeColor="#DB2777"
+                />
             </View>
           </View>
 
           {/* 4. AI Ranked Tasks for This Week (Tap card to toggle done/strikethrough) */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
-              <Text style={styles.cardTitle}>Tasks This Week</Text>
+              <Text style={styles.cardTitle}>This Week Tasks</Text>
               <Pressable onPress={() => setShowAddModal(true)} style={styles.addInlineButton}>
                 <MaterialIcons name="add" size={16} color={COLORS.primary} />
                 <Text style={styles.addInlineText}>Quick Add</Text>
@@ -1171,7 +1189,7 @@ export default function Home() {
                 </Text>
               </View>
               {editingTask && (
-                <Pressable onPress={() => setEditingTask(null)} hitSlop={8} style={{ padding: 4 }}>
+                <Pressable onPress={handleCancelEdit} hitSlop={8} style={{ padding: 4 }}>
                   <Ionicons name="close" size={22} color={colors.inkSoft} />
                 </Pressable>
               )}
@@ -1284,7 +1302,7 @@ export default function Home() {
                   ) : null}
 
                   <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
-                    <Pressable onPress={() => setEditingTask(null)} style={styles.reviewCancelBtn}>
+                    <Pressable onPress={handleCancelEdit} style={styles.reviewCancelBtn}>
                       <Text style={styles.reviewCancelBtnText}>Cancel</Text>
                     </Pressable>
                     <Pressable onPress={handleSaveTaskEdit} style={styles.reviewSaveBtn}>
@@ -1617,6 +1635,66 @@ export default function Home() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* ── NOTIFICATIONS MODAL ─────────────────────────────────────────────── */}
+      <Modal visible={showNotifications} transparent animationType="fade" onRequestClose={() => setShowNotifications(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Notifications</Text>
+                <Text style={styles.modalSubtitle}>
+                  {hasUnread
+                    ? `${notifications.filter(n => !n.read).length} unread — tap one to mark it read`
+                    : 'All caught up'}
+                </Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {hasUnread && (
+                  <Pressable
+                    onPress={() => setNotifications(prev => prev.map(n => ({ ...n, read: true })))}
+                    style={({ pressed }) => [styles.notifMarkAllBtn, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.notifMarkAllText}>Mark all read</Text>
+                  </Pressable>
+                )}
+                <Pressable onPress={() => setShowNotifications(false)} hitSlop={8} style={{ padding: 4 }}>
+                  <Ionicons name="close" size={22} color={colors.inkSoft} />
+                </Pressable>
+              </View>
+            </View>
+
+            <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
+              {notifications.length === 0 ? (
+                <Text style={styles.notifEmpty}>No notifications yet.</Text>
+              ) : (
+                notifications.map((notif) => (
+                  <Pressable
+                    key={notif.id}
+                    onPress={() => setNotifications(prev => prev.map(n => (n.id === notif.id ? { ...n, read: true } : n)))}
+                    style={({ pressed }) => [
+                      styles.notifItem,
+                      !notif.read && styles.notifItemUnread,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={styles.notifDotWrap}>
+                      {!notif.read && <View style={styles.notifUnreadDot} />}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text style={styles.notifTitle} numberOfLines={1}>{notif.title}</Text>
+                        <Text style={styles.notifTime}>{notif.time}</Text>
+                      </View>
+                      <Text style={styles.notifBody}>{notif.body}</Text>
+                    </View>
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1856,6 +1934,17 @@ const styles = StyleSheet.create({
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
   modalSubtitle: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  /* Notifications Modal */
+  notifItem: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  notifItemUnread: { backgroundColor: colors.yellowWash, borderColor: colors.yellowDeep },
+  notifDotWrap: { width: 16, alignItems: 'center', paddingTop: 5 },
+  notifUnreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#E07A5F' },
+  notifTitle: { fontSize: 14, fontWeight: '700', color: COLORS.text, flexShrink: 1 },
+  notifTime: { fontSize: 11, color: '#6B7280', marginLeft: 8 },
+  notifBody: { fontSize: 12, color: '#6B7280', marginTop: 3, lineHeight: 17 },
+  notifMarkAllBtn: { backgroundColor: colors.brownSoft, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10 },
+  notifMarkAllText: { fontSize: 12, fontWeight: '700', color: colors.brown },
+  notifEmpty: { fontSize: 13, color: '#6B7280', fontStyle: 'italic', textAlign: 'center', paddingVertical: 24 },
   /* Review Modal */
   reviewTaskItem: { backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
   reviewRankPill: { backgroundColor: colors.yellowWash, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },

@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -60,6 +60,31 @@ function validateConfirmPassword(
   return undefined;
 }
 
+/* ─── username availability ─────────────────────────────────────────────── */
+
+// Usernames live in the profiles table (the handle_new_user() trigger puts
+// them there), so uniqueness is checked against it. Prefers the
+// is_username_taken() RPC and falls back to a plain profile lookup, so the
+// check still works before the RPC is deployed.
+async function usernameTaken(username: string): Promise<boolean> {
+  const name = username.trim().toLowerCase();
+  if (!name) return false;
+
+  const { data, error } = await supabase.rpc('is_username_taken', {
+    p_username: name,
+  });
+  if (!error) return data === true;
+
+  // RPC missing — fall back to reading the profiles table directly.
+  const { data: rows, error: lookupError } = await supabase
+    .from('profiles')
+    .select('username')
+    .eq('username', name)
+    .limit(1);
+  if (lookupError) throw lookupError;
+  return (rows?.length ?? 0) > 0;
+}
+
 /* ─── WickMark (brand sparkle) ─────────────────────────────────────────── */
 
 function WickMark({ size = 24 }: { size?: number }) {
@@ -91,6 +116,12 @@ export default function SignupScreen() {
   const [loading, setLoading] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
+  // Username availability — probed (debounced) against the profiles table.
+  const [usernameStatus, setUsernameStatus] = useState<
+    'idle' | 'checking' | 'available' | 'taken'
+  >('idle');
+  const usernameTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Live validation — recomputed on every render (cheap).
   const errors: FieldErrors = {
     username: validateUsername(username),
@@ -99,13 +130,46 @@ export default function SignupScreen() {
     confirmPassword: validateConfirmPassword(password, confirmPassword),
   };
 
-  const hasAnyError = Object.values(errors).some(Boolean);
+  const hasAnyError =
+    Object.values(errors).some(Boolean) || usernameStatus === 'taken';
 
   const markTouched = useCallback(
     (field: string) =>
       setTouched((prev) => (prev[field] ? prev : { ...prev, [field]: true })),
     [],
   );
+
+  /* ── username availability check ────────────────────────────────────────── */
+
+  // Malformed usernames skip the probe — the local validation already shows
+  // why. A failed probe (offline, permissions) is ignored here; submitting
+  // still re-checks, and the server-side unique constraint is the final
+  // authority.
+  const checkUsername = useCallback(async (value: string) => {
+    const name = value.trim();
+    if (!USERNAME_RE.test(name) || !hasSupabase) {
+      setUsernameStatus('idle');
+      return;
+    }
+    setUsernameStatus('checking');
+    try {
+      setUsernameStatus((await usernameTaken(name)) ? 'taken' : 'available');
+    } catch {
+      setUsernameStatus('idle');
+    }
+  }, []);
+
+  // Debounce: wait for a pause in typing before probing.
+  useEffect(() => {
+    if (!username.trim()) {
+      setUsernameStatus('idle');
+      return;
+    }
+    usernameTimer.current = setTimeout(() => checkUsername(username), 500);
+    return () => {
+      if (usernameTimer.current) clearTimeout(usernameTimer.current);
+    };
+  }, [username, checkUsername]);
 
   /* ── submit ────────────────────────────────────────────────────────────── */
 
@@ -125,6 +189,15 @@ export default function SignupScreen() {
     setServerError(null);
 
     try {
+      // 0. Re-check the username right before creating the account — the
+      //    debounced probe can be stale if the user submits quickly.
+      if (await usernameTaken(username.trim())) {
+        setServerError(
+          'This username is already taken. Please choose another.',
+        );
+        return;
+      }
+
       // 1. Sign up. The `username` goes into raw_user_meta_data so the
       //    handle_new_user() database trigger picks it up and inserts it
       //    into the profiles table automatically.
@@ -156,8 +229,15 @@ export default function SignupScreen() {
       router.replace('/login');
     } catch (err: any) {
       const msg = err?.message ?? 'Sign up failed. Please try again.';
-      // Make common Supabase error messages friendlier.
-      if (msg.includes('already registered') || msg.includes('already been registered')) {
+      // A duplicate username can slip past the pre-check when two people
+      // sign up at the same moment — the profiles unique constraint catches
+      // it and we surface it here.
+      if (msg.includes('duplicate key') || msg.includes('username_key')) {
+        setServerError('This username is already taken. Please choose another.');
+      } else if (
+        msg.includes('already registered') ||
+        msg.includes('already been registered')
+      ) {
         setServerError('An account with this email already exists. Try logging in instead.');
       } else {
         setServerError(msg);
@@ -207,16 +287,33 @@ export default function SignupScreen() {
                 setUsername(v);
                 setServerError(null);
               }}
-              onBlur={() => markTouched('username')}
+              onBlur={() => {
+                markTouched('username');
+                checkUsername(username);
+              }}
               autoCapitalize="none"
               autoCorrect={false}
               style={[
                 styles.input,
-                touched.username && errors.username ? styles.inputError : null,
+                (touched.username && errors.username) ||
+                usernameStatus === 'taken'
+                  ? styles.inputError
+                  : null,
               ]}
             />
             {touched.username && errors.username && (
               <Text style={styles.fieldError}>{errors.username}</Text>
+            )}
+            {usernameStatus === 'checking' && (
+              <Text style={styles.fieldHint}>Checking availability…</Text>
+            )}
+            {usernameStatus === 'taken' && (
+              <Text style={styles.fieldError}>
+                This username is already taken
+              </Text>
+            )}
+            {usernameStatus === 'available' && (
+              <Text style={styles.fieldOk}>✓ Username available</Text>
             )}
           </View>
 
@@ -431,6 +528,20 @@ const styles = StyleSheet.create({
     fontFamily: font.regular,
     fontSize: 12,
     color: colors.alert,
+    marginTop: spacing(1),
+    marginLeft: spacing(1),
+  },
+  fieldHint: {
+    fontFamily: font.regular,
+    fontSize: 12,
+    color: colors.inkFaint,
+    marginTop: spacing(1),
+    marginLeft: spacing(1),
+  },
+  fieldOk: {
+    fontFamily: font.medium,
+    fontSize: 12,
+    color: colors.calm,
     marginTop: spacing(1),
     marginLeft: spacing(1),
   },

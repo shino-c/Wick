@@ -91,7 +91,7 @@ export default function RecoveryScreen() {
 
 	// Garden drag-to-position — default height must match grass minHeight so
 	// items placed near the bottom remain draggable even before onLayout fires.
-	const gardenSizeRef = useRef({ width: 300, height: 220 });
+	const gardenSizeRef = useRef({ width: 300, height: 150 });
 
 	const showToast = useCallback((message: string) => {
 		setToast(message);
@@ -123,9 +123,8 @@ export default function RecoveryScreen() {
                             startPosRef.current = item.position ?? { x: 50, y: 50 };
                         },
                         onPanResponderMove: (_evt, gesture) => {
-                            // 获取容器实际宽高，若未加载完给个默认兜底高度防除以零
                             const width = gardenSizeRef.current.width || 300;
-                            const height = gardenSizeRef.current.height || 220;
+                            const height = gardenSizeRef.current.height || 150;
                             
                             const newX = startPosRef.current.x + (gesture.dx / width) * 100;
                             const newY = startPosRef.current.y + (gesture.dy / height) * 100;
@@ -318,10 +317,14 @@ export default function RecoveryScreen() {
 					showsVerticalScrollIndicator={false}
 					contentContainerStyle={styles.scrollContent}
 				>
-					{/* GARDEN SCENE */}
+				{/* GARDEN SCENE */}
+				<View style={{ marginBottom: spacing(2) }}>
+                    <Txt v="heading" style= {{fontSize: 25}}>Your Garden</Txt>
+                </View>
 					<Card style={styles.gardenCard}>
 						<View style={styles.sky}>
 							<Emoji size={30} style={styles.sun}>🌤️</Emoji>
+							
 							<Row style={styles.walletPill}>
 								<Emoji size={16}>🌱</Emoji>
 								<Txt v="small" color={colors.brown} style={{ fontWeight: '700' }}>
@@ -342,10 +345,7 @@ export default function RecoveryScreen() {
 							{garden.length === 0 ? (
 								<View style={styles.emptyGarden}>
 									<Emoji size={46}>🌱</Emoji>
-									<Txt v="small" color={colors.inkSoft} center style={styles.gentleLine}>
-										Your garden is waiting for its first sprout. Do a small recovery
-										activity below and watch it grow.
-									</Txt>
+									
 								</View>
 							) : (
 								<View style={styles.gardenBed}>
@@ -383,7 +383,7 @@ export default function RecoveryScreen() {
 							color={colors.inkSoft}
 							style={[styles.gentleLine, { marginTop: spacing(3), lineHeight: 20, fontSize: 12 }]}
 						>
-							{plan?.note ?? 'Here are ideas, never obligations.'} Finish a plan to earn 10 seeds!
+							{plan?.note ?? 'Here are ideas, never obligations.'} Finish a plan to earn seeds for your garden!
 						</Txt>
 
 						<View style={styles.slots}>
@@ -433,7 +433,7 @@ export default function RecoveryScreen() {
 												<Emoji size={26}>{suggestion.emoji}</Emoji>
 											</View>
 											<View style={styles.suggestionBody}>
-												<Txt v="heading" color={colors.ink} style={{ flex: 1 }} numberOfLines={1}>
+												<Txt v="heading" color={colors.ink} style={[styles.suggestionTitle, { flex: 1 }]} numberOfLines={1}>
 													{suggestion.title}
 												</Txt>
 												<Txt
@@ -492,7 +492,7 @@ export default function RecoveryScreen() {
 											<Txt
 												v="heading"
 												color={done ? colors.inkFaint : colors.ink}
-												style={{ flex: 1 }}
+												style={[styles.suggestionTitle, { flex: 1 }]}
 												numberOfLines={1}
 											>
 												{suggestion.title}
@@ -1149,12 +1149,22 @@ const styles = StyleSheet.create({
 	gardenCard: { padding: 0, overflow: 'hidden', marginBottom: spacing(4) },
 	sky: {
 		backgroundColor: '#FDF3C8',
-		height: 84,
+		minHeight: 84,
 		flexDirection: 'row',
 		justifyContent: 'flex-end',
 		alignItems: 'flex-start',
 		paddingHorizontal: spacing(4),
 		paddingTop: spacing(3),
+	},
+	gardenTitle: {
+		top: spacing(3),
+		left: '50%',
+		marginLeft: -60,
+		width: 120,
+		textAlign: 'center',
+		fontSize: 16,
+		fontWeight: '700',
+		color: colors.brown,
 	},
 	sun: { position: 'absolute', top: spacing(3), left: spacing(4) },
 	walletPill: {
@@ -1168,7 +1178,7 @@ const styles = StyleSheet.create({
 		padding: spacing(4),
 		borderTopWidth: 1,
 		borderTopColor: colors.line,
-		minHeight: 220,
+		minHeight: 150,
 	},
 	gardenBed: { position: 'relative' },
 	plant: {
@@ -1252,6 +1262,7 @@ const styles = StyleSheet.create({
 	},
 	suggestionDoneEmoji: { backgroundColor: colors.calmWash },
 	suggestionBody: { flex: 1, minWidth: 0 },
+	suggestionTitle: {fontSize: 13},
 	statusChip: {
 		borderRadius: radius.pill,
 		backgroundColor: colors.cream,
