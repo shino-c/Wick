@@ -1,188 +1,167 @@
-import React from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  Pressable,
-} from "react-native";
-import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import React from 'react';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-type TabName = "Home" | "Desk" | "Recovery" | "Social";
+type TabName = 'Home' | 'Desk' | 'Recovery' | 'Social';
+
+/* Wired up: Recovery is the garden tab. */
 
 interface BottomNavigationProps {
   activeTab?: TabName;
-  router?: any;
+  router?: any; // Expo Router instance
 }
 
 export default function BottomNavigation({
-  activeTab = "Home",
+  activeTab = 'Home',
   router,
 }: BottomNavigationProps) {
+  // Phones with a system gesture bar (Android edge-to-edge) or a home
+  // indicator (iPhone) report a bottom frame inset; without this the bar's
+  // labels can sit under the system UI. Devices with hardware buttons report
+  // 0, so the bar keeps its plain 20px padding there. Reading it here — in
+  // the shared bar rather than per screen — is what keeps every tab aligned
+  // while still adapting to each device.
   const insets = useSafeAreaInsets();
-
   const tabs: {
     name: TabName;
-    route: string;
+    /** null = reserved, rendered but not navigable. */
+    route: string | null;
     activeIcon: string;
     inactiveIcon: string;
   }[] = [
     {
-      name: "Home",
-      route: "/home",
-      activeIcon: "home",
-      inactiveIcon: "home-outline",
+      name: 'Home',
+      route: '/home',
+      activeIcon: 'home',
+      inactiveIcon: 'home-outline',
     },
     {
-      name: "Desk",
-      route: "/desk",
-      activeIcon: "table-furniture",
-      inactiveIcon: "table-furniture",
+      name: 'Desk',
+      route: '/desk',
+      activeIcon: 'table-furniture',
+      inactiveIcon: 'table-furniture',
     },
     {
-      name: "Recovery",
-      route: "/recovery",
-      activeIcon: "heart-pulse",
-      inactiveIcon: "heart-pulse",
+      name: 'Recovery',
+      route: '/recovery',
+      activeIcon: 'heart-pulse',
+      inactiveIcon: 'heart-pulse',
     },
     {
-      name: "Social",
-      route: "/social",
-      activeIcon: "account",
-      inactiveIcon: "account-outline",
+      name: 'Social',
+      route: '/social',
+      activeIcon: 'account',
+      inactiveIcon: 'account-outline',
     },
   ];
 
-  const handlePress = (route: string, isActive: boolean) => {
-    // Don't remount the current screen.
-    if (!router || isActive) return;
-
+  /**
+   * `replace`, not `push`.
+   *
+   * A tab bar names the destinations you can be at; a stack names how you got
+   * somewhere. Pushing meant every tap stacked another screen on top of the
+   * last, so Social opened *over* Desk rather than replacing it — three taps
+   * around the bar left three screens on the stack, the back gesture retraced
+   * your tab history, and the bar stopped describing where you were. Replacing
+   * keeps the stack one deep, which is what a tab actually is.
+   *
+   * A real expo-router `(tabs)` group would be better still: it would keep each
+   * tab's own scroll position and its own nested history. That is a change to
+   * the route tree rather than to this component, so it is left alone here.
+   */
+  const handlePress = (route: string | null, isActive: boolean) => {
+    // Re-tapping the tab you are on should do nothing, not remount the screen.
+    if (!router || isActive || !route) return;
     router.replace(route);
   };
 
   return (
-    <View
-      style={[
-        styles.nav,
-        {
-          paddingBottom: Math.max(insets.bottom, 12),
-        },
-      ]}
-    >
-      <View style={styles.tabsRow}>
-        {tabs.map((tab) => {
-          const isActive = activeTab === tab.name;
+    <View style={[styles.nav, { paddingBottom: 20 + insets.bottom }]}>
+      {tabs.map((tab) => {
+        const isActive = activeTab === tab.name;
+        const reserved = tab.route === null;
 
-          return (
-            <Pressable
-              key={tab.name}
-              onPress={() => handlePress(tab.route, isActive)}
-              accessibilityRole="tab"
-              accessibilityState={{
-                selected: isActive,
-              }}
-              style={({ pressed }) => [
-                styles.tabItem,
-                isActive && styles.activeTabItem,
-                pressed && styles.pressed,
-              ]}
-            >
-              <MaterialCommunityIcons
-                name={
-                  (isActive
-                    ? tab.activeIcon
-                    : tab.inactiveIcon) as any
-                }
-                size={22}
-                color={
-                  isActive
-                    ? "#2C2B29"
-                    : "#6B7280"
-                }
-              />
-
-              <Text
-                style={[
-                  styles.tabLabel,
-                  isActive
-                    ? styles.activeLabel
-                    : styles.inactiveLabel,
-                ]}
-              >
-                {tab.name}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
+        return (
+          <Pressable
+            key={tab.name}
+            onPress={() => handlePress(tab.route, isActive)}
+            disabled={reserved}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: isActive, disabled: reserved }}
+            accessibilityHint={reserved ? 'Coming soon' : undefined}
+            style={({ pressed }) => [
+              styles.tabItem,
+              isActive && styles.activeTabItem,
+              reserved && styles.reserved,
+              pressed && !reserved && styles.pressed,
+            ]}
+          >
+            <MaterialCommunityIcons
+              name={(isActive ? tab.activeIcon : tab.inactiveIcon) as any}
+              size={22}
+              color={isActive ? '#2C2B29' : '#6B7280'}
+            />
+            <Text style={[styles.tabLabel, isActive ? styles.activeLabel : styles.inactiveLabel]}>
+              {tab.name}
+            </Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   nav: {
-    width: "100%",
-    backgroundColor: "#FFFFFF",
-
-    borderTopWidth: 1,
-    borderTopColor: "#EAE5DB",
-
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-
-    shadowColor: "#6B5036",
-    shadowOpacity: 0.06,
-    shadowRadius: 20,
-    shadowOffset: {
-      width: 0,
-      height: -4,
-    },
-
-    elevation: 8,
-  },
-
-  tabsRow: {
-    width: "100%",
-    flexDirection: "row",
-    justifyContent: "space-around",
-    alignItems: "center",
-
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    width: '100%',
     paddingHorizontal: 16,
     paddingTop: 10,
+    paddingBottom: 20, // Base spacing; the device's bottom inset is added on top at render time
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: 1,
+    borderTopColor: '#EAE5DB',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    // Elevation shadow
+    shadowColor: '#6B5036',
+    shadowOpacity: 0.06,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: -4 },
+    elevation: 8,
   },
-
   tabItem: {
-    alignItems: "center",
-    justifyContent: "center",
-
+    alignItems: 'center',
+    justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 4,
-
     borderRadius: 16,
   },
-
   activeTabItem: {
-    backgroundColor: "#FEF08A",
+    backgroundColor: '#FEF08A',
     paddingHorizontal: 16,
   },
-
   pressed: {
     opacity: 0.8,
     transform: [{ scale: 0.95 }],
   },
-
+  /** Reserved: present in the bar, visibly not ready, and not tappable. */
+  reserved: {
+    opacity: 0.35,
+  },
   tabLabel: {
     fontSize: 11,
     marginTop: 2,
   },
-
   activeLabel: {
-    fontWeight: "600",
-    color: "#2C2B29",
+    fontWeight: '600',
+    color: '#2C2B29',
   },
-
   inactiveLabel: {
-    fontWeight: "500",
-    color: "#6B7280",
+    fontWeight: '500',
+    color: '#6B7280',
   },
 });

@@ -270,7 +270,7 @@ export function Emoji({
 export function NavBar({ title, onBack, right }: { title: string; onBack?: () => void; right?: React.ReactNode }) {
   return (
     <View style={styles.navBar}>
-      <View style={{ width: 40 }}>
+      <View style={{ width: 40, alignItems: 'flex-start' }}>
         {onBack && (
           <Pressable
             onPress={onBack}

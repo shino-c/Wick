@@ -1,47 +1,53 @@
-import { MaterialIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
-    ActivityIndicator,
-    Modal,
-    Pressable,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
-import { Screen } from "../components/base";
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-native-svg';
 
 import BottomNavigation from '@/components/bottombar';
+import { DateChipPicker, TimePicker } from '@/components/taskPickers';
 import TopNavigation from '@/components/topbar';
 import type {
-    WeeklyStressAnalysis,
-    WorkloadAnalysis,
-    WorkloadCategory,
-  WorkloadItem,
-  WorkloadPriority,
-  WorkloadStatus,
+  CalendarConnection,
+  LoadBalanceSuggestion,
+  SelfReport,
+  StressScoreRow,
+  TaskAnalysis,
+  WeeklyCapacityAnalysis,
 } from '@/data/types';
+import { analyzeWeeklyCapacity, parseQuickTasksNLP, suggestLoadBalance } from '@/services/aiService';
+import { isNewWeek, updateEventOnDeviceCalendar } from '@/services/calendarSync';
+import { toISODate } from '@/services/dateUtils';
 import {
-    addWorkloadItem,
-  batchDeferWorkloadItems,
-  completeWorkloadItem,
-  deferWorkloadItem,
-    // getCalendarConnections,
-    buildWeeklyStressAnalysis,
-    getWeeklyStressAnalysis,
-    // listWorkloadItems,
-    recomputeFusedScore,
-    // syncCalendar,
+  approveTaskAnalysis,
+  createAndSyncTask,
+  deferTaskAnalysis,
+  deleteAndSyncTask,
+  getCalendarConnections,
+  getTaskAnalyses,
+  getWeeklyCapacity,
+  listSelfReports,
+  listStressScores,
+  recomputeCurrentWeekDerivedData,
+  syncAndAnalyzeCalendar,
+  updateTaskAnalysis
 } from '@/services/repository';
-import { analyzeWorkload, getRankedTasks } from '@/services/workloadService';
 import { colors } from '@/theme';
-import { getMondayOfWeek, seedCalendarItems } from '@/data/localStore';
 
-// Anchored to src/theme, which carries the Figma swatches.
 const COLORS = {
   background: colors.cream,
   surface: colors.surface,
@@ -56,289 +62,609 @@ const COLORS = {
   warningBorder: colors.yellowDeep,
   warningText: '#854D0E',
   warningSubtext: '#713F12',
-  green: colors.calm,
-};
-
-const CATEGORIES: WorkloadCategory[] = [
-  'academic',
-  'social',
-  'physical',
-  'errands',
-  'mental',
-];
-
-const CATEGORY_COLORS: Record<WorkloadCategory, string> = {
   academic: '#F87171',
+  work: '#FDBA74',
   social: '#BAE6FD',
   physical: '#BBF7D0',
   errands: '#FDE2E4',
   mental: '#E9D5FF',
 };
 
-const CIRCUMFERENCE = 2 * Math.PI * 48; // ~301.59
+function getWeekStart(date = new Date()): string {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  d.setDate(diff);
+  return toISODate(d);
+}
 
-const legacyPreviewAnalysis: WorkloadAnalysis = {
-  totalCapacityPct: 90,
-  weeklyHours: 36,
-  capacityMaxHours: 40,
-  spikingCategory: 'academic',
-  isOverloaded: true,
-  categoryBreakdown: {
-    academic: {
-      category: 'academic',
-      name: 'Academic',
-      emoji: '📚',
-      hours: 13.5,
-      percentage: 35,
-      taskCount: 4,
-      topDescription: 'Thesis & Lab prep',
-      items: [],
-    },
-    social: {
-      category: 'social',
-      name: 'Social & Community',
-      emoji: '🌱',
-      hours: 7.5,
-      percentage: 20,
-      taskCount: 2,
-      topDescription: 'Coffee & birthdays',
-      items: [],
-    },
-    physical: {
-      category: 'physical',
-      name: 'Physical Health',
-      emoji: '🏃',
-      hours: 5.5,
-      percentage: 15,
-      taskCount: 2,
-      topDescription: 'Morning run & gym',
-      items: [],
-    },
-    errands: {
-      category: 'errands',
-      name: 'Others & Errands',
-      emoji: '🛒',
-      hours: 6.5,
-      percentage: 15,
-      taskCount: 3,
-      topDescription: 'Laundry, Groceries',
-      items: [],
-    },
-    mental: {
-      category: 'mental',
-      name: 'Mental/Downtime',
-      emoji: '🧘',
-      hours: 3.0,
-      percentage: 5,
-      taskCount: 2,
-      topDescription: 'Breathing, reading',
-      items: [],
-    },
-  },
-  recommendedDeferrals: [],
+const CATEGORY_EMOJI: Record<string, string> = {
+  academic: '📚',
+  work: '💼',
+  social: '🌱',
+  physical: '🏃',
+  mental: '🧘',
+  errands: '🛒',
+  other: '📌',
 };
 
-const defaultAnalysis = analyzeWorkload([]);
+function getCategoryEmoji(cat: string): string {
+  return CATEGORY_EMOJI[cat] || '📌';
+}
+
+const PRIORITY_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+  high: { bg: '#FEE2E2', border: '#FECDD3', text: '#E11D48' },
+  medium: { bg: '#FEF3C7', border: '#FDE68A', text: '#B45309' },
+  low: { bg: '#DCFCE7', border: '#BBF7D0', text: '#16A34A' },
+};
+
+const WEEKDAY_NAMES = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+];
+
+/**
+ * Builds the "Early Warning Insight" banner for the stress chart.
+ *
+ * The copy is driven by the week's peak day and never tells the user to
+ * schedule something on a day that has already passed: recovery/rest
+ * recommendations are only offered when the peak is today or still ahead.
+ */
+function buildEarlyWarningInsight(
+  dayStress: { score: number; hasData: boolean }[],
+  todayIdx: number
+): { title: string; icon: 'warning' | 'notifications-active'; urgent: boolean; text: string } {
+  const today = dayStress[todayIdx];
+  const todayIn = (today?.hasData ?? false) ? (today?.score ?? 0) : null;
+
+  const scored = dayStress
+    .map((d, i) => ({ score: d.score, i, hasData: d.hasData }))
+    .filter((d) => d.hasData);
+  const peak = scored.reduce<{ score: number; i: number } | null>(
+    (best, d) => (best === null || d.score > best.score ? { score: d.score, i: d.i } : best),
+    null
+  );
+
+  const title = 'Early Warning Insight';
+
+  // No real readings at all yet.
+  if (!peak) {
+    return {
+      title,
+      icon: 'notifications-active',
+      urgent: false,
+      text: 'Still building this week\u2019s picture. Add a few tasks or a quick check-in and the stress read gets sharper.',
+    };
+  }
+
+  const peakDay = WEEKDAY_NAMES[peak.i];
+  const peakIsToday = peak.i === todayIdx;
+  const peakIsPast = peak.i < todayIdx;
+  const urgentToday = todayIn !== null && todayIn >= 60;
+
+  // Today itself is running hot — warn about it before anything else.
+  if (urgentToday && !peakIsToday) {
+    return {
+      title,
+      icon: 'warning',
+      urgent: true,
+      text: `Today is running hot at ${todayIn}/100 while ${peakDay} peaks at ${peak.score}/100. Pull today\u2019s load back and protect some recovery time.`,
+    };
+  }
+
+  if (peak.score >= 60) {
+    if (peakIsToday) {
+      return {
+        title,
+        icon: 'warning',
+        urgent: true,
+        text: `${peakDay} load is spiking severely at ${peak.score}/100. Make sure tomorrow\u2019s schedule supports active recovery blocks.`,
+      };
+    }
+    if (peakIsPast) {
+      return {
+        title,
+        icon: 'notifications-active',
+        urgent: false,
+        text: `${peakDay} spiked at ${peak.score}/100. That day has passed \u2014 the week is lighter now, and nothing new needs scheduling.`,
+      };
+    }
+    return {
+      title,
+      icon: 'notifications-active',
+      urgent: false,
+      text: `${peakDay} is shaping up to be this week\u2019s peak at ${peak.score}/100. Build a lighter day before it and leave a recovery block after.`,
+    };
+  }
+
+  // Moderate week — gentle steer, no alarm.
+  const todayLead = urgentToday ? `Today is at ${todayIn}/100. ` : '';
+  return {
+    title,
+    icon: 'notifications-active',
+    urgent: false,
+    text: `${todayLead}This week\u2019s stress is tracking ${peak.score <= 35 ? 'calmly' : 'moderately'} \u2014 keep small recovery moments in the mix.`,
+  };
+}
 
 export default function Home() {
   const router = useRouter();
 
-  const [analysis, setAnalysis] = useState<WorkloadAnalysis>(defaultAnalysis);
-  const [weeklyStress, setWeeklyStress] = useState<WeeklyStressAnalysis | null>(null);
-  const stressRequestRef = useRef(0);
-  const [selectedStressIndex, setSelectedStressIndex] = useState<number | null>(null);
-  const [rankedTasks, setRankedTasks] = useState<ReturnType<typeof getRankedTasks>>([]);
-  const [mockWorkloadItems, setMockWorkloadItems] = useState<WorkloadItem[]>(() => seedCalendarItems('google'));
-  const [deferredSuccessMsg, setDeferredSuccessMsg] = useState<string | null>(null);
+  // Core Data State
+  const [tasks, setTasks] = useState<TaskAnalysis[]>([]);
+  const [capacity, setCapacity] = useState<WeeklyCapacityAnalysis | null>(null);
+  const [connections, setConnections] = useState<CalendarConnection[]>([]);
+  const [loadSuggestions, setLoadSuggestions] = useState<LoadBalanceSuggestion[]>([]);
+  const [stressScores, setStressScores] = useState<StressScoreRow[]>([]);
+  const [selfReports, setSelfReports] = useState<SelfReport[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // Manual Task modal state
-  const [taskModalVisible, setTaskModalVisible] = useState(false);
-  const [manualTitle, setManualTitle] = useState('');
-  const [manualCategory, setManualCategory] = useState<WorkloadCategory>('academic');
-  const [manualHours, setManualHours] = useState('1.5');
-  const [manualPriority, setManualPriority] = useState<WorkloadPriority>('medium');
-  const [manualDate, setManualDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [manualTime, setManualTime] = useState(() => new Date().toTimeString().slice(0, 5));
-  const [savingTask, setSavingTask] = useState(false);
+  // Stress chart interaction
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
+  const [chartWidth, setChartWidth] = useState(0);
 
-  // Demo mode intentionally ignores cached real calendar rows.
-  const loadWorkload = useCallback(async () => {
+  // Review Modal for Unapproved Tasks (Current Week)
+  const [pendingTasks, setPendingTasks] = useState<TaskAnalysis[]>([]);
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [editingTask, setEditingTask] = useState<TaskAnalysis | null>(null);
+
+  // Quick Add NLP Chatbot Modal State
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<Array<{ id: string; title: string; body: string; time: string; read: boolean }>>([]);
+  const hasUnread = notifications.some((notification) => !notification.read);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [quickInput, setQuickInput] = useState('');
+  const [parsingNLP, setParsingNLP] = useState(false);
+
+  const [parsedTasks, setParsedTasks] = useState<Omit<TaskAnalysis, 'id' | 'createdAt'>[]>([]);
+  const [editingParsedIdx, setEditingParsedIdx] = useState<number | null>(null);
+  const [addingTask, setAddingTask] = useState(false);
+
+  // Sync state
+  const [resyncing, setResyncing] = useState(false);
+
+  const currentWeekStart = getWeekStart();
+
+  const loadDashboardData = useCallback(async () => {
     try {
-      const items = mockWorkloadItems;
-      // Real workload read (restore this when the demo should use the database):
-      // const items = await listWorkloadItems();
-      const weekStart = getMondayOfWeek();
-      const weekEnd = new Date(weekStart);
-      weekEnd.setDate(weekEnd.getDate() + 7);
-      const currentWeekItems = items.filter((item) => {
-        if (!item.scheduledStart) return false;
-        const start = new Date(item.scheduledStart);
-        return start >= weekStart && start < weekEnd;
-      });
-      const computed = analyzeWorkload(currentWeekItems);
-      setAnalysis(computed);
-      setRankedTasks(getRankedTasks(currentWeekItems));
-      // Draw the schedule forecast now. Signal history is optional enrichment,
-      // so it must never hold the chart hostage to a database round trip.
-      setWeeklyStress(buildWeeklyStressAnalysis(currentWeekItems));
-      const stressRequest = ++stressRequestRef.current;
-      void getWeeklyStressAnalysis(currentWeekItems)
-        .then((value) => {
-          if (stressRequest === stressRequestRef.current) setWeeklyStress(value);
-        })
-        .catch((e) => console.warn('Failed to enrich weekly stress analysis:', e));
-      // Persist fusion after the UI is ready; do not block first paint.
-      void recomputeFusedScore(computed.totalCapacityPct).catch((e) => {
-        console.warn('Failed to recompute fused score:', e);
-      });
-    } catch (e) {
-      console.warn('Failed to load workload analysis:', e);
+      const [allTasks, currentCapacity, allConns, scores, reports] = await Promise.all([
+        getTaskAnalyses(currentWeekStart),
+        getWeeklyCapacity(currentWeekStart),
+        getCalendarConnections(),
+        listStressScores(14),
+        listSelfReports(14),
+      ]);
+
+      setTasks(allTasks);
+      setConnections(allConns);
+      setStressScores(scores);
+      setSelfReports(reports);
+
+      // Always derive capacity from the real task list for this week so the
+      // ring and warning reflect exactly what is scheduled, even if the stored
+      // analysis is stale or missing.
+      let capacityValue = currentCapacity;
+      if (!currentCapacity || currentCapacity.week_start !== currentWeekStart) {
+        try {
+          capacityValue = await analyzeWeeklyCapacity(allTasks);
+          capacityValue.week_start = currentWeekStart;
+          capacityValue = await recomputeCurrentWeekDerivedData(currentWeekStart);
+        } catch {
+          capacityValue = currentCapacity;
+        }
+      }
+      setCapacity(capacityValue);
+
+      // Check for unapproved / newly synced tasks for this week
+      const unapproved = allTasks.filter((t) => t.status === 'pending');
+      if (unapproved.length > 0) {
+        setPendingTasks(unapproved);
+        setShowReviewModal(true);
+      } else {
+        setPendingTasks([]);
+      }
+
+      // Generate AI Load Balance Suggestions
+      const suggestions = await suggestLoadBalance(allTasks, capacityValue || undefined);
+      setLoadSuggestions(suggestions);
+    } catch (err) {
+      console.error('Error loading dashboard data:', err);
+    } finally {
+      setLoading(false);
     }
-  }, [mockWorkloadItems]);
+  }, [currentWeekStart]);
 
   useFocusEffect(
     useCallback(() => {
-      loadWorkload();
-      // Production calendar refresh, retained for restoring the live flow:
-      // const refreshConnectedCalendar = async () => {
-      //   const connections = await getCalendarConnections();
-      //   await Promise.all(connections.filter((connection) => connection.connected).map(async (connection) => {
-      //     try { await syncCalendar(connection.provider); } catch { /* permission/account may have changed */ }
-      //   }));
-      //   await loadWorkload();
-      // };
-      // const timer = setInterval(refreshConnectedCalendar, 60 * 1000);
-      // return () => clearInterval(timer);
-    }, [loadWorkload])
+      loadDashboardData();
+    }, [loadDashboardData])
   );
 
-  // Defer individual task
-  const handleDefer = async (id: string) => {
-    setMockWorkloadItems((items) => items.map((item) => item.id === id ? { ...item, status: 'deferred' } : item));
-    // Real database mutation (restore with real workload reads):
-    // await deferWorkloadItem(id);
-    const updated = mockWorkloadItems.map((item) => item.id === id ? { ...item, status: 'deferred' as const } : item);
-    const computed = analyzeWorkload(updated);
-    setAnalysis(computed);
-    setDeferredSuccessMsg('✓ Task deferred — workload capacity updated');
-    await recomputeFusedScore(computed.totalCapacityPct);
-  };
+  // Handle New Week Re-sync
+  const deviceConn = connections.find((c) => c.provider === 'device');
+  const needsResync = deviceConn ? isNewWeek(deviceConn.lastSyncedAt) : false;
 
-  const handleComplete = async (id: string) => {
-    const target = mockWorkloadItems.find((item) => item.id === id);
-    const nextStatus: WorkloadStatus = target?.status === 'completed' ? 'scheduled' : 'completed';
-    setMockWorkloadItems((items) => items.map((item) => item.id === id ? { ...item, status: nextStatus } : item));
-    // Real database mutation when real task data is enabled:
-    // await completeWorkloadItem(id);
-    const updated = mockWorkloadItems.map((item) => item.id === id ? { ...item, status: nextStatus } : item);
-    const currentWeekItems = updated.filter((item) => item.scheduledStart && new Date(item.scheduledStart) >= getMondayOfWeek());
-    const computed = analyzeWorkload(currentWeekItems);
-    setAnalysis(computed);
-    setRankedTasks(getRankedTasks(currentWeekItems));
-    setWeeklyStress(buildWeeklyStressAnalysis(currentWeekItems));
-    const stressRequest = ++stressRequestRef.current;
-    void getWeeklyStressAnalysis(currentWeekItems)
-      .then((value) => {
-        if (stressRequest === stressRequestRef.current) setWeeklyStress(value);
-      })
-      .catch((e) => console.warn('Failed to enrich weekly stress analysis:', e));
-    void recomputeFusedScore(computed.totalCapacityPct).catch((e) => {
-      console.warn('Failed to recompute fused score:', e);
-    });
-  };
-
-  // Smart Rebalance: defer all flagged candidates in one tap
-  const handleSmartRebalance = async () => {
-    const ids = analysis.recommendedDeferrals.map((r) => r.id);
-    if (ids.length > 0) {
-      setMockWorkloadItems((items) => items.map((item) => ids.includes(item.id) ? { ...item, status: 'deferred' } : item));
-      // Real database mutation (restore with real workload reads):
-      // await batchDeferWorkloadItems(ids);
-      const updated = mockWorkloadItems.map((item) => ids.includes(item.id) ? { ...item, status: 'deferred' as const } : item);
-      const computed = analyzeWorkload(updated);
-      setAnalysis(computed);
-      setDeferredSuccessMsg(
-        `✓ Smart Rebalance applied: capacity reduced to ${computed.totalCapacityPct}%`
-      );
-      await recomputeFusedScore(computed.totalCapacityPct);
-    }
-  };
-
-  // Add manual task/errand
-  const handleSaveTask = async () => {
-    if (!manualTitle.trim()) return;
-    setSavingTask(true);
+  const handleResyncWeek = async () => {
+    setResyncing(true);
     try {
-      const hours = parseFloat(manualHours) || 1.0;
-      const newTask = await addWorkloadItem({
-        title: manualTitle.trim(),
-        category: manualCategory,
-        estimatedHours: hours,
-        priority: manualPriority,
-        source: 'manual',
-        scheduledStart: new Date(`${manualDate}T${manualTime}:00`).toISOString(),
-        scheduledEnd: new Date(new Date(`${manualDate}T${manualTime}:00`).getTime() + hours * 60 * 60 * 1000).toISOString(),
-      });
-      setMockWorkloadItems((items) => [newTask, ...items]);
-      setManualTitle('');
-      setManualHours('1.5');
-      setManualDate(new Date().toISOString().slice(0, 10));
-      setManualTime(new Date().toTimeString().slice(0, 5));
-      setTaskModalVisible(false);
-      await loadWorkload();
-    } catch (e) {
-      console.warn('Failed to add manual task:', e);
+      const res = await syncAndAnalyzeCalendar();
+      await loadDashboardData();
+      const changed = res.tasksCreated + res.tasksUpdated;
+      Alert.alert(
+        'Calendar Synced',
+        changed > 0
+          ? `Analyzed ${changed} new or changed task(s) for this week.`
+          : 'No new or changed tasks found for this week.'
+      );
+    } catch (e: any) {
+      Alert.alert('Sync Error', e?.message || 'Could not sync calendar');
     } finally {
-      setSavingTask(false);
+      setResyncing(false);
     }
   };
 
-  // Compute dynamic SVG donut arcs based on actual percentages
-  const donutArcs = useMemo(() => {
-    return CATEGORIES.reduce<{ category: WorkloadCategory; color: string; strokeDasharray: string; strokeDashoffset: number; percentage: number }[]>((arcs, cat) => {
-      const summary = analysis.categoryBreakdown[cat];
-      const pct = summary ? summary.percentage : 0;
-      const arcLength = (pct / 100) * CIRCUMFERENCE;
-      const cumulativeOffset = arcs.reduce((sum, arc) => sum + (arc.percentage / 100) * CIRCUMFERENCE, 0);
-      arcs.push({
-        category: cat,
-        color: CATEGORY_COLORS[cat],
-        strokeDasharray: `${arcLength} ${CIRCUMFERENCE - arcLength}`,
-        strokeDashoffset: -cumulativeOffset,
-        percentage: pct,
-      });
-      return arcs;
-    }, []);
-  }, [analysis]);
+  // Approve all pending tasks from review modal
+  const handleApproveAllPending = async () => {
+    setApproving(true);
+    try {
+      for (const t of pendingTasks) {
+        await approveTaskAnalysis(t.id, true);
+      }
+      setShowReviewModal(false);
+      await loadDashboardData();
+    } catch (err) {
+      console.error('Error approving tasks:', err);
+    } finally {
+      setApproving(false);
+    }
+  };
 
-  const stressChart = useMemo(() => {
-    const points = weeklyStress?.points ?? [];
-    if (points.length === 0) return { line: '', area: '', coordinates: [] as { x: number; y: number }[] };
-    const coordinates = points.map((point, index) => ({
-      x: 20 + (index * 345) / Math.max(1, points.length - 1),
-      y: 100 - (Math.min(100, Math.max(0, point.stressScore)) * 0.8),
-    }));
-    const line = coordinates.map((p, index) => `${index === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
-    return { line, area: `${line} L 365 100 L 20 100 Z`, coordinates };
-  }, [weeklyStress]);
+  // Reject single pending task
+  const handleRejectTask = async (id: string) => {
+    try {
+      await approveTaskAnalysis(id, false);
+      setPendingTasks((prev) => {
+        const updated = prev.filter((p) => p.id !== id);
+        if (updated.length === 0) setShowReviewModal(false);
+        return updated;
+      });
+      await loadDashboardData();
+    } catch (err) {
+      console.error('Error rejecting task:', err);
+    }
+  };
+
+  // Edit a single pending task's field
+  const handleEditField = (field: keyof TaskAnalysis, value: unknown) => {
+    setEditingTask(prev => prev ? { ...prev, [field]: value } : prev);
+  };
+
+  // Cancel edit — go back to review list if there are pending tasks, otherwise close modal
+  const handleCancelEdit = () => {
+    setEditingTask(null);
+    if (pendingTasks.length === 0) {
+      setShowReviewModal(false);
+    }
+  };
+
+  // Save edits to a pending task
+  const handleSaveTaskEdit = async () => {
+    if (!editingTask) return;
+    try {
+      await updateTaskAnalysis(editingTask.id, {
+        title: editingTask.title,
+        category: editingTask.category,
+        priority: editingTask.priority,
+        rank: editingTask.rank,
+        estimated_duration_hours: editingTask.estimated_duration_hours,
+        scheduled_date: editingTask.scheduled_date,
+        scheduled_start_time: editingTask.scheduled_start_time,
+        status: editingTask.status,
+      });
+      await updateEventOnDeviceCalendar(editingTask.calendar_event_id, editingTask);
+      setPendingTasks(prev => prev.map(t => t.id === editingTask.id ? editingTask : t));
+      setEditingTask(null);
+      await loadDashboardData();
+    } catch (err) {
+      console.error('Error saving task edit:', err);
+    }
+  };
+  // Toggle a task between completed and approved (strikethrough + re-rank)
+  const handleToggleComplete = async (task: TaskAnalysis) => {
+    const completing = task.status !== 'completed';
+    try {
+      if (completing) {
+        // Move completed task to last rank
+        const maxRank = Math.max(0, ...tasks.map((t) => t.rank || 0));
+        await updateTaskAnalysis(task.id, { status: 'completed', rank: maxRank + 1 }, true);
+      } else {
+        await updateTaskAnalysis(task.id, { status: 'approved' }, true);
+      }
+      await recomputeCurrentWeekDerivedData(currentWeekStart);
+      await loadDashboardData();
+    } catch (err) {
+      console.error('Error toggling task completion:', err);
+    }
+  };
+
+  // Quick Add NLP Parser — handles single and multi-task inputs
+  const handleParseNLP = async () => {
+    if (!quickInput.trim()) return;
+    setParsingNLP(true);
+    try {
+      const parsed = await parseQuickTasksNLP(quickInput, { currentWeekStart });
+      setParsedTasks(parsed);
+      setEditingParsedIdx(null);
+    } catch (err) {
+      console.error('Error parsing task input:', err);
+    } finally {
+      setParsingNLP(false);
+    }
+  };
+
+  // Confirm Add All Parsed Tasks (Syncs each to Phone Calendar + DB)
+  const handleConfirmAddTask = async () => {
+    if (parsedTasks.length === 0) return;
+    setAddingTask(true);
+    try {
+      for (const task of parsedTasks) {
+        await createAndSyncTask(task);
+      }
+      setQuickInput('');
+      setParsedTasks([]);
+      setEditingParsedIdx(null);
+      setShowAddModal(false);
+      await loadDashboardData();
+      Alert.alert(
+        'Tasks Created',
+        parsedTasks.length === 1
+          ? 'Task has been logged and synced to your phone calendar.'
+          : `${parsedTasks.length} tasks have been logged and synced to your phone calendar.`
+      );
+    } catch (err: any) {
+      console.error('Error creating task:', err);
+      Alert.alert('Error', err?.message || 'Could not create task');
+    } finally {
+      setAddingTask(false);
+    }
+  };
+
+  // Delete Task (Syncs deletion to Phone Calendar + DB)
+  const handleDeleteTask = async (task: TaskAnalysis) => {
+    Alert.alert('Delete Task', `Delete "${task.title}" and remove it from your device calendar?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await deleteAndSyncTask(task.id, task.calendar_event_id);
+            await recomputeCurrentWeekDerivedData(currentWeekStart);
+            await loadDashboardData();
+          } catch (err) {
+            console.error('Error deleting task:', err);
+          }
+        },
+      },
+    ]);
+  };
+
+  // Defer Single Task
+  const handleDeferTask = async (suggestion: LoadBalanceSuggestion) => {
+    try {
+      await deferTaskAnalysis(suggestion.taskId, suggestion.suggestedDate);
+      setLoadSuggestions((prev) => prev.filter((s) => s.taskId !== suggestion.taskId));
+      await recomputeCurrentWeekDerivedData(currentWeekStart);
+      await loadDashboardData();
+      Alert.alert('Task Deferred', `"${suggestion.taskTitle}" deferred to next week.`);
+    } catch (err) {
+      console.error('Error deferring task:', err);
+    }
+  };
+
+  // Smart Rebalance (Defer all suggestions)
+  const handleSmartRebalance = async () => {
+    if (loadSuggestions.length === 0) return;
+    try {
+      for (const s of loadSuggestions) {
+        await deferTaskAnalysis(s.taskId, s.suggestedDate);
+      }
+      setLoadSuggestions([]);
+      await recomputeCurrentWeekDerivedData(currentWeekStart);
+      await loadDashboardData();
+      Alert.alert('Rebalance Applied', 'Low-priority tasks deferred to relieve this week’s workload.');
+    } catch (err) {
+      console.error('Error applying smart rebalance:', err);
+    }
+  };
+
+  // Calculate Category Counts for active tasks
+  const categoryCounts = {
+    academic: tasks.filter((t) => t.category === 'academic' && t.status !== 'deferred').length,
+    social: tasks.filter((t) => t.category === 'social' && t.status !== 'deferred').length,
+    physical: tasks.filter((t) => t.category === 'physical' && t.status !== 'deferred').length,
+    mental: tasks.filter((t) => t.category === 'mental' && t.status !== 'deferred').length,
+    work: tasks.filter((t) => t.category === 'work' && t.status !== 'deferred').length,
+    errands: tasks.filter((t) => t.category === 'errands' && t.status !== 'deferred').length,
+  };
+
+  // ── Per-day stress synthesis (biometric + self-report + AI task stress) ──
+  // A day's stress is a weighted read pulled from the three real signals the
+  // app owns — biometric scans, self reports, and the AI's task stress/load
+  // analysis — using the same 0.4 / 0.3 / 0.3 weights as fusionService.
+  // Days without any signal still place a 0 point on the graph (nothing hidden),
+  // but hasData stays false so they never count as the week's peak.
+  const WEEK_WEIGHTS = { biometric: 0.4, selfReport: 0.3, aiLoad: 0.3 } as const;
+  const dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
+  const weekStartMs = new Date(currentWeekStart + 'T00:00:00').getTime();
+
+  const avgOf = (vals: (number | null)[]) => {
+    const real = vals.filter((v): v is number => typeof v === 'number');
+    return real.length > 0 ? real.reduce((a, b) => a + b, 0) / real.length : null;
+  };
+
+  const dayStress: { score: number; hasData: boolean }[] = [];
+  for (let i = 0; i < 7; i++) {
+    const dayDate = new Date(weekStartMs + i * 86400000);
+    const dayDateStr = dayDate.toISOString().split('T')[0];
+
+    // 1. Fused rows carry the recorded biometric / self components
+    const rowsOnDay = stressScores.filter((s) => {
+      const d = new Date(s.createdAt).toISOString().split('T')[0];
+      return d === dayDateStr;
+    });
+    const biometric = avgOf(rowsOnDay.map((s) => s.biometricScore));
+    const selfFromRows = avgOf(rowsOnDay.map((s) => s.selfReportScore));
+    const fused = avgOf(rowsOnDay.map((s) => s.fusedScore));
+
+    // Self-reports can exist even without a fused snapshot (e.g. baseline day)
+    const reportsOnDay = selfReports.filter((s) => {
+      const d = new Date(s.createdAt).toISOString().split('T')[0];
+      return d === dayDateStr;
+    });
+    const selfFromReports =
+      reportsOnDay.length > 0
+        ? reportsOnDay.reduce((a, b) => a + b.score, 0) / reportsOnDay.length
+        : null;
+    const selfScore = selfFromRows ?? selfFromReports;
+
+    // 2. AI-analyzed stress + load from this day's tasks
+    const dayTasks = tasks.filter(
+      (t) =>
+        t.scheduled_date === dayDateStr &&
+        t.status !== 'deferred' &&
+        t.status !== 'rejected'
+    );
+    let aiLoad: number | null = null;
+    if (dayTasks.length > 0) {
+      const avgTaskStress =
+        dayTasks.reduce((acc, t) => acc + (t.stress_score ?? 50), 0) /
+        dayTasks.length;
+      const dayHours = dayTasks.reduce(
+        (acc, t) => acc + (t.estimated_duration_hours || 1),
+        0
+      );
+      aiLoad = Math.min(
+        95,
+        Math.round(avgTaskStress * 0.55 + Math.min(45, dayHours * 7))
+      );
+    }
+
+    // 3. Weighted fusion of whichever signals exist for that day
+    const signals: { value: number; weight: number }[] = [];
+    if (biometric !== null) signals.push({ value: biometric, weight: WEEK_WEIGHTS.biometric });
+    if (selfScore !== null) signals.push({ value: selfScore, weight: WEEK_WEIGHTS.selfReport });
+    if (aiLoad !== null) signals.push({ value: aiLoad, weight: WEEK_WEIGHTS.aiLoad });
+
+    let score = 0;
+    let hasData = signals.length > 0;
+    if (signals.length > 0) {
+      const weightSum = signals.reduce((a, b) => a + b.weight, 0);
+      score = Math.round(
+        signals.reduce((a, b) => a + b.value * b.weight, 0) / weightSum
+      );
+    } else if (fused !== null) {
+      // No components were recorded, but a fused snapshot exists — trust it.
+      score = Math.round(fused);
+      hasData = true;
+    }
+
+    dayStress.push({ score, hasData });
+  }
+
+  // Build SVG path — every day gets a point (score 0 when no data)
+  // Chart area: x 20..365, y 100 (score=0) to 20 (score=100)
+  const chartLeft = 20;
+  const chartRight = 365;
+  const chartTop = 20;
+  const chartBottom = 100;
+  const xStep = (chartRight - chartLeft) / 6;
+
+  const points = dayStress.map((d, i) => {
+    const clampedScore = Math.max(0, Math.min(100, d.score));
+    return {
+      x: chartLeft + i * xStep,
+      y: chartBottom - (clampedScore / 100) * (chartBottom - chartTop),
+      score: clampedScore,
+      hasData: d.hasData,
+      isToday: i === todayIdx,
+    };
+  });
+
+  // Peak = highest real reading this week (no-data zeros are never the peak)
+  const peakIdx = dayStress.reduce(
+    (acc, d, i) => (d.hasData && d.score > (acc === -1 ? -1 : dayStress[acc].score) ? i : acc),
+    -1
+  );
+
+  const stressPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+  const stressGradientPath =
+    stressPath +
+    ` L ${points[points.length - 1].x} ${chartBottom} L ${points[0].x} ${chartBottom} Z`;
+
+  const usedHours = capacity?.used_capacity_hours ?? 0;
+  const totalHours = capacity?.total_capacity_hours ?? 40;
+  const capacityPct = Math.min(100, Math.round((usedHours / totalHours) * 100));
+  const isOverloaded = capacity?.overload_warning || capacityPct >= 85;
+
+  // Real Category Percentages from capacity breakdown
+  const academicPct = capacity?.category_breakdown?.academic ?? 0;
+  const workPct = capacity?.category_breakdown?.work ?? 0;
+  const socialPct = capacity?.category_breakdown?.social ?? 0;
+  const physicalPct = capacity?.category_breakdown?.physical ?? 0;
+  const mentalPct = capacity?.category_breakdown?.mental ?? 0;
+  const errandsPct = capacity?.category_breakdown?.errands ?? 0;
+
+  /** Real cue for the recovery reminder — today's own data */
+  const todayStress = dayStress[todayIdx];
+  const recoveryReminderVisible =
+    isOverloaded || (todayStress.hasData && todayStress.score >= 60);
+
+  /** Early Warning Insight copy built from the week's per-day stress */
+  const earlyWarning = buildEarlyWarningInsight(dayStress, todayIdx);
 
   return (
-    <Screen
-        scroll={false}
-      padded={false}
+    // Only the top edge — the shared Screen does the same, so the bottom nav
+    // sits flush at the screen bottom on every tab instead of floating above
+    // the device's home-indicator inset on Home alone.
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
+      <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
 
-        header={<TopNavigation />}
-        footer={<BottomNavigation activeTab="Home" router={router} />}
-      >
-        <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
+      <View style={styles.container}>
+        <TopNavigation />
 
-        <View style={styles.container}>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+          {/* New Week Re-sync Reminder Banner */}
+          {needsResync && (
+            <View style={styles.resyncBanner}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                <MaterialIcons name="event" size={22} color="#854D0E" style={{ marginRight: 8 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.resyncTitle}>New Week Detected</Text>
+                  <Text style={styles.resyncSubtext}>Re-sync calendar to analyze this week's events.</Text>
+                </View>
+              </View>
+              <Pressable
+                onPress={handleResyncWeek}
+                disabled={resyncing}
+                style={[styles.resyncButton, resyncing && { opacity: 0.7 }]}
+              >
+                {resyncing ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.resyncButtonText}>Sync Week</Text>
+                )}
+              </Pressable>
+            </View>
+          )}
 
-        {/* Main Scroll Content */}
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-        >
           {/* 1. Your Stress This Week */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
@@ -349,83 +675,184 @@ export default function Home() {
             </View>
 
             {/* Stress Line Chart */}
-            <View style={styles.chartContainer}>
-              <Svg height="120" width="100%" viewBox="0 0 380 120">
-                <Defs>
-                  <LinearGradient id="stressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <Stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.22" />
-                    <Stop offset="60%" stopColor="#fdcb9b" stopOpacity="0.1" />
-                    <Stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                  </LinearGradient>
-                </Defs>
+            <View
+              style={styles.chartContainer}
+              onLayout={(e) => {
+                const w = e.nativeEvent.layout.width;
+                if (w > 0) setChartWidth(w);
+              }}
+            >
+              <View style={styles.chartFrame}>
+                <Svg height="120" width="100%" viewBox="0 0 380 120">
+                  <Defs>
+                    <LinearGradient id="stressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                      <Stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.22" />
+                      <Stop offset="60%" stopColor="#fdcb9b" stopOpacity="0.1" />
+                      <Stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+                    </LinearGradient>
+                  </Defs>
 
-                {/* Grid Lines */}
-                <Line x1="10" y1="20" x2="370" y2="20" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
-                <Line x1="10" y1="60" x2="370" y2="60" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
-                <Line x1="10" y1="100" x2="370" y2="100" stroke="#f2eede" strokeWidth="1" />
+                  {/* Grid lines */}
+                  <Line x1="10" y1="20" x2="370" y2="20" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
+                  <Line x1="10" y1="60" x2="370" y2="60" stroke="#f2eede" strokeWidth="1" strokeDasharray="4 4" />
+                  <Line x1="10" y1="100" x2="370" y2="100" stroke="#f2eede" strokeWidth="1" />
 
-                {/* Gradient Fill */}
-                {stressChart.area && <Path d={stressChart.area} fill="url(#stressGradient)" />}
+                  {/* Gradient fill */}
+                  <Path d={stressGradientPath} fill="url(#stressGradient)" />
 
-                {/* Smooth Curve */}
-                {stressChart.line && <Path
-                  d={stressChart.line}
-                  stroke="#7c5730"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                />}
-                {weeklyStress?.points.map((point, index) => {
-                  const coordinate = stressChart.coordinates?.[index];
-                  return coordinate ? <Circle key={point.fullDate} cx={coordinate.x} cy={coordinate.y} r={selectedStressIndex === index || point.isPeak ? 6 : 3} fill={point.isPeak ? '#ba1a1a' : '#81756c'} stroke={selectedStressIndex === index || point.isPeak ? '#ffffff' : undefined} strokeWidth={selectedStressIndex === index || point.isPeak ? 2.5 : undefined} onPress={() => setSelectedStressIndex(index)} accessibilityLabel={`${point.dayLabel}: ${Math.round(point.stressScore)} percent stress`} /> : null;
-                })}
-              </Svg>
+                  {/* Line */}
+                  <Path
+                    d={stressPath}
+                    stroke="#7c5730"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                  />
 
-              {selectedStressIndex !== null && weeklyStress?.points[selectedStressIndex] && (
-                <View style={styles.chartValueBubble}>
-                  <Text style={styles.chartValueText}>
-                    {weeklyStress.points[selectedStressIndex].dayLabel}: {Math.round(weeklyStress.points[selectedStressIndex].stressScore)}% stress
-                  </Text>
-                </View>
-              )}
+                  {/* Data points — every day has one; peak + today highlighted */}
+                  {points.map((p, i) => {
+                    const isPeak = i === peakIdx && p.hasData;
+                    const isSelected = i === selectedDayIdx;
+                    return (
+                      <Circle
+                        key={i}
+                        cx={p.x}
+                        cy={p.y}
+                        r={isPeak ? 6 : isSelected ? 4.5 : p.hasData ? 4 : 3}
+                        fill={
+                          isPeak
+                            ? '#ba1a1a'
+                            : isSelected
+                              ? '#E07A5F'
+                              : p.hasData
+                                ? '#7c5730'
+                                : '#FFFFFF'
+                        }
+                        stroke={
+                          isPeak || isSelected
+                            ? '#ffffff'
+                            : p.hasData
+                              ? '#7c5730'
+                              : '#B8B0A4'
+                        }
+                        strokeWidth={isPeak ? 2.5 : 1.5}
+                      />
+                    );
+                  })}
+                </Svg>
+
+                {/* Tap zones — one column per day, tap to reveal the exact score */}
+                {chartWidth > 0 &&
+                  points.map((p, i) => {
+                    const zoneW = Math.max(22, (chartWidth / 380) * xStep);
+                    const left = (p.x / 380) * chartWidth - zoneW / 2;
+                    return (
+                      <Pressable
+                        key={`tap-${i}`}
+                        onPress={() => setSelectedDayIdx(selectedDayIdx === i ? null : i)}
+                        style={[styles.tapZone, { left, width: zoneW }]}
+                        hitSlop={4}
+                      />
+                    );
+                  })}
+
+                {/* Tooltip with the exact score for the tapped day */}
+                {selectedDayIdx !== null && points[selectedDayIdx] && chartWidth > 0 && (
+                  <View
+                    style={[
+                      styles.tooltip,
+                      {
+                        left: Math.max(
+                          6,
+                          Math.min(
+                            (points[selectedDayIdx].x / 380) * chartWidth - 46,
+                            chartWidth - 98
+                          )
+                        ),
+                      },
+                    ]}
+                  >
+                    <Text style={styles.tooltipDay}>{WEEKDAY_NAMES[selectedDayIdx]}</Text>
+                    <Text style={styles.tooltipScore}>
+                      {points[selectedDayIdx].score}
+                      <Text style={styles.tooltipUnit}> /100</Text>
+                    </Text>
+                    {!points[selectedDayIdx].hasData && (
+                      <Text style={styles.tooltipNote}>no data yet</Text>
+                    )}
+                  </View>
+                )}
+              </View>
 
               <View style={styles.daysRow}>
-                {(weeklyStress?.points ?? []).map((point) => point.isToday ? <View key={point.fullDate} style={styles.activeDayBadge}><Text style={styles.activeDayText}>{point.dayLabel}</Text></View> : <Text key={point.fullDate} style={styles.dayText}>{point.dayLabel}</Text>)}
+                {dayLabels.map((label, i) => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.dayLabelWrap,
+                      i === todayIdx && styles.dayLabelWrapActive,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.dayText,
+                        i === todayIdx && styles.dayTextActive,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </View>
+                ))}
               </View>
             </View>
 
             {/* Early Warning Banner */}
-            <View style={styles.insightBanner}>
+            <View style={[styles.insightBanner, earlyWarning.urgent && styles.insightBannerUrgent]}>
               <View style={styles.insightIconContainer}>
-                <MaterialIcons name="notifications-active" size={18} color="#E07A5F" />
+                <MaterialIcons
+                  name={earlyWarning.urgent ? 'warning' : 'notifications-active'}
+                  size={18}
+                  color={earlyWarning.urgent ? '#DC2626' : '#E07A5F'}
+                />
               </View>
               <View style={styles.insightContent}>
-                <Text style={styles.insightTitle}>Early Warning Insight</Text>
-                <Text style={styles.insightText}>
-                  {weeklyStress?.insight ?? 'Add a calendar or task to start your stress forecast.'}
+                <Text style={[styles.insightTitle, earlyWarning.urgent && styles.insightTitleUrgent]}>
+                  {earlyWarning.title}
                 </Text>
+                <Text style={styles.insightText}>{earlyWarning.text}</Text>
               </View>
             </View>
           </View>
+
+          {/* Gentle recovery reminder */}
+          {recoveryReminderVisible && (
+            <Pressable
+              onPress={() => router.push('/recovery')}
+              style={({ pressed }) => [styles.recoveryReminder, pressed && styles.pressed]}
+            >
+              <View style={styles.recoveryReminderIcon}>
+                <Text style={{ fontSize: 20 }}>🌱</Text>
+              </View>
+              <View style={styles.recoveryReminderBody}>
+                <Text style={styles.recoveryReminderTitle}>A softer moment, if you want one</Text>
+                <Text style={styles.recoveryReminderText}>
+                  {isOverloaded
+                    ? 'This week is carrying a lot. Your garden has a few gentle, optional ideas — no pressure.'
+                    : 'Today is measuring a bit heavier than usual. A small pause in your garden might feel nice.'}
+                </Text>
+              </View>
+              <Text style={styles.recoveryReminderArrow}>›</Text>
+            </Pressable>
+          )}
 
           {/* 2. Weekly Capacity */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.sectionLabel}>WEEKLY CAPACITY</Text>
-              <View
-                style={[
-                  styles.nearLimitBadge,
-                  !analysis.isOverloaded && { backgroundColor: '#DCFCE7' },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.nearLimitText,
-                    !analysis.isOverloaded && { color: '#16A34A' },
-                  ]}
-                >
-                  {analysis.isOverloaded ? 'Near Limit' : 'Balanced'}
+              <View style={[styles.nearLimitBadge, isOverloaded && { backgroundColor: '#FEE2E2' }]}>
+                <Text style={[styles.nearLimitText, isOverloaded && { color: '#DC2626' }]}>
+                  {capacityPct >= 100 ? 'Overloaded' : capacityPct >= 85 ? 'Near Limit' : 'Balanced'}
                 </Text>
               </View>
             </View>
@@ -433,28 +860,21 @@ export default function Home() {
             <View style={styles.capacityContainer}>
               <View style={styles.capacityCircleWrapper}>
                 <Svg height="144" width="144" viewBox="0 0 120 120" style={{ transform: [{ rotate: '-90deg' }] }}>
-                  {/* Background Track */}
                   <Circle cx="60" cy="60" r="48" fill="none" stroke="#F3F4F6" strokeWidth="12" />
-                  {/* Dynamic Category Arcs */}
-                  {donutArcs.map((arc) =>
-                    arc.percentage > 0 ? (
-                      <Circle
-                        key={arc.category}
-                        cx="60"
-                        cy="60"
-                        r="48"
-                        fill="none"
-                        stroke={arc.color}
-                        strokeWidth="12"
-                        strokeDasharray={arc.strokeDasharray}
-                        strokeDashoffset={arc.strokeDashoffset}
-                      />
-                    ) : null
-                  )}
+                  <Circle
+                    cx="60"
+                    cy="60"
+                    r="48"
+                    fill="none"
+                    stroke={isOverloaded ? '#EF4444' : '#E07A5F'}
+                    strokeWidth="12"
+                    strokeDasharray={`${(capacityPct / 100) * 301.59} 301.59`}
+                    strokeDashoffset="0"
+                  />
                 </Svg>
                 <View style={styles.capacityOverlay}>
                   <View style={styles.capacityNumberRow}>
-                    <Text style={styles.capacityNumber}>{analysis.totalCapacityPct}</Text>
+                    <Text style={styles.capacityNumber}>{capacityPct}</Text>
                     <Text style={styles.capacityPercent}>%</Text>
                   </View>
                   <Text style={styles.capacityLabel}>Capacity</Text>
@@ -462,62 +882,87 @@ export default function Home() {
               </View>
             </View>
 
-            {/* Capacity Overload Warning or Balance Status */}
-            {analysis.isOverloaded ? (
+            {/* Overload Warning Box */}
+            {isOverloaded && (
               <View style={styles.capacityWarning}>
                 <MaterialIcons name="warning" size={20} color="#CA8A04" style={{ marginRight: 10, marginTop: 2 }} />
                 <View style={styles.warningContent}>
-                  <Text style={styles.warningTitle}>Overload Warning ({analysis.totalCapacityPct}% capacity)</Text>
+                  <Text style={styles.warningTitle}>Overload Warning ({capacityPct}% capacity)</Text>
                   <Text style={styles.warningText}>
-                    You&apos;re nearing your weekly limit ({analysis.weeklyHours}h scheduled). Deferring{' '}
-                    {analysis.recommendedDeferrals.length > 0 ? analysis.recommendedDeferrals.length : 2}{' '}
-                    non-essential tasks will help avoid burnout.
-                  </Text>
-                </View>
-              </View>
-            ) : (
-              <View style={[styles.capacityWarning, { backgroundColor: '#EFF6EB', borderColor: '#BBF7D0' }]}>
-                <MaterialIcons name="check-circle" size={20} color="#16A34A" style={{ marginRight: 10, marginTop: 2 }} />
-                <View style={styles.warningContent}>
-                  <Text style={[styles.warningTitle, { color: '#166534' }]}>Schedule Balanced ({analysis.totalCapacityPct}% capacity)</Text>
-                  <Text style={[styles.warningText, { color: '#15803D' }]}>
-                    Your scheduled load ({analysis.weeklyHours}h) is within sustainable limits. Good space for rest!
+                    You have {usedHours}h of scheduled load against a {totalHours}h threshold. Consider deferring
+                    lower-priority tasks below.
                   </Text>
                 </View>
               </View>
             )}
 
             <View style={styles.capacitySection}>
-              {/* Dynamic Segmented Progress Bar */}
+              {/* Dynamic Category Breakdown Bar */}
               <View style={styles.capacityBar}>
-                {CATEGORIES.map((cat) => {
-                  const pct = analysis.categoryBreakdown[cat]?.percentage ?? 0;
-                  if (pct === 0) return null;
-                  return (
-                    <View
-                      key={cat}
-                      style={[
-                        styles.capacitySegment,
-                        { width: `${pct}%`, backgroundColor: CATEGORY_COLORS[cat] },
-                      ]}
-                    />
-                  );
-                })}
+                {academicPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${academicPct}%`, backgroundColor: COLORS.academic }]} />
+                )}
+                {workPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${workPct}%`, backgroundColor: '#FCD34D' }]} />
+                )}
+                {socialPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${socialPct}%`, backgroundColor: COLORS.social }]} />
+                )}
+                {physicalPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${physicalPct}%`, backgroundColor: COLORS.physical }]} />
+                )}
+                {errandsPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${errandsPct}%`, backgroundColor: COLORS.errands }]} />
+                )}
+                {mentalPct > 0 && (
+                  <View style={[styles.capacitySegment, { width: `${mentalPct}%`, backgroundColor: COLORS.mental }]} />
+                )}
+                {usedHours === 0 && (
+                  <View style={[styles.capacitySegment, { width: '100%', backgroundColor: '#E5E7EB' }]} />
+                )}
               </View>
 
-              {/* Category Percentages Legend */}
+              {/* Legend with Real Category Percentages — only show categories > 0% */}
               <View style={styles.legendContainer}>
-                {CATEGORIES.map((cat) => {
-                  const item = analysis.categoryBreakdown[cat];
-                  return (
-                    <View key={cat} style={styles.legendItem}>
-                      <View style={[styles.legendDot, { backgroundColor: CATEGORY_COLORS[cat] }]} />
-                      <Text style={styles.legendText}>
-                        {item.name} ({item.percentage}%)
-                      </Text>
-                    </View>
-                  );
-                })}
+                {academicPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.academic }]} />
+                    <Text style={styles.legendText}>Academic ({academicPct}%)</Text>
+                  </View>
+                )}
+                {workPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: '#FCD34D' }]} />
+                    <Text style={styles.legendText}>Work ({workPct}%)</Text>
+                  </View>
+                )}
+                {socialPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.social }]} />
+                    <Text style={styles.legendText}>Social ({socialPct}%)</Text>
+                  </View>
+                )}
+                {physicalPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.physical }]} />
+                    <Text style={styles.legendText}>Physical ({physicalPct}%)</Text>
+                  </View>
+                )}
+                {errandsPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.errands }]} />
+                    <Text style={styles.legendText}>Errands ({errandsPct}%)</Text>
+                  </View>
+                )}
+                {mentalPct > 0 && (
+                  <View style={styles.legendItem}>
+                    <View style={[styles.legendDot, { backgroundColor: COLORS.mental }]} />
+                    <Text style={styles.legendText}>Mental ({mentalPct}%)</Text>
+                  </View>
+                )}
+                {usedHours === 0 && (
+                  <Text style={[styles.legendText, { color: '#9CA3AF', fontStyle: 'italic' }]}>No tasks scheduled yet</Text>
+                )}
               </View>
             </View>
           </View>
@@ -526,20 +971,14 @@ export default function Home() {
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Categorized Load Map</Text>
-              <Pressable
-                onPress={() => setTaskModalVisible(true)}
-                style={({ pressed }) => [pressed && styles.pressed]}
-              >
-                <Text style={styles.editText}>+ Add Task ›</Text>
-              </Pressable>
             </View>
 
             <View style={styles.categoryGrid}>
               <CategoryCard
                 emoji="📚"
                 title="Academic"
-                description={analysis.categoryBreakdown.academic.topDescription}
-                badge={`${analysis.categoryBreakdown.academic.taskCount} Tasks`}
+                description="Thesis, Exams & Study"
+                badge={`${categoryCounts.academic} Tasks`}
                 background="#FFEAEA"
                 border="#FECDD3"
                 badgeBackground="#FFE4E6"
@@ -548,8 +987,8 @@ export default function Home() {
               <CategoryCard
                 emoji="🌱"
                 title="Social & Community"
-                description={analysis.categoryBreakdown.social.topDescription}
-                badge={`${analysis.categoryBreakdown.social.taskCount} Events`}
+                description="Meetups & calls"
+                badge={`${categoryCounts.social} Events`}
                 background="#E0F2FE"
                 border="#BAE6FD"
                 badgeBackground="#BAE6FD"
@@ -558,8 +997,8 @@ export default function Home() {
               <CategoryCard
                 emoji="🏃"
                 title="Physical Health"
-                description={analysis.categoryBreakdown.physical.topDescription}
-                badge={analysis.categoryBreakdown.physical.taskCount > 0 ? 'Active' : 'Rest'}
+                description="Workout, Gym & Run"
+                badge={`${categoryCounts.physical} Sessions`}
                 background="#DCFCE7"
                 border="#BBF7D0"
                 badgeBackground="#BBF7D0"
@@ -568,250 +1007,688 @@ export default function Home() {
               <CategoryCard
                 emoji="🧘"
                 title="Mental/Downtime"
-                description={analysis.categoryBreakdown.mental.topDescription}
-                badge={`${analysis.categoryBreakdown.mental.taskCount} Session${analysis.categoryBreakdown.mental.taskCount === 1 ? '' : 's'}`}
+                description="Breathing, reading"
+                badge={`${categoryCounts.mental} Sessions`}
                 background="#F3E8FF"
                 border="#E9D5FF"
                 badgeBackground="#E9D5FF"
                 badgeColor="#9333EA"
               />
-
-              {/* Full Width Category: Errands */}
-              <View style={[styles.categoryFull, { backgroundColor: '#FDF2F4', borderColor: '#FBCFE8' }]}>
-                <View style={styles.otherLeft}>
-                  <Text style={styles.categoryEmoji}>🛒</Text>
-                  <View style={{ marginLeft: 10 }}>
-                    <Text style={styles.categoryTitle}>Others & Errands</Text>
-                    <Text style={styles.categoryDescription}>
-                      {analysis.categoryBreakdown.errands.topDescription}
-                    </Text>
-                  </View>
-                </View>
-                <View style={styles.otherBadge}>
-                  <Text style={styles.otherBadgeText}>
-                    {analysis.categoryBreakdown.errands.taskCount} Left
-                  </Text>
-                </View>
-              </View>
+              <CategoryCard
+                emoji="💼"
+                title="Work"
+                description="Projects, Tasks & Meetings"
+                badge={`${categoryCounts.work} Tasks`}
+                background="#FFF7ED"
+                border="#FED7AA"
+                badgeBackground="#FED7AA"
+                badgeColor="#C2410C"
+              />
+              <CategoryCard
+                  emoji="🛒"
+                  title="Others & Errands"
+                  description="Chores & Misc"
+                  badge={`${categoryCounts.errands} Items`}
+                  background="#FDF2F4"
+                  border="#FBCFE8"
+                  badgeBackground="#FCE7F3"
+                  badgeColor="#DB2777"
+                />
             </View>
           </View>
 
-          {/* 4. Ranked tasks: priority first, then time. */}
+          {/* 4. AI Ranked Tasks for This Week (Tap card to toggle done/strikethrough) */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
-                <Text style={styles.cardTitle}>This Week Tasks</Text>
-              <Pressable onPress={() => setTaskModalVisible(true)}><Text style={styles.editText}>+ Add Task ›</Text></Pressable>
+              <Text style={styles.cardTitle}>This Week Tasks</Text>
+              <Pressable onPress={() => setShowAddModal(true)} style={styles.addInlineButton}>
+                <MaterialIcons name="add" size={16} color={COLORS.primary} />
+                <Text style={styles.addInlineText}>Quick Add</Text>
+              </Pressable>
             </View>
-            {rankedTasks.length === 0 ? (
-              <Text style={styles.loadDescription}>No tasks yet. Add one manually, or sync a device calendar to build your live load map.</Text>
-            ) : rankedTasks.map((task) => (
-                <Pressable key={task.id} onPress={() => handleComplete(task.id)} style={({ pressed }) => [styles.rankedTaskRow, pressed && styles.pressed]}>
-                <Text style={styles.rankNumber}>#{task.rank}</Text>
-                <View style={{ flex: 1 }}><Text style={[styles.rankedTaskTitle, task.status === 'completed' && styles.completedTaskText]}>{task.title}</Text><Text style={[styles.rankedTaskMeta, task.status === 'completed' && styles.completedTaskText]}>{task.timeFormatted}</Text></View>
-                <Text style={[styles.priorityPill, task.priority === 'low' ? styles.priorityLow : task.priority === 'medium' ? styles.priorityMedium : styles.priorityHigh]}>{task.priority}</Text>
+
+
+            {tasks.length === 0 ? (
+              <View style={styles.emptyTasks}>
+                <Text style={styles.emptyTasksText}>No tasks logged for this week.</Text>
+                <Pressable onPress={() => setShowAddModal(true)} style={styles.addFirstTaskBtn}>
+                  <Text style={styles.addFirstTaskText}>+ Quick Add</Text>
                 </Pressable>
-            ))}
+              </View>
+            ) : (
+              tasks.map((task) => {
+                const done = task.status === 'completed';
+                const catEmoji = getCategoryEmoji(task.category);
+                const priorityStyle = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.medium;
+                return (
+                  <Pressable
+                    key={task.id}
+                    onPress={() => handleToggleComplete(task)}
+                    style={({ pressed }) => [
+                      styles.taskCard,
+                      done && styles.taskCardDone,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={[styles.taskLeftBorder, done && { backgroundColor: colors.inkFaint }]} />
+                    <View
+                      style={[styles.taskRankBadge, done && styles.taskRankBadgeDone]}
+                    >
+                      <Text style={[styles.taskRankText, done && styles.taskRankTextDone]}>
+                        {done ? '✓' : `#${task.rank}`}
+                      </Text>
+                    </View>
+                    <View style={styles.taskBody}>
+                      <View style={styles.taskTitleRow}>
+                        <Text style={styles.taskCatEmoji}>{catEmoji}</Text>
+                        <Text
+                          style={[styles.taskTitleText, done && styles.taskTitleDone]}
+                          numberOfLines={1}
+                        >
+                          {task.title}
+                        </Text>
+                      </View>
+                      <View style={styles.taskTagsRow}>
+                        <View style={[styles.priorityPill, { backgroundColor: priorityStyle.bg, borderColor: priorityStyle.border }]}>
+                          <Text style={[styles.pillText, { color: priorityStyle.text }]}>{task.priority.toUpperCase()}</Text>
+                        </View>
+                        <Text style={[styles.taskSubDetail, done && styles.taskSubDone]}>
+                          {task.category} • {task.estimated_duration_hours}h
+                          {task.scheduled_start_time ? ` • ${task.scheduled_start_time}` : ''}
+                          {task.scheduled_date ? ` • ${task.scheduled_date}` : ''}
+                        </Text>
+                      </View>
+                    </View>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        setEditingTask({ ...task });
+                        setShowReviewModal(true);
+                      }}
+                      style={styles.editButton}
+                      hitSlop={8}
+                    >
+                      <MaterialIcons name="edit" size={17} color={colors.inkSoft} />
+                    </Pressable>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        handleDeleteTask(task);
+                      }}
+                      style={styles.deleteButton}
+                      hitSlop={8}
+                    >
+                      <MaterialIcons name="delete-outline" size={18} color={colors.inkFaint} />
+                    </Pressable>
+                  </Pressable>
+                );
+              })
+            )}
           </View>
 
-          {/* 4. Load Balancer */}
+          {/* 5. Load Balancer */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
-              <Text style={styles.cardTitle}>Load Balancer</Text>
-              <View
-                style={[
-                  styles.spikeBadge,
-                  !analysis.spikingCategory && { backgroundColor: '#DCFCE7' },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.spikeText,
-                    !analysis.spikingCategory && { color: '#16A34A' },
-                  ]}
-                >
-                  {analysis.spikingCategory ? 'SPIKE DETECTED' : 'STABLE'}
-                </Text>
-              </View>
+              <Text style={styles.cardTitle}>Smart Load Balancer</Text>
+              {isOverloaded && (
+                <View style={styles.spikeBadge}>
+                  <Text style={styles.spikeText}>SPIKE DETECTED</Text>
+                </View>
+              )}
             </View>
 
             <Text style={styles.loadDescription}>
-              {analysis.spikingCategory
-                ? `${analysis.categoryBreakdown[analysis.spikingCategory]?.name} is spiking. Defer these lower-priority tasks to balance your week:`
-                : analysis.totalCapacityPct >= 80
-                ? 'Your schedule is near capacity. Defer lower-priority tasks to recover headroom:'
-                : `Your schedule is well balanced at ${analysis.totalCapacityPct}% capacity. No urgent deferrals needed.`}
+              {loadSuggestions.length > 0
+                ? 'Consider deferring these lower-priority tasks to relieve cognitive pressure this week:'
+                : 'Your schedule is currently balanced. No deferrals required right now.'}
             </Text>
 
-            {analysis.recommendedDeferrals.map((task) => (
+            {loadSuggestions.map((suggestion) => (
               <TaskRow
-                key={task.id}
-                emoji={
-                  task.category === 'errands'
-                    ? '🧹'
-                    : task.category === 'academic'
-                    ? '🗂️'
-                    : '📋'
-                }
-                title={task.title}
-                subtitle={`${task.category.charAt(0).toUpperCase() + task.category.slice(1)} • ${task.priority} priority • ${task.estimatedHours}h`}
-                status={task.status}
-                onDefer={() => handleDefer(task.id)}
-                onComplete={() => handleComplete(task.id)}
+                key={suggestion.taskId}
+                emoji="🗂️"
+                title={suggestion.taskTitle}
+                subtitle={suggestion.reason}
+                onDefer={() => handleDeferTask(suggestion)}
               />
             ))}
 
-            {deferredSuccessMsg && (
-              <View style={styles.allDeferred}>
-                <Text style={styles.allDeferredText}>{deferredSuccessMsg}</Text>
-              </View>
-            )}
-
-            {analysis.recommendedDeferrals.length > 0 && (
-              <Pressable
-                onPress={handleSmartRebalance}
-                style={({ pressed }) => [
-                  styles.rebalanceButton,
-                  pressed && styles.pressedRebalance,
-                ]}
-              >
+            {loadSuggestions.length > 0 && (
+              <Pressable onPress={handleSmartRebalance} style={styles.rebalanceButton}>
                 <MaterialIcons name="settings" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
                 <Text style={styles.rebalanceText}>Apply Smart Rebalance</Text>
               </Pressable>
             )}
           </View>
 
-          <View style={{ height: 40 }} />
+          <View style={{ height: 20 }} />
         </ScrollView>
-        </View>
 
-        {/* Manual Task / Errand Entry Modal */}
-        <Modal
-          visible={taskModalVisible}
-          transparent
-          animationType="slide"
-          onRequestClose={() => setTaskModalVisible(false)}
+        {/* Bottom Navigation */}
+        <BottomNavigation activeTab="Home" router={router} />
+      </View>
+
+      {/* ── AI REVIEW MODAL (Triggered for newly synced weekly tasks) ─────── */}
+      <Modal visible={showReviewModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>
+                  {editingTask ? 'Edit Task' : 'Workload Review'}
+                </Text>
+                <Text style={styles.modalSubtitle}>
+                  {editingTask ? 'Change details below, then save' : 'Tap Edit to change any detail, then Approve'}
+                </Text>
+              </View>
+              {editingTask && (
+                <Pressable onPress={handleCancelEdit} hitSlop={8} style={{ padding: 4 }}>
+                  <Ionicons name="close" size={22} color={colors.inkSoft} />
+                </Pressable>
+              )}
+            </View>
+
+            {editingTask ? (
+              /* ── Inline Task Editor ─── */
+              <ScrollView style={{ maxHeight: 480 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                <View style={styles.reviewEditorCard}>
+                  {/* Title */}
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Title</Text>
+                    <TextInput
+                      style={styles.reviewEditorInput}
+                      value={editingTask.title}
+                      onChangeText={(v) => handleEditField('title', v)}
+                      scrollEnabled={false}
+                    />
+                  </View>
+
+                  {/* Category Pills */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Category</Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                      {([
+                        { key: 'academic', label: '📚 Academic' },
+                        { key: 'work', label: '💼 Work' },
+                        { key: 'social', label: '🌱 Social' },
+                        { key: 'physical', label: '🏃 Physical' },
+                        { key: 'mental', label: '🧘 Mental' },
+                        { key: 'errands', label: '🛒 Errands' },
+                        { key: 'other', label: '📌 Other' },
+                      ] as const).map(({ key, label }) => (
+                        <Pressable
+                          key={key}
+                          onPress={() => handleEditField('category', key)}
+                          style={[
+                            styles.pickerChip,
+                            editingTask.category === key && styles.pickerChipActive,
+                          ]}
+                        >
+                          <Text style={[styles.pickerChipText, editingTask.category === key && styles.pickerChipTextActive]}>
+                            {label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Priority Pills */}
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Priority</Text>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      {(['high', 'medium', 'low'] as const).map(p => (
+                        <Pressable
+                          key={p}
+                          onPress={() => handleEditField('priority', p)}
+                          style={[styles.reviewPriorityBtn, editingTask.priority === p && styles.reviewPriorityBtnActive]}
+                        >
+                          <Text style={[styles.reviewPriorityBtnText, editingTask.priority === p && { color: colors.cream }]}>
+                            {p.toUpperCase()}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+
+                  {/* Hours Stepper */}
+                  <View style={styles.reviewEditorField}>
+                    <Text style={styles.reviewEditorLabel}>Hours</Text>
+                    <View style={styles.stepperRow}>
+                      <Pressable
+                        onPress={() => handleEditField('estimated_duration_hours', Math.max(0.5, (editingTask.estimated_duration_hours || 1) - 0.5))}
+                        style={styles.stepperBtn}
+                      >
+                        <Text style={styles.stepperBtnText}>−</Text>
+                      </Pressable>
+                      <Text style={styles.stepperValue}>{editingTask.estimated_duration_hours}h</Text>
+                      <Pressable
+                        onPress={() => handleEditField('estimated_duration_hours', Math.min(12, (editingTask.estimated_duration_hours || 1) + 0.5))}
+                        style={styles.stepperBtn}
+                      >
+                        <Text style={styles.stepperBtnText}>+</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+
+                  {/* Date Chips — current week Mon-Sun + Other text fallback */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Date</Text>
+                    <DateChipPicker
+                      key={`${editingTask.id}-date`}
+                      value={editingTask.scheduled_date}
+                      onChange={(v) => handleEditField('scheduled_date', v)}
+                    />
+                  </View>
+
+                  {/* Time Chips — preset slots + Other text fallback */}
+                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
+                    <TimePicker
+                      key={`${editingTask.id}-time`}
+                      value={editingTask.scheduled_start_time}
+                      onChange={(v) => handleEditField('scheduled_start_time', v)}
+                    />
+                  </View>
+
+                  {editingTask.ai_reasoning ? (
+                    <Text style={styles.reviewEditorReasoning}>{editingTask.ai_reasoning}</Text>
+                  ) : null}
+
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                    <Pressable onPress={handleCancelEdit} style={styles.reviewCancelBtn}>
+                      <Text style={styles.reviewCancelBtnText}>Cancel</Text>
+                    </Pressable>
+                    <Pressable onPress={handleSaveTaskEdit} style={styles.reviewSaveBtn}>
+                      <Text style={styles.reviewSaveBtnText}>Save Changes</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </ScrollView>
+            ) : (
+              /* ── Task List View ─── */
+              <ScrollView style={{ maxHeight: 480 }} showsVerticalScrollIndicator={false}>
+                {pendingTasks.map((task) => (
+                  <View key={task.id} style={styles.reviewTaskItem}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <View style={styles.reviewRankPill}>
+                        <Text style={styles.reviewRankText}>#{task.rank}</Text>
+                      </View>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <View style={[styles.priorityPill, task.priority === 'high' ? styles.pillHigh : task.priority === 'medium' ? styles.pillMed : styles.pillLow]}>
+                          <Text style={styles.pillText}>{task.priority.toUpperCase()}</Text>
+                        </View>
+                        <Pressable onPress={() => setEditingTask({ ...task })} style={styles.reviewEditBtn}>
+                          <Ionicons name="pencil" size={14} color={colors.brown} />
+                          <Text style={styles.reviewEditText}>Edit</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                    <Text style={styles.reviewTaskTitle}>{task.title}</Text>
+                    <Text style={styles.reviewTaskDetails}>
+                      {task.category} • {task.estimated_duration_hours}h • {task.scheduled_date} {task.scheduled_start_time || 'All Day'}
+                    </Text>
+                    {task.stress_score != null && (
+                      <Text style={styles.reviewTaskStress}>Stress Impact: {task.stress_score}%</Text>
+                    )}
+                    {task.ai_reasoning ? (
+                      <Text style={styles.reviewTaskReasoning}>{task.ai_reasoning}</Text>
+                    ) : null}
+                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 6 }}>
+                      <Pressable onPress={() => handleRejectTask(task.id)} style={styles.rejectBtn}>
+                        <Text style={styles.rejectBtnText}>Skip</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+
+            {!editingTask && (
+              <View style={styles.modalActions}>
+                <Pressable
+                  onPress={handleApproveAllPending}
+                  disabled={approving || pendingTasks.length === 0}
+                  style={[styles.primaryModalBtn, (approving || pendingTasks.length === 0) && { opacity: 0.7 }]}
+                >
+                  {approving ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.primaryModalBtnText}>
+                      {pendingTasks.length > 0 ? `Approve & Save (${pendingTasks.length})` : 'All Tasks Reviewed'}
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── QUICK ADD NLP CHATBOT MODAL (2-Way Calendar Sync) ─────────────── */}
+      <Modal visible={showAddModal} transparent animationType="fade">
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
         >
           <View style={styles.modalOverlay}>
-            <View style={styles.modalCard}>
+            <View style={[styles.modalContent, { maxHeight: '92%' }]}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Add Task or Errand</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.modalTitle}>
+                    {editingParsedIdx !== null ? 'Edit Task' : 'Quick Task Logger'}
+                  </Text>
+                  <Text style={styles.modalSubtitle}>
+                    {editingParsedIdx !== null
+                      ? 'Adjust details and tap Save'
+                      : parsedTasks.length > 0
+                        ? `${parsedTasks.length} task${parsedTasks.length > 1 ? 's' : ''} detected — review below`
+                        : 'From words to tasks. Instantly.'}
+                  </Text>
+                </View>
                 <Pressable
-                  onPress={() => setTaskModalVisible(false)}
-                  style={({ pressed }) => [styles.modalClose, pressed && styles.pressed]}
+                  onPress={() => {
+                    if (editingParsedIdx !== null) {
+                      setEditingParsedIdx(null);
+                    } else {
+                      setShowAddModal(false);
+                      setParsedTasks([]);
+                      setQuickInput('');
+                    }
+                  }}
+                  hitSlop={8}
+                  style={{ padding: 4 }}
                 >
-                  <Text style={styles.modalCloseText}>✕</Text>
+                  <Ionicons name={editingParsedIdx !== null ? 'arrow-back' : 'close'} size={22} color={colors.inkSoft} />
                 </Pressable>
               </View>
 
-              {/* Task Title */}
-              <Text style={styles.inputLabel}>TITLE</Text>
-              <TextInput
-                style={styles.textInput}
-                placeholder="e.g. Deep Clean Kitchen, Thesis Writing"
-                placeholderTextColor="#9A968C"
-                value={manualTitle}
-                onChangeText={setManualTitle}
-              />
+              {editingParsedIdx !== null ? (
+                /* ── Step 3: Edit one parsed task ─── */
+                (() => {
+                  const task = parsedTasks[editingParsedIdx];
+                  const updateField = (field: string, value: unknown) => {
+                    setParsedTasks(prev => prev.map((t, i) => i === editingParsedIdx ? { ...t, [field]: value } : t));
+                  };
+                  return (
+                    <ScrollView style={{ maxHeight: 440 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                      <View style={styles.reviewEditorCard}>
+                        {/* Title */}
+                        <View style={styles.reviewEditorField}>
+                          <Text style={styles.reviewEditorLabel}>Title</Text>
+                          <TextInput
+                            style={styles.reviewEditorInput}
+                            value={task.title}
+                            onChangeText={(v) => updateField('title', v)}
+                            scrollEnabled={false}
+                          />
+                        </View>
 
-              {/* Category selector */}
-              <Text style={styles.inputLabel}>CATEGORY</Text>
-              <View style={styles.categoryChips}>
-                {CATEGORIES.map((cat) => (
-                  <Pressable
-                    key={cat}
-                    onPress={() => setManualCategory(cat)}
-                    style={[
-                      styles.categoryChip,
-                      manualCategory === cat && styles.categoryChipSelected,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.categoryChipText,
-                        manualCategory === cat && styles.categoryChipTextSelected,
-                      ]}
-                    >
-                      {cat === 'academic' && '📚 Academic'}
-                      {cat === 'social' && '🌱 Social'}
-                      {cat === 'physical' && '🏃 Physical'}
-                      {cat === 'errands' && '🛒 Errands'}
-                      {cat === 'mental' && '🧘 Mental'}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
+                        {/* Category Pills */}
+                        <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                          <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Category</Text>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                            {([
+                              { key: 'academic', label: '📚 Academic' },
+                              { key: 'work', label: '💼 Work' },
+                              { key: 'social', label: '🌱 Social' },
+                              { key: 'physical', label: '🏃 Physical' },
+                              { key: 'mental', label: '🧘 Mental' },
+                              { key: 'errands', label: '🛒 Errands' },
+                              { key: 'other', label: '📌 Other' },
+                            ] as const).map(({ key, label }) => (
+                              <Pressable
+                                key={key}
+                                onPress={() => updateField('category', key)}
+                                style={[styles.pickerChip, task.category === key && styles.pickerChipActive]}
+                              >
+                                <Text style={[styles.pickerChipText, task.category === key && styles.pickerChipTextActive]}>
+                                  {label}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                        </View>
 
-              {/* Duration / Hours & Priority */}
-              <View style={styles.rowTwoCols}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>ESTIMATED HOURS</Text>
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="1.5"
-                    placeholderTextColor="#9A968C"
-                    keyboardType="decimal-pad"
-                    value={manualHours}
-                    onChangeText={setManualHours}
-                  />
-                </View>
+                        {/* Priority Pills */}
+                        <View style={styles.reviewEditorField}>
+                          <Text style={styles.reviewEditorLabel}>Priority</Text>
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            {(['high', 'medium', 'low'] as const).map(p => (
+                              <Pressable
+                                key={p}
+                                onPress={() => updateField('priority', p)}
+                                style={[styles.reviewPriorityBtn, task.priority === p && styles.reviewPriorityBtnActive]}
+                              >
+                                <Text style={[styles.reviewPriorityBtnText, task.priority === p && { color: colors.cream }]}>
+                                  {p.toUpperCase()}
+                                </Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                        </View>
 
-                <View style={{ flex: 1, marginLeft: 12 }}>
-                  <Text style={styles.inputLabel}>PRIORITY</Text>
-                  <View style={styles.priorityGroup}>
-                    {(['low', 'medium', 'high'] as WorkloadPriority[]).map((p) => (
+                        {/* Hours Stepper */}
+                        <View style={styles.reviewEditorField}>
+                          <Text style={styles.reviewEditorLabel}>Hours</Text>
+                          <View style={styles.stepperRow}>
+                            <Pressable
+                              onPress={() => updateField('estimated_duration_hours', Math.max(0.5, (task.estimated_duration_hours || 1) - 0.5))}
+                              style={styles.stepperBtn}
+                            >
+                              <Text style={styles.stepperBtnText}>−</Text>
+                            </Pressable>
+                            <Text style={styles.stepperValue}>{task.estimated_duration_hours}h</Text>
+                            <Pressable
+                              onPress={() => updateField('estimated_duration_hours', Math.min(12, (task.estimated_duration_hours || 1) + 0.5))}
+                              style={styles.stepperBtn}
+                            >
+                              <Text style={styles.stepperBtnText}>+</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+
+                        {/* Date Chips */}
+                        <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                          <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Date</Text>
+                          <DateChipPicker
+                            key={`parsed-${editingParsedIdx}-date`}
+                            value={task.scheduled_date}
+                            onChange={(v) => updateField('scheduled_date', v)}
+                          />
+                        </View>
+
+                        {/* Time Chips */}
+                        <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                          <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
+                          <TimePicker
+                            key={`parsed-${editingParsedIdx}-time`}
+                            value={task.scheduled_start_time}
+                            onChange={(v) => updateField('scheduled_start_time', v)}
+                          />
+                        </View>
+
+                        <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                          <Pressable onPress={() => setEditingParsedIdx(null)} style={styles.reviewCancelBtn}>
+                            <Text style={styles.reviewCancelBtnText}>Back</Text>
+                          </Pressable>
+                          <Pressable onPress={() => setEditingParsedIdx(null)} style={styles.reviewSaveBtn}>
+                            <Text style={styles.reviewSaveBtnText}>Done</Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    </ScrollView>
+                  );
+                })()
+              ) : (
+                /* ── Step 1 & 2: Input + Card Review ─── */
+                <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }}>
+                  {parsedTasks.length === 0 && (
+                    <>
+                      <TextInput
+                        style={styles.chatInput}
+                        placeholder={'e.g. "exam Fri 2pm, Travel Sunday, Gym 3pm"\nor "2 assignment due Fri"'}
+                        placeholderTextColor={colors.inkFaint}
+                        value={quickInput}
+                        onChangeText={setQuickInput}
+                        multiline
+                        scrollEnabled={false}
+                      />
                       <Pressable
-                        key={p}
-                        onPress={() => setManualPriority(p)}
-                        style={[
-                          styles.priorityButton,
-                          manualPriority === p && styles.priorityButtonSelected,
-                        ]}
+                        onPress={handleParseNLP}
+                        disabled={parsingNLP || !quickInput.trim()}
+                        style={[styles.nlpParseButton, (!quickInput.trim() || parsingNLP) && { opacity: 0.6 }]}
                       >
-                        <Text
-                          style={[
-                            styles.priorityText,
-                            manualPriority === p && styles.priorityTextSelected,
-                          ]}
-                        >
-                          {p.toUpperCase()}
-                        </Text>
+                        {parsingNLP ? (
+                          <ActivityIndicator size="small" color={colors.cream} />
+                        ) : (
+                          <Text style={styles.nlpParseButtonText}>Analyze →</Text>
+                        )}
                       </Pressable>
-                    ))}
-                  </View>
-                </View>
-              </View>
+                    </>
+                  )}
 
-              <View style={styles.scheduleFields}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>DAY</Text>
-                  <TextInput style={styles.textInput} placeholder="YYYY-MM-DD" placeholderTextColor="#9A968C" value={manualDate} onChangeText={setManualDate} />
-                </View>
-                <View style={{ width: 110, marginLeft: 12 }}>
-                  <Text style={styles.inputLabel}>TIME</Text>
-                  <TextInput style={styles.textInput} placeholder="09:00" placeholderTextColor="#9A968C" value={manualTime} onChangeText={setManualTime} />
-                </View>
-              </View>
+                  {/* Step 2: Brief task cards */}
+                  {parsedTasks.length > 0 && (
+                    <>
+                      <Text style={styles.previewHeader}>
+                        {parsedTasks.length === 1 ? 'TASK DETECTED' : `${parsedTasks.length} TASKS DETECTED`}
+                      </Text>
+                      {parsedTasks.map((task, idx) => {
+                        const catEmoji = getCategoryEmoji(task.category);
+                        const priorityStyle = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.medium;
+                        const timeLabel = task.scheduled_start_time
+                          ? (() => {
+                              const h = parseInt(task.scheduled_start_time.split(':')[0], 10);
+                              const m = task.scheduled_start_time.split(':')[1];
+                              return h < 12 ? `${h}:${m}am` : h === 12 ? `12:${m}pm` : `${h - 12}:${m}pm`;
+                            })()
+                          : 'All Day';
+                        return (
+                          <View key={idx} style={styles.parsedTaskCard}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                                <View style={styles.reviewRankPill}>
+                                  <Text style={styles.reviewRankText}>#{task.rank ?? idx + 1}</Text>
+                                </View>
+                                <Text style={{ fontSize: 16 }}>{catEmoji}</Text>
+                                <Text style={styles.parsedTaskTitle} numberOfLines={1}>{task.title}</Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                <View style={[styles.priorityPill, { backgroundColor: priorityStyle.bg, borderColor: priorityStyle.border }]}>
+                                  <Text style={[styles.pillText, { color: priorityStyle.text }]}>{task.priority.toUpperCase()}</Text>
+                                </View>
+                                <Pressable
+                                  onPress={() => setEditingParsedIdx(idx)}
+                                  style={styles.reviewEditBtn}
+                                >
+                                  <Ionicons name="pencil" size={13} color={colors.brown} />
+                                  <Text style={styles.reviewEditText}>Edit</Text>
+                                </Pressable>
+                              </View>
+                            </View>
+                            <Text style={styles.parsedTaskMeta}>
+                              {task.category} • {task.estimated_duration_hours}h • {task.scheduled_date} • {timeLabel}
+                            </Text>
+                            <Pressable
+                              onPress={() => setParsedTasks(prev => prev.filter((_, i) => i !== idx))}
+                              style={styles.parsedTaskRemoveBtn}
+                            >
+                              <Text style={styles.parsedTaskRemoveText}>Remove</Text>
+                            </Pressable>
+                          </View>
+                        );
+                      })}
 
-              {/* Submit Button */}
-              <Pressable
-                disabled={savingTask || !manualTitle.trim()}
-                onPress={handleSaveTask}
-                style={({ pressed }) => [
-                  styles.saveTaskButton,
-                  (!manualTitle.trim() || savingTask) && styles.disabledButton,
-                  pressed && styles.pressedRebalance,
-                ]}
-              >
-                {savingTask ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.saveTaskButtonText}>Save to Workload</Text>
-                )}
-              </Pressable>
+                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 6 }}>
+                        <Pressable
+                          onPress={() => { setParsedTasks([]); }}
+                          style={styles.reviewCancelBtn}
+                        >
+                          <Text style={styles.reviewCancelBtnText}>Start Over</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={handleConfirmAddTask}
+                          disabled={addingTask || parsedTasks.length === 0}
+                          style={[styles.reviewSaveBtn, (addingTask || parsedTasks.length === 0) && { opacity: 0.7 }]}
+                        >
+                          {addingTask ? (
+                            <ActivityIndicator size="small" color={colors.cream} />
+                          ) : (
+                            <Text style={styles.reviewSaveBtnText}>
+                              {parsedTasks.length === 1 ? 'Add Task →' : `Add ${parsedTasks.length} Tasks →`}
+                            </Text>
+                          )}
+                        </Pressable>
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
+              )}
             </View>
           </View>
-        </Modal>
-      </Screen>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ── NOTIFICATIONS MODAL ─────────────────────────────────────────────── */}
+      {false && (<Modal visible={false} transparent animationType="fade" onRequestClose={() => setShowNotifications(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Notifications</Text>
+                <Text style={styles.modalSubtitle}>
+                  {hasUnread
+                    ? `${notifications.filter(n => !n.read).length} unread — tap one to mark it read`
+                    : 'All caught up'}
+                </Text>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {hasUnread && (
+                  <Pressable
+                    onPress={() => setNotifications(prev => prev.map(n => ({ ...n, read: true })))}
+                    style={({ pressed }) => [styles.notifMarkAllBtn, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.notifMarkAllText}>Mark all read</Text>
+                  </Pressable>
+                )}
+                <Pressable onPress={() => setShowNotifications(false)} hitSlop={8} style={{ padding: 4 }}>
+                  <Ionicons name="close" size={22} color={colors.inkSoft} />
+                </Pressable>
+              </View>
+            </View>
+
+            <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
+              {notifications.length === 0 ? (
+                <Text style={styles.notifEmpty}>No notifications yet.</Text>
+              ) : (
+                notifications.map((notif) => (
+                  <Pressable
+                    key={notif.id}
+                    onPress={() => setNotifications(prev => prev.map(n => (n.id === notif.id ? { ...n, read: true } : n)))}
+                    style={({ pressed }) => [
+                      styles.notifItem,
+                      !notif.read && styles.notifItemUnread,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={styles.notifDotWrap}>
+                      {!notif.read && <View style={styles.notifUnreadDot} />}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Text style={styles.notifTitle} numberOfLines={1}>{notif.title}</Text>
+                        <Text style={styles.notifTime}>{notif.time}</Text>
+                      </View>
+                      <Text style={styles.notifBody}>{notif.body}</Text>
+                    </View>
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>)}
+    </SafeAreaView>
   );
 }
 
@@ -854,34 +1731,24 @@ function TaskRow({
   emoji,
   title,
   subtitle,
-  status,
   onDefer,
-  onComplete,
 }: {
   emoji: string;
   title: string;
   subtitle: string;
-  status: WorkloadItem['status'];
   onDefer: () => void;
-  onComplete: () => void;
 }) {
   return (
     <View style={styles.taskRow}>
-      <Pressable onPress={onComplete} style={({ pressed }) => [styles.taskLeft, pressed && styles.pressed]}>
-        <View style={styles.taskIcon}>
-          <Text style={styles.taskEmoji}>{emoji}</Text>
+      <View style={styles.taskLeft}>
+        <Text style={styles.taskEmoji}>{emoji}</Text>
+        <View style={{ marginLeft: 10, flex: 1 }}>
+          <Text style={styles.taskTitle}>{title}</Text>
+          <Text style={styles.taskSubtitle}>{subtitle}</Text>
         </View>
-        <View style={styles.taskText}>
-          <Text style={[styles.taskTitle, status === 'completed' && styles.completedTaskText]}>{title}</Text>
-          <Text style={[styles.taskSubtitle, status === 'completed' && styles.completedTaskText]}>{subtitle}</Text>
-        </View>
-      </Pressable>
-      <Pressable
-        onPress={onDefer}
-        style={({ pressed }) => [styles.deferButton, pressed && styles.pressed]}
-      >
+      </View>
+      <Pressable onPress={onDefer} style={({ pressed }) => [styles.deferButton, pressed && styles.pressed]}>
         <Text style={styles.deferText}>Defer</Text>
-        <MaterialIcons name="schedule" size={14} color="#713F12" style={{ marginLeft: 4 }} />
       </Pressable>
     </View>
   );
@@ -889,120 +1756,248 @@ function TaskRow({
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },
-  container: { flex: 1, backgroundColor: COLORS.background },
-  scrollContent: { paddingHorizontal: 20, paddingTop: 16 },
+  container: { flex: 1 },
+  scrollContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 24 },
   card: {
     backgroundColor: COLORS.surface,
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 20,
-    marginBottom: 20,
-    shadowColor: '#6B5036',
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 1,
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
-  cardTitle: { flex: 1, color: COLORS.primary, fontSize: 18, lineHeight: 24, fontWeight: '500' },
-  adaptiveBadge: { paddingHorizontal: 12, paddingVertical: 4, borderRadius: 20, backgroundColor: '#FFF3BA' },
-  adaptiveText: { color: COLORS.primaryContainer, fontSize: 11, fontWeight: '500' },
-  chartContainer: { height: 160, marginTop: 4, marginBottom: 12 },
-  chartValueBubble: { alignSelf: 'center', marginTop: -2, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, backgroundColor: '#FFF3BA' },
-  chartValueText: { color: COLORS.primary, fontSize: 11, fontWeight: '700' },
-  daysRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 8, marginTop: 8 },
-  dayText: { width: 24, textAlign: 'center', color: COLORS.outline, fontSize: 11, fontWeight: '500' },
-  activeDayBadge: { width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(255, 218, 214, 0.5)', alignItems: 'center', justifyContent: 'center' },
-  activeDayText: { color: COLORS.error, fontSize: 11, fontWeight: '700' },
-  insightBanner: { flexDirection: 'row', alignItems: 'flex-start', padding: 14, borderRadius: 16, backgroundColor: '#FDF0ED', borderWidth: 1, borderColor: 'rgba(224,122,95,0.25)' },
-  insightIconContainer: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(224,122,95,0.15)', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  cardTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
+  adaptiveBadge: { backgroundColor: '#F3E8FF', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  adaptiveText: { fontSize: 12, fontWeight: '600', color: '#7E22CE' },
+  chartContainer: { alignItems: 'center', marginBottom: 12, width: '100%' },
+  chartFrame: { width: '100%', height: 120 },
+  tapZone: { position: 'absolute', top: 0, bottom: 0 },
+  tooltip: {
+    position: 'absolute',
+    top: 2,
+    backgroundColor: colors.brown,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    alignItems: 'center',
+    minWidth: 92,
+    zIndex: 5,
+    elevation: 4,
+  },
+  tooltipDay: {
+    color: '#F8EEDE',
+    fontSize: 9,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  tooltipScore: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
+  tooltipUnit: { fontSize: 10, color: '#F8EEDE', fontWeight: '600' },
+  tooltipNote: { fontSize: 9, color: '#F8EEDE', fontStyle: 'italic', marginTop: 1 },
+  daysRow: { flexDirection: 'row', width: '100%', marginTop: 8, paddingHorizontal: 10 },
+  dayLabelWrap: { flex: 1, alignItems: 'center' },
+  dayLabelWrapActive: {
+    backgroundColor: colors.yellow,
+    borderRadius: 50,
+    paddingHorizontal: 2,
+    paddingVertical: 2,
+  },
+  dayText: { fontSize: 13, color: '#81756C', fontWeight: '500' },
+  dayTextActive: { color:'#81756C', fontWeight: '700' },
+  insightBanner: { flexDirection: 'row', backgroundColor: '#FFF5F0', borderRadius: 12, padding: 12, marginTop: 4 },
+  insightBannerUrgent: { backgroundColor: '#FEE2E2', borderWidth: 1, borderColor: '#FECACA' },
+  insightIconContainer: { marginRight: 8, marginTop: 2 },
   insightContent: { flex: 1 },
-  insightTitle: { color: '#E07A5F', fontSize: 12, fontWeight: '500' },
-  insightText: { marginTop: 2, color: COLORS.text, fontSize: 12, lineHeight: 17 },
-  sectionLabel: { color: '#737373', fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
-  nearLimitBadge: { paddingHorizontal: 12, paddingVertical: 4, borderRadius: 20, backgroundColor: '#FFEAEA' },
-  nearLimitText: { color: '#D93B4F', fontSize: 12, fontWeight: '600' },
-  capacityContainer: { alignItems: 'center', justifyContent: 'center', paddingVertical: 8 },
-  capacityCircleWrapper: { width: 144, height: 144, alignItems: 'center', justifyContent: 'center', position: 'relative' },
-  capacityOverlay: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  insightTitle: { fontSize: 14, fontWeight: '700', color: '#E07A5F', marginBottom: 2 },
+  insightTitleUrgent: { color: '#DC2626' },
+  insightText: { fontSize: 12, color: '#6B7280', lineHeight: 18 },
+  recoveryReminder: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF4E6',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#D9E5C8',
+  },
+  recoveryReminderIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  recoveryReminderBody: { flex: 1 },
+  recoveryReminderTitle: { fontSize: 14, fontWeight: '700', color: '#3F5A2A', marginBottom: 2 },
+  recoveryReminderText: { fontSize: 12, color: '#5C6F44', lineHeight: 18 },
+  recoveryReminderArrow: { fontSize: 22, color: '#7C9460', marginLeft: 8, marginTop: -2 },
+  sectionLabel: { fontSize: 12, fontWeight: '700', color: '#6B7280', letterSpacing: 0.5 },
+  nearLimitBadge: { backgroundColor: '#FEF3C7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  nearLimitText: { fontSize: 12, fontWeight: '700', color: '#D97706' },
+  capacityContainer: { alignItems: 'center', marginVertical: 8 },
+  capacityCircleWrapper: { position: 'relative', width: 144, height: 144, alignItems: 'center', justifyContent: 'center' },
+  capacityOverlay: { position: 'absolute', alignItems: 'center' },
   capacityNumberRow: { flexDirection: 'row', alignItems: 'baseline' },
-  capacityNumber: { color: COLORS.textDark, fontSize: 30, fontWeight: '700' },
-  capacityPercent: { color: COLORS.textDark, fontSize: 16, fontWeight: '600' },
-  capacityLabel: { marginTop: 2, color: '#737373', fontSize: 12, fontWeight: '500' },
-  capacityWarning: { flexDirection: 'row', alignItems: 'flex-start', padding: 14, borderRadius: 12, backgroundColor: COLORS.warning, borderWidth: 1, borderColor: COLORS.warningBorder, marginTop: 12 },
+  capacityNumber: { fontSize: 32, fontWeight: '800', color: COLORS.text },
+  capacityPercent: { fontSize: 16, fontWeight: '700', color: COLORS.text, marginLeft: 2 },
+  capacityLabel: { fontSize: 12, color: '#6B7280', fontWeight: '500' },
+  capacityWarning: { flexDirection: 'row', backgroundColor: '#FEF9C3', borderRadius: 12, padding: 12, marginVertical: 8 },
   warningContent: { flex: 1 },
-  warningTitle: { color: COLORS.warningText, fontSize: 12, fontWeight: '700' },
-  warningText: { marginTop: 2, color: COLORS.warningSubtext, fontSize: 12, lineHeight: 17 },
-  capacitySection: { marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#EAE5DB' },
-  capacityBar: { height: 10, borderRadius: 6, overflow: 'hidden', backgroundColor: '#F3F4F6', flexDirection: 'row' },
+  warningTitle: { fontSize: 13, fontWeight: '700', color: '#854D0E', marginBottom: 2 },
+  warningText: { fontSize: 12, color: '#713F12', lineHeight: 16 },
+  capacitySection: { marginTop: 8 },
+  capacityBar: { height: 10, borderRadius: 5, flexDirection: 'row', overflow: 'hidden', backgroundColor: '#E5E7EB', marginBottom: 10 },
   capacitySegment: { height: '100%' },
-  legendContainer: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', marginTop: 12, gap: 12 },
-  legendItem: { flexDirection: 'row', alignItems: 'center' },
-  legendDot: { width: 10, height: 10, borderRadius: 5, marginRight: 6 },
-  legendText: { fontSize: 12, fontWeight: '500', color: '#4B5563' },
-  editText: { color: COLORS.primary, fontSize: 12, fontWeight: '700' },
+  legendContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4, justifyContent: 'center' },
+  legendItem: { flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 4 },
+  legendDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+  legendText: { fontSize: 11, color: '#6B7280' },
   categoryGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
-  categoryCard: { width: '48.5%', minHeight: 145, borderRadius: 16, borderWidth: 1, padding: 14, marginBottom: 10, justifyContent: 'space-between' },
-  categoryTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  categoryEmoji: { fontSize: 21 },
-  categoryBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 },
+  categoryCard: { width: '48%', borderRadius: 14, padding: 12, marginBottom: 12, borderWidth: 1 },
+  categoryTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  categoryEmoji: { fontSize: 20 },
+  categoryBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
   categoryBadgeText: { fontSize: 10, fontWeight: '700' },
-  categoryBottom: { marginTop: 12 },
-  categoryTitle: { color: COLORS.textDark, fontSize: 13, lineHeight: 18, fontWeight: '600' },
-  categoryDescription: { marginTop: 2, color: '#737373', fontSize: 11, lineHeight: 16 },
-  categoryFull: { width: '100%', minHeight: 72, borderRadius: 16, borderWidth: 1, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  otherLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  otherBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 13, backgroundColor: '#FFE4E6' },
-  otherBadgeText: { color: '#E11D48', fontSize: 10, fontWeight: '700' },
-  loadDescription: { color: '#4F453D', fontSize: 13, lineHeight: 19, marginBottom: 14 },
-  spikeBadge: { paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, backgroundColor: '#FEF3C7' },
-  spikeText: { color: '#D97706', fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
-  taskRow: { minHeight: 72, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  categoryBottom: {},
+  categoryTitle: { fontSize: 13, fontWeight: '700', color: COLORS.text, marginBottom: 2 },
+  categoryDescription: { fontSize: 11, color: '#6B7280' },
+  categoryFull: { width: '100%', borderRadius: 14, padding: 12, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  otherLeft: { flexDirection: 'row', alignItems: 'center' },
+  otherBadge: { backgroundColor: '#FCE7F3', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  otherBadgeText: { fontSize: 11, fontWeight: '700', color: '#DB2777' },
+  addInlineButton: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#F8EEDE' },
+  addInlineText: { fontSize: 12, fontWeight: '600', color: COLORS.primary, marginLeft: 2 },
+  iconButton: { padding: 4 },
+  emptyTasks: { padding: 20, alignItems: 'center' },
+  emptyTasksText: { fontSize: 13, color: '#9CA3AF', marginBottom: 10 },
+  addFirstTaskBtn: { backgroundColor: COLORS.primary, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
+  addFirstTaskText: { color: '#FFFFFF', fontSize: 13, fontWeight: '600' },
+  /* Task Card */
+  taskCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.surface, borderRadius: 14, marginBottom: 8, overflow: 'hidden', borderWidth: 1, borderColor: colors.line },
+  taskCardDone: { opacity: 0.55, backgroundColor: '#FAFAF8' },
+  taskLeftBorder: { width: 4, alignSelf: 'stretch', backgroundColor: colors.brown, borderTopLeftRadius: 14, borderBottomLeftRadius: 14 },
+  taskRankBadge: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.yellowWash, alignItems: 'center', justifyContent: 'center', marginHorizontal: 10 },
+  taskRankText: { fontSize: 12, fontWeight: '800', color: colors.brown },
+  taskRankBadgeDone: { backgroundColor: colors.calmWash },
+  taskRankTextDone: { fontSize: 14, fontWeight: '800', color: colors.calm },
+  taskBody: { flex: 1, paddingVertical: 10, paddingRight: 4 },
+  taskTitleRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 3 },
+  taskCatEmoji: { fontSize: 14, marginRight: 6 },
+  taskTitleText: { fontSize: 14, fontWeight: '700', color: COLORS.text, flex: 1 },
+  taskTitleDone: { textDecorationLine: 'line-through', color: colors.inkFaint },
+  taskTagsRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  priorityPill: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, borderWidth: 1 },
+  pillHigh: { backgroundColor: '#FEE2E2', borderColor: '#FECDD3' },
+  pillMed: { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' },
+  pillLow: { backgroundColor: '#DCFCE7', borderColor: '#BBF7D0' },
+  pillText: { fontSize: 9, fontWeight: '700', color: colors.inkSoft },
+  taskSubDetail: { fontSize: 11, color: colors.inkSoft, flexShrink: 1 },
+  taskSubDone: { color: colors.inkFaint },
+  editButton: { padding: 8 },
+  deleteButton: { padding: 8 },
+  spikeBadge: { backgroundColor: '#FEE2E2', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  spikeText: { fontSize: 10, fontWeight: '800', color: '#DC2626' },
+  loadDescription: { fontSize: 13, color: '#6B7280', marginBottom: 12, lineHeight: 18 },
+  taskRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
   taskLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  taskIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#FEF9C3', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
   taskEmoji: { fontSize: 20 },
-  taskText: { flex: 1 },
-  taskTitle: { color: COLORS.textDark, fontSize: 13, fontWeight: '600' },
-  taskSubtitle: { marginTop: 3, color: '#737373', fontSize: 11 },
-  deferButton: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#FEF08A', flexDirection: 'row', alignItems: 'center' },
-  deferText: { color: '#713F12', fontSize: 12, fontWeight: '700' },
-  allDeferred: { padding: 12, marginBottom: 12, borderRadius: 14, backgroundColor: '#EFF6EB' },
-  allDeferredText: { color: '#6A994E', fontSize: 12, fontWeight: '600', textAlign: 'center' },
-  rebalanceButton: { height: 48, borderRadius: 24, backgroundColor: COLORS.primaryContainer, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', shadowColor: '#6B5036', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 3 },
-  rebalanceText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600' },
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalCard: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 36 },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  modalTitle: { color: COLORS.text, fontSize: 20, fontWeight: '700' },
-  modalClose: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F5F2EC', alignItems: 'center', justifyContent: 'center' },
-  modalCloseText: { color: COLORS.outline, fontSize: 15, fontWeight: '700' },
-  inputLabel: { color: COLORS.outline, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 6, marginTop: 12 },
-  textInput: { height: 48, borderRadius: 14, borderWidth: 1, borderColor: '#EDE7D6', paddingHorizontal: 14, color: COLORS.text, fontSize: 15, backgroundColor: '#FAFAF8' },
-  categoryChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  categoryChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 14, backgroundColor: '#F5F2EC', borderWidth: 1, borderColor: '#EAE5DB' },
-  categoryChipSelected: { backgroundColor: '#FDF1A9', borderColor: '#ECCB49' },
-  categoryChipText: { color: '#6E6A61', fontSize: 12, fontWeight: '600' },
-  categoryChipTextSelected: { color: '#3D2E1E', fontWeight: '700' },
-  rowTwoCols: { flexDirection: 'row', alignItems: 'center' },
-  scheduleFields: { flexDirection: 'row', alignItems: 'center', marginTop: 6, marginBottom: 2 },
-  priorityGroup: { flexDirection: 'row', height: 48, borderRadius: 14, borderWidth: 1, borderColor: '#EDE7D6', overflow: 'hidden' },
-  priorityButton: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FAFAF8' },
-  priorityButtonSelected: { backgroundColor: COLORS.primary },
-  priorityText: { color: COLORS.outline, fontSize: 11, fontWeight: '700' },
-  priorityTextSelected: { color: '#FFFFFF', fontWeight: '800' },
-  saveTaskButton: { height: 50, borderRadius: 25, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center', marginTop: 22 },
-  saveTaskButtonText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
-  disabledButton: { opacity: 0.5 },
-  pressed: { opacity: 0.7, transform: [{ scale: 0.96 }] },
-  rankedTaskRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F2EEE8' },
-  rankNumber: { color: COLORS.outline, fontWeight: '700', width: 28 },
-  rankedTaskTitle: { color: COLORS.text, fontWeight: '700', fontSize: 14 },
-  rankedTaskMeta: { color: COLORS.outline, fontSize: 12, marginTop: 2 },
-  completedTaskText: { textDecorationLine: 'line-through', opacity: 0.55 },
-  priorityPill: { overflow: 'hidden', color: '#8A5A16', backgroundColor: '#FEF3C7', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
-  priorityLow: { backgroundColor: '#DCFCE7', color: '#15803D' },
-  priorityMedium: { backgroundColor: '#FEF3C7', color: '#A16207' },
-  priorityHigh: { backgroundColor: '#FEE2E2', color: '#B91C1C' },
-  pressedRebalance: { opacity: 0.9, transform: [{ scale: 0.98 }] },
+  taskTitle: { fontSize: 14, fontWeight: '600', color: COLORS.text },
+  taskSubtitle: { fontSize: 11, color: '#6B7280' },
+  deferButton: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: '#FDF1A9' },
+  deferText: { fontSize: 12, fontWeight: '600', color: '#374151' },
+  rebalanceButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.primary, borderRadius: 12, paddingVertical: 12, marginTop: 14 },
+  rebalanceText: { fontSize: 14, fontWeight: '700', color: '#FFFFFF' },
+  pressed: { opacity: 0.7 },
+  resyncBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF9C3', borderRadius: 14, padding: 12, marginBottom: 14, borderWidth: 1, borderColor: '#FDE047' },
+  resyncTitle: { fontSize: 13, fontWeight: '700', color: '#854D0E' },
+  resyncSubtext: { fontSize: 11, color: '#713F12' },
+  resyncButton: { backgroundColor: '#854D0E', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
+  resyncButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  /* Modals — centered on screen with internal scroll for long content */
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
+  modalContent: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, maxHeight: '85%', maxWidth: '92%', width: 420 },
+  modalScrollContent: { paddingBottom: 12 },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
+  modalSubtitle: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  /* Notifications Modal */
+  notifItem: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  notifItemUnread: { backgroundColor: colors.yellowWash, borderColor: colors.yellowDeep },
+  notifDotWrap: { width: 16, alignItems: 'center', paddingTop: 5 },
+  notifUnreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#E07A5F' },
+  notifTitle: { fontSize: 14, fontWeight: '700', color: COLORS.text, flexShrink: 1 },
+  notifTime: { fontSize: 11, color: '#6B7280', marginLeft: 8 },
+  notifBody: { fontSize: 12, color: '#6B7280', marginTop: 3, lineHeight: 17 },
+  notifMarkAllBtn: { backgroundColor: colors.brownSoft, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10 },
+  notifMarkAllText: { fontSize: 12, fontWeight: '700', color: colors.brown },
+  notifEmpty: { fontSize: 13, color: '#6B7280', fontStyle: 'italic', textAlign: 'center', paddingVertical: 24 },
+  /* Review Modal */
+  reviewTaskItem: { backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  reviewRankPill: { backgroundColor: colors.yellowWash, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
+  reviewRankText: { fontSize: 11, fontWeight: '700', color: colors.brown },
+  reviewTaskTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text, marginTop: 6 },
+  reviewTaskDetails: { fontSize: 12, color: '#6B7280', marginTop: 2 },
+  reviewTaskStress: { fontSize: 12, color: '#B45309', fontWeight: '600', marginTop: 2 },
+  reviewTaskReasoning: { fontSize: 11, color: '#4B5563', fontStyle: 'italic', marginTop: 4 },
+  reviewEditBtn: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: '#F8EEDE' },
+  reviewEditText: { fontSize: 11, fontWeight: '600', color: colors.brown },
+  rejectBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, backgroundColor: '#F3F4F6' },
+  rejectBtnText: { fontSize: 11, color: '#6B7280', fontWeight: '600' },
+  modalActions: { marginTop: 14 },
+  primaryModalBtn: { backgroundColor: COLORS.primary, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
+  primaryModalBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  /* Review Editor */
+  reviewEditorCard: { backgroundColor: '#FAF8F5', borderRadius: 14, padding: 14, borderWidth: 1, borderColor: colors.line },
+  reviewEditorField: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  reviewEditorLabel: { fontSize: 13, fontWeight: '600', color: colors.ink, minWidth: 80 },
+  reviewEditorInput: { flex: 1, height: 36, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 10, fontSize: 13, color: colors.ink, textAlign: 'right' },
+  reviewEditorHint: { fontSize: 10, color: colors.inkFaint, marginTop: -2, marginBottom: 6, textAlign: 'right' },
+  reviewEditorReasoning: { fontSize: 11, color: colors.inkSoft, fontStyle: 'italic', marginTop: 10, lineHeight: 16 },
+  reviewPriorityBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: colors.line, backgroundColor: '#FFFFFF' },
+  reviewPriorityBtnActive: { backgroundColor: colors.brown, borderColor: colors.brown },
+  reviewPriorityBtnText: { fontSize: 10, fontWeight: '700', color: colors.inkSoft },
+  reviewCancelBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.line, alignItems: 'center' },
+  reviewCancelBtnText: { fontSize: 13, fontWeight: '600', color: colors.inkSoft },
+  reviewSaveBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.brown, alignItems: 'center' },
+  reviewSaveBtnText: { fontSize: 13, fontWeight: '700', color: colors.cream },
+  /* Quick Add Modal */
+  chatInput: { backgroundColor: '#FAF8F5', borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, fontSize: 14, minHeight: 70, textAlignVertical: 'top', color: COLORS.text },
+  nlpParseButton: { backgroundColor: colors.brown, borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginTop: 10 },
+  nlpParseButtonText: { color: colors.cream, fontSize: 13, fontWeight: '700' },
+  /* previewHeader reused for multi-task detected label */
+  previewHeader: { fontSize: 11, fontWeight: '700', color: colors.brown, letterSpacing: 0.5, marginBottom: 10, marginTop: 4 },
+  previewStressValue: { fontSize: 12, fontWeight: '700', color: '#B45309' },
+  /* Parsed task cards — brief card in multi-task review */
+  parsedTaskCard: { backgroundColor: '#FAF8F5', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: colors.line },
+  parsedTaskTitle: { fontSize: 14, fontWeight: '700', color: COLORS.text, flex: 1 },
+  parsedTaskMeta: { fontSize: 12, color: '#6B7280', marginBottom: 6 },
+  parsedTaskRemoveBtn: { alignSelf: 'flex-end', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 5, backgroundColor: '#F3F4F6' },
+  parsedTaskRemoveText: { fontSize: 11, color: '#9CA3AF', fontWeight: '600' },
+  /* Picker chips — category pills, date chips, time chips */
+  pickerChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    minWidth: 46,
+  },
+  pickerChipActive: { backgroundColor: colors.brown, borderColor: colors.brown },
+  pickerChipText: { fontSize: 11, fontWeight: '600', color: colors.inkSoft },
+  pickerChipTextActive: { color: colors.cream },
+  pickerChipSub: { fontSize: 10, color: colors.inkFaint, marginTop: 1 },
+  /* Hours stepper */
+  stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  stepperBtn: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.yellowWash, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
+  stepperBtnText: { fontSize: 18, fontWeight: '700', color: colors.brown, lineHeight: 22 },
+  stepperValue: { fontSize: 15, fontWeight: '700', color: COLORS.text, minWidth: 36, textAlign: 'center' },
 });
