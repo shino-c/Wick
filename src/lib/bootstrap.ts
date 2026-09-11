@@ -26,16 +26,48 @@ export async function bootstrap(): Promise<BootstrapResult> {
     data: { session },
   } = await supabase.auth.getSession();
 
+  if (!session?.user) {
+    return {
+      onboarded: false,
+      backend: 'supabase',
+      warning: null,
+      authenticated: false,
+    };
+  }
+
+  // Query this signed-in user's profile to see if they completed baseline setup
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('onboarded')
+    .eq('id', session.user.id)
+    .maybeSingle();
+
+  const isOnboarded = profile?.onboarded ?? false;
+
   return {
-    onboarded: db.onboarded,
+    onboarded: isOnboarded,
     backend: 'supabase',
     warning: null,
-    authenticated: !!session,
+    authenticated: true,
   };
 }
 
 export async function markOnboarded(): Promise<void> {
+  if (hasSupabase) {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (user) {
+      await supabase
+        .from('profiles')
+        .update({ onboarded: true })
+        .eq('id', user.id);
+    }
+  }
+
   await writeDb((db) => {
     db.onboarded = true;
   });
 }
+

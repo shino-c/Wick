@@ -20,6 +20,7 @@ create table if not exists profiles (
   username text unique not null,
   invite_code text unique not null
     default 'WICK-' || upper(substr(md5(random()::text), 1, 4)),
+  onboarded boolean not null default false,
   created_at timestamptz default now()
 );
 
@@ -406,6 +407,9 @@ create table if not exists challenge_participants (
   primary key (challenge_id, user_id)
 );
 
+alter table challenge_participants enable row level security;
+
+alter table challenge_participants add column if not exists verified boolean not null default false;
 alter table challenge_participants add column if not exists completed_at timestamptz;
 
 alter table challenge_participants enable row level security;
@@ -893,13 +897,85 @@ drop policy if exists "own recovery days" on recovery_days;
 create policy "own recovery days" on recovery_days for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+-- ── Recovery plan sessions ──────────────────────────────────────────────────
+-- A started recovery plan and its real, measured progress. Seeds are earned
+-- only when a plan's tracked progress reaches its target; the app never marks
+-- one finished on a button press. One live session per (day, plan).
+create table if not exists recovery_plan_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  recovery_date date not null,
+  plan_key text not null,
+  title text not null,
+  emoji text not null,
+  detail text,
+  target_type text not null check (target_type in ('steps', 'minutes', 'none')),
+  target_value integer not null default 0,
+  progress_value integer not null default 0,
+  status text not null default 'started' check (status in ('started', 'completed')),
+  started_at timestamptz not null default now(),
+  completed_at timestamptz,
+  reward_awarded boolean not null default false,
+  created_at timestamptz not null default now(),
+  unique (user_id, recovery_date, plan_key)
+);
+
+create index if not exists recovery_plan_sessions_user_date on recovery_plan_sessions (user_id, recovery_date);
+
+alter table recovery_plan_sessions enable row level security;
+drop policy if exists "own recovery plan sessions" on recovery_plan_sessions;
+create policy "own recovery plan sessions" on recovery_plan_sessions for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ── Garden: seed wallet & owned items ──────────────────────────────────────
+-- Completing a recovery activity earns seeds; seeds buy catalogue items that
+-- live permanently in the garden. Both are per-user and RLS-locked.
+create table if not exists garden_wallet (
+  user_id uuid primary key references auth.users on delete cascade,
+  seeds integer not null default 0,
+  updated_at timestamptz not null default now()
+);
+
+alter table garden_wallet enable row level security;
+drop policy if exists "own garden wallet" on garden_wallet;
+create policy "own garden wallet" on garden_wallet for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists garden_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  item_key text not null,
+  name text not null,
+  emoji text not null,
+  kind text not null check (kind in ('plant', 'flower', 'pet', 'decoration')),
+  /** Relative position in garden as jsonb {x,y} (0-100%). Null = use default layout. */
+  position jsonb,
+  created_at timestamptz not null default now()
+);
+
+-- Older projects created garden_items before drag-to-decorate existed, so the
+-- drawing position is added here as well: `create table if not exists` does
+-- nothing when the table is already there, and every path that reads or writes
+-- a placement would otherwise fail against a column that is missing.
+alter table garden_items add column if not exists position jsonb;
+
+create index if not exists garden_items_user on garden_items (user_id, created_at);
+
+alter table garden_items enable row level security;
+drop policy if exists "own garden items" on garden_items;
+create policy "own garden items" on garden_items for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- ── Pillar 1: Calendar Sync & Workload Capacity ─────────────────────────────
 
 create table if not exists calendar_connections (
   user_id uuid not null references auth.users on delete cascade,
-  provider text not null check (provider in ('google', 'outlook')),
+  provider text not null default 'device' check (provider in ('device', 'google', 'outlook')),
   connected boolean not null default true,
   account_email text,
+  access_token text,
+  refresh_token text,
+  expires_at timestamptz,
   last_synced_at timestamptz default now(),
   created_at timestamptz default now(),
   primary key (user_id, provider)
@@ -910,19 +986,37 @@ drop policy if exists "own calendar connections" on calendar_connections;
 create policy "own calendar connections" on calendar_connections for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+alter table public.calendar_connections
+drop constraint if exists calendar_connections_provider_check;
+
+alter table public.calendar_connections
+add constraint calendar_connections_provider_check
+check (provider in ('device', 'google', 'outlook'));
+
+
 create table if not exists workload_items (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users on delete cascade,
   title text not null,
-  category text not null check (category in ('academic', 'social', 'physical', 'errands', 'mental')),
+  category text not null default 'academic',
   estimated_hours double precision not null default 1.0,
-  priority text not null default 'medium' check (priority in ('low', 'medium', 'high')),
-  source text not null default 'manual' check (source in ('google', 'outlook', 'manual')),
-  status text not null default 'scheduled' check (status in ('scheduled', 'deferred', 'completed')),
+  priority text not null default 'medium',
+  source text not null default 'manual',
+  status text not null default 'scheduled',
   scheduled_start timestamptz,
   scheduled_end timestamptz,
+  calendar_event_id text,
   created_at timestamptz default now()
 );
+-- Loosen the fixed-list constraints that were rejecting AI-generated and
+-- calendar-synced categories/sources. The app writes free-form categories
+-- (e.g. "Engineering", "Health") and a "device" source; the old CHECK clauses
+-- silently dropped every row.
+alter table workload_items drop constraint if exists workload_items_category_check;
+alter table workload_items drop constraint if exists workload_items_source_check;
+alter table workload_items drop constraint if exists workload_items_status_check;
+alter table workload_items drop constraint if exists workload_items_priority_check;
+alter table workload_items add column if not exists calendar_event_id text;
 
 create index if not exists workload_items_user_time on workload_items (user_id, status, scheduled_start);
 
@@ -930,3 +1024,91 @@ alter table workload_items enable row level security;
 drop policy if exists "own workload items" on workload_items;
 create policy "own workload items" on workload_items for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ── Pillar 1 Extensions: AI Analysis & Weekly Capacity ──────────────────────
+
+create table if not exists ai_task_analysis (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  week_start date not null,
+  title text not null,
+  category text not null default 'academic',
+  priority text not null default 'medium',
+  estimated_duration_hours double precision not null default 1.0,
+  scheduled_date date not null,
+  scheduled_start_time time,
+  scheduled_end_time time,
+  capacity_hours double precision not null default 1.0,
+  rank int not null default 0,
+  ai_reasoning text,
+  stress_score double precision,
+  status text not null default 'pending',
+  calendar_event_id text,
+  calendar_provider text,
+  created_at timestamptz default now()
+);
+-- Loosen fixed-list constraints that reject AI-generated dynamic categories.
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_category_check;
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_priority_check;
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_status_check;
+alter table ai_task_analysis drop constraint if exists ai_task_analysis_calendar_provider_check;
+alter table ai_task_analysis add column if not exists stress_score double precision;
+
+create index if not exists ai_task_analysis_user_week on ai_task_analysis (user_id, week_start, rank);
+
+alter table ai_task_analysis enable row level security;
+drop policy if exists "own ai task analysis" on ai_task_analysis;
+create policy "own ai task analysis" on ai_task_analysis for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists weekly_capacity_analyses (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  week_start date not null,
+  total_capacity_hours double precision not null default 40.0,
+  used_capacity_hours double precision not null default 0.0,
+  overload_warning boolean not null default false,
+  category_breakdown jsonb not null default '{}',
+  stress_score double precision,
+  ai_reasoning text,
+  created_at timestamptz default now(),
+  unique (user_id, week_start)
+);
+
+alter table weekly_capacity_analyses enable row level security;
+drop policy if exists "own weekly capacity" on weekly_capacity_analyses;
+create policy "own weekly capacity" on weekly_capacity_analyses for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists task_chat_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users on delete cascade,
+  message text not null,
+  sender text not null check (sender in ('user', 'ai')),
+  task_id uuid references ai_task_analysis on delete set null,
+  created_at timestamptz default now()
+);
+
+create index if not exists task_chat_logs_user_time on task_chat_logs (user_id, created_at);
+
+alter table task_chat_logs enable row level security;
+drop policy if exists "own chat logs" on task_chat_logs;
+create policy "own chat logs" on task_chat_logs for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Allow the signup screen to probe username availability before submit.
+-- SECURITY DEFINER because the caller is unauthenticated at signup time;
+-- it returns only a boolean, never the profile row.
+create or replace function public.is_username_taken(p_username text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return exists (
+    select 1 from public.profiles
+    where lower(username) = lower(p_username)
+  );
+end;
+$$;
