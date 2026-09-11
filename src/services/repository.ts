@@ -5,53 +5,58 @@
  * functions. Adding the backend later (or losing it mid-demo) changes nothing
  * above this line.
  */
-import { getLocalDateKey, readDb, uid, writeDb } from '@/data/localStore';
+import { readDb, uid, writeDb } from '@/data/localStore';
 import type {
-    AccuracyVerdict,
-    Baseline,
-    ChallengeRow,
-    CircleSummary,
-    DailyStressPoint,
-    FocusSessionRow,
-    FriendSummary,
-    IncomingRequest,
-    NewChallenge,
-    Participant,
-    PpgScan,
-    SelfReport,
-    StressScoreRow,
-    SupportNudge,
-    WeeklyStressAnalysis,
-    WorkloadItem
+  AccuracyVerdict,
+  Baseline,
+  CalendarConnection,
+  CalendarEventItem,
+  ChallengeRow,
+  CircleSummary,
+  FocusSessionRow,
+  FriendSummary,
+  GardenItem,
+  GardenWallet,
+  IncomingRequest,
+  NewChallenge,
+  Participant,
+  PpgScan,
+  SelfReport,
+  StressScoreRow,
+  SupportNudge,
+  TaskAnalysis,
+  WeeklyCapacityAnalysis,
+  WorkloadItem
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
 import {
-    ageHours,
-    calculateDomainDriver,
-    clampBiometricScore,
-    fuseStressScore,
-    type FusionResult,
-} from './fusionService';
-import { type PPGResult, type StressClassification } from './ppgService';
-import {
-    addWorkloadItem,
-    analyzeWorkload,
-    batchDeferWorkloadItems,
-    completeWorkloadItem,
-    deferWorkloadItem,
-    getCalendarConnections,
-    getDailyLoads,
-    getRankedTasks,
-    listWorkloadItems,
-    restoreWorkloadItem,
-    syncCalendar,
-} from './workloadService';
+  addEventToDeviceCalendar,
+  deleteEventFromDeviceCalendar,
+  syncCalendarEvents,
+  updateEventOnDeviceCalendar,
+} from '@/services/calendarSync';
+import { toISODate } from '@/services/dateUtils';
+import { ageHours, fuseStressScore, type FusionResult } from './fusionService';
+import { PPGService, type PPGResult, type StressClassification } from './ppgService';
+
+export { type LoadBalanceSuggestion, type TaskAnalysis, type WeeklyCapacityAnalysis } from '@/data/types';
 
 /**
  * Smallest circle we will aggregate. Below this, "2 of 2 friends are in the red
  * zone" is a raw individual score wearing a disguise, so we suppress instead.
  */
 export const MIN_CIRCLE_SIZE = 3;
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function createTaskId(): string {
+  const hex = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16));
+  hex[12] = '4';
+  hex[16] = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
+}
 
 /**
  * How many recent finger spot checks the RMSSD baseline is built from.
@@ -297,7 +302,8 @@ export async function latestSelfReport(): Promise<SelfReport | null> {
   return (await readDb()).selfReports[0] ?? null;
 }
 
-export async function listSelfReports(limit = 20): Promise<SelfReport[]> {
+/** Most recent self reports, newest first — used for per-day stress synthesis. */
+export async function listSelfReports(limit = 30): Promise<SelfReport[]> {
   if (hasSupabase) {
     const userId = await currentUserId();
     const { data } = await supabase
@@ -347,11 +353,7 @@ export async function hasQuestionnaireAnswers(): Promise<boolean> {
  * rather than a placeholder value that would fake agreement.
  */
 export async function recomputeFusedScore(loadScore?: number): Promise<FusionResult> {
-  const [scans, self, workloadItems] = await Promise.all([
-    listScans(20),
-    latestSelfReport(),
-    listWorkloadItems(),
-  ]);
+  const [scans, self] = await Promise.all([listScans(20), latestSelfReport()]);
   const usable = scans.filter((s) => s.signalQuality === 'good' && s.deviationPct !== null);
   // A 45-second finger scan under torch light and a 40-second face reading in
   // room light are not equally trustworthy, and taking whichever happened to be
@@ -361,19 +363,13 @@ export async function recomputeFusedScore(loadScore?: number): Promise<FusionRes
   const bio =
     usable.find((s) => s.source === 'finger' && ageHours(s.createdAt) < 12) ?? usable[0];
 
-  let effectiveLoadScore = loadScore;
-  if (effectiveLoadScore === undefined && workloadItems.length > 0) {
-    const analysis = analyzeWorkload(workloadItems);
-    effectiveLoadScore = analysis.totalCapacityPct;
-  }
-
   const fusion = fuseStressScore({
     biometric:
       bio && bio.deviationPct !== null
-        ? { score: clampBiometricScore(bio.deviationPct)!, ageHours: ageHours(bio.createdAt) }
+        ? { score: PPGService.biometricScore(bio.deviationPct)!, ageHours: ageHours(bio.createdAt) }
         : undefined,
     selfReport: self ? { score: self.score, ageHours: ageHours(self.createdAt) } : undefined,
-    load: effectiveLoadScore !== undefined ? { score: effectiveLoadScore, ageHours: 0 } : undefined,
+    load: loadScore !== undefined ? { score: loadScore, ageHours: 0 } : undefined,
   });
 
   if (fusion.fusedScore === null) return fusion;
@@ -382,9 +378,9 @@ export async function recomputeFusedScore(loadScore?: number): Promise<FusionRes
     fused_score: Math.round(fusion.fusedScore * 100) / 100,
     confidence: fusion.confidence,
     signals_used: fusion.signalsUsed,
-    biometric_score: bio?.deviationPct != null ? clampBiometricScore(bio.deviationPct) : null,
+    biometric_score: bio?.deviationPct != null ? PPGService.biometricScore(bio.deviationPct) : null,
     self_report_score: self?.score ?? null,
-    load_score: effectiveLoadScore ?? null,
+    load_score: loadScore ?? null,
   };
 
   if (hasSupabase) {
@@ -430,131 +426,10 @@ export async function listStressScores(limit = 30): Promise<StressScoreRow[]> {
   return (await readDb()).stressScores.slice(0, limit);
 }
 
-/**
- * Builds the chart data without I/O so screens can render the weekly forecast
- * immediately from the workload items they already have. Passing recent signals
- * enriches the same forecast once those reads complete.
- */
-export function buildWeeklyStressAnalysis(
-  workloadItems: WorkloadItem[],
-  scans: PpgScan[] = [],
-  selfReports: SelfReport[] = []
-): WeeklyStressAnalysis {
-  const workloadAnalysis = analyzeWorkload(workloadItems);
-  const dailyLoads = getDailyLoads(workloadItems);
-  const driver = calculateDomainDriver(workloadAnalysis.categoryBreakdown);
-
-  const todayStr = getLocalDateKey(new Date());
-
-  const points: DailyStressPoint[] = dailyLoads.map((dl) => {
-    // 1. Biometric for this date:
-    const dayScans = scans.filter(
-      (s) => s.createdAt.startsWith(dl.fullDate) && s.signalQuality === 'good' && s.deviationPct !== null
-    );
-    const dayBio =
-      dayScans.length > 0
-        ? clampBiometricScore(
-            dayScans.reduce((a, s) => a + (s.deviationPct ?? 0), 0) / dayScans.length
-          )
-        : null;
-
-    // 2. Self-report for this date:
-    const daySelfReport = selfReports.find((sr) => sr.createdAt.startsWith(dl.fullDate));
-    const daySelf = daySelfReport ? daySelfReport.score : null;
-
-    // 3. Load score for this date (from scheduled hours vs standard 6h focus baseline)
-    const dayLoad = Math.min(100, Math.round((dl.hours / 6) * 100));
-
-    // Daily fused calculation
-    let dailyStress: number;
-    if (dayBio !== null && daySelf !== null) {
-      dailyStress = Math.round(dayBio * 0.4 + daySelf * 0.3 + dayLoad * 0.3);
-    } else if (dayBio !== null) {
-      dailyStress = Math.round(dayBio * 0.5 + dayLoad * 0.5);
-    } else if (daySelf !== null) {
-      dailyStress = Math.round(daySelf * 0.4 + dayLoad * 0.6);
-    } else {
-      // With no biometric or self-report for a day, show only the observed
-      // schedule load. Do not manufacture a personal stress reading.
-      dailyStress = dayLoad;
-    }
-
-    return {
-      dayIndex: dl.dayIndex,
-      dayLabel: dl.dayLabel,
-      fullDate: dl.fullDate,
-      stressScore: dailyStress,
-      biometricScore: dayBio,
-      selfReportScore: daySelf,
-      loadScore: dayLoad,
-      isPeak: false,
-      isToday: dl.fullDate === todayStr,
-    };
-  });
-
-  // Find peak day
-  let maxScore = -1;
-  let peakIndex = 0;
-
-  points.forEach((p, idx) => {
-    if (p.stressScore > maxScore) {
-      maxScore = p.stressScore;
-      peakIndex = idx;
-    }
-  });
-
-  if (points[peakIndex]) {
-    points[peakIndex].isPeak = true;
-  }
-
-  const dayNamesLong = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  const peakFullName = dayNamesLong[peakIndex] || 'Wednesday';
-
-  const usableScans = scans.filter((s) => s.signalQuality === 'good' && s.deviationPct !== null);
-  const latestBiometric =
-    usableScans.find((s) => s.source === 'finger' && ageHours(s.createdAt) < 12) ?? usableScans[0];
-  const latestSelf = selfReports[0];
-  const overallFusion = fuseStressScore({
-    biometric: latestBiometric?.deviationPct != null
-      ? { score: clampBiometricScore(latestBiometric.deviationPct)!, ageHours: ageHours(latestBiometric.createdAt) }
-      : undefined,
-    selfReport: latestSelf ? { score: latestSelf.score, ageHours: ageHours(latestSelf.createdAt) } : undefined,
-    load: { score: workloadAnalysis.totalCapacityPct, ageHours: 0 },
-  });
-
-  return {
-    points,
-    peakDay: peakFullName,
-    peakScore: Math.max(0, maxScore),
-    domainDriver: driver.domain,
-    driverPercentage: driver.percentage,
-    insight: maxScore > 0
-      ? `${peakFullName} is your highest-load day. ${driver.insight}`
-      : 'No workload or stress signals yet. Sync a calendar or add a task to begin.',
-    fusedScore: overallFusion.fusedScore ?? 0,
-    confidence: overallFusion.confidence,
-    biometricScore: latestBiometric?.deviationPct != null ? clampBiometricScore(latestBiometric.deviationPct) : null,
-    selfReportScore: latestSelf?.score ?? null,
-    loadScore: workloadAnalysis.totalCapacityPct,
-  };
-}
-
-export async function getWeeklyStressAnalysis(
-  workloadItemsOverride?: WorkloadItem[]
-): Promise<WeeklyStressAnalysis> {
-  const [scans, selfReports, workloadItems] = await Promise.all([
-    listScans(40),
-    listSelfReports(20),
-    workloadItemsOverride ? Promise.resolve(workloadItemsOverride) : listWorkloadItems(),
-  ]);
-
-  return buildWeeklyStressAnalysis(workloadItems, scans, selfReports);
-}
-
 /* ── Pillar 2: sessions + calibration feedback ───────────────────── */
 
 export async function saveSession(row: Omit<FocusSessionRow, 'id' | 'createdAt'>): Promise<string> {
-  const id = uid();
+  const id = createTaskId();
   if (hasSupabase) {
     const userId = await currentUserId();
     const { data } = await supabase
@@ -1158,8 +1033,1247 @@ export async function circleNeedsSupport(): Promise<boolean> {
   return !summary.suppressed && (summary.redZoneCount ?? 0) > 0;
 }
 
-/* ── Pillar 1: Workload & Calendar Sync ─────────────────────────── */
-export {
-    addWorkloadItem, analyzeWorkload, batchDeferWorkloadItems, completeWorkloadItem, deferWorkloadItem, getCalendarConnections, getRankedTasks, listWorkloadItems, restoreWorkloadItem, syncCalendar
-};
+/* ── Pillar 1: Calendar Sync & Workload ───────────────────────────────────── */
+
+export async function getCalendarConnections(): Promise<CalendarConnection[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('calendar_connections')
+      .select('provider, connected, account_email, last_synced_at')
+      .eq('user_id', userId);
+    return (data ?? []).map((r: any) => ({
+      provider: r.provider,
+      connected: r.connected,
+      accountEmail: r.account_email,
+      lastSyncedAt: r.last_synced_at,
+    }));
+  }
+  return [];
+}
+
+export async function saveCalendarConnection(
+  provider: 'google' | 'outlook',
+  connected: boolean,
+  accountEmail?: string
+): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return;
+    await supabase.from('calendar_connections').upsert({
+      user_id: userId,
+      provider,
+      connected,
+      account_email: accountEmail,
+      last_synced_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,provider' });
+    return;
+  }
+}
+
+export async function getWorkloadItems(status?: string): Promise<TaskAnalysis[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    let query = supabase
+      .from('workload_items')
+      .select('*')
+      .eq('user_id', userId)
+      .order('scheduled_start', { ascending: true });
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data } = await query;
+    return (data ?? []).map((r: any) => ({
+      id: r.id,
+      title: r.title,
+      category: r.category,
+      priority: r.priority,
+      estimated_duration_hours: r.estimated_hours,
+      scheduled_date: r.scheduled_start ? toISODate(new Date(r.scheduled_start)) : '',
+      scheduled_start_time: r.scheduled_start ? new Date(r.scheduled_start).toTimeString().slice(0, 5) : undefined,
+      scheduled_end_time: r.scheduled_end ? new Date(r.scheduled_end).toTimeString().slice(0, 5) : undefined,
+      capacity_hours: r.estimated_hours,
+      rank: 0,
+      status: r.status,
+      calendar_event_id: r.calendar_event_id,
+      calendar_provider: r.source === 'google' || r.source === 'outlook' ? r.source : undefined,
+      createdAt: r.created_at,
+    }));
+  }
+
+  // Fallback to local store
+  const db = await readDb();
+  let items = db.workloadItems || [];
+  if (status) {
+    items = items.filter((item) => item.status === status);
+  }
+  return [...items]
+    .sort((a, b) => {
+      const aTime = a.scheduled_start ? new Date(a.scheduled_start).getTime() : 0;
+      const bTime = b.scheduled_start ? new Date(b.scheduled_start).getTime() : 0;
+      return aTime - bTime;
+    })
+    .map((r: WorkloadItem) => ({
+      id: r.id,
+      title: r.title,
+      category: r.category,
+      priority: r.priority,
+      estimated_duration_hours: r.estimated_hours,
+      scheduled_date: r.scheduled_start ? toISODate(new Date(r.scheduled_start)) : '',
+      scheduled_start_time: r.scheduled_start ? new Date(r.scheduled_start).toTimeString().slice(0, 5) : undefined,
+      scheduled_end_time: r.scheduled_end ? new Date(r.scheduled_end).toTimeString().slice(0, 5) : undefined,
+      capacity_hours: r.estimated_hours,
+      rank: 0,
+      status: r.status as TaskAnalysis['status'],
+      calendar_event_id: r.calendar_event_id,
+      calendar_provider: r.source === 'google' || r.source === 'outlook' ? r.source : undefined,
+      createdAt: r.createdAt,
+    }));
+}
+
+export async function createWorkloadItem(item: Omit<TaskAnalysis, 'id' | 'createdAt'>): Promise<string> {
+  const id = uid();
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return id;
+
+    const scheduledStart = item.scheduled_date ? new Date(`${item.scheduled_date}T${item.scheduled_start_time || '00:00'}`).toISOString() : new Date().toISOString();
+    const scheduledEnd = item.scheduled_date ? new Date(`${item.scheduled_date}T${item.scheduled_end_time || '23:59'}`).toISOString() : new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from('workload_items')
+      .insert({
+        user_id: userId,
+        title: item.title,
+        category: item.category,
+        estimated_hours: item.estimated_duration_hours,
+        priority: item.priority,
+        source: item.calendar_provider || 'manual',
+        status: item.status || 'scheduled',
+        scheduled_start: scheduledStart,
+        scheduled_end: scheduledEnd,
+        calendar_event_id: item.calendar_event_id,
+      })
+      .select('id')
+      .single();
+
+    if (error) throw error;
+    return data?.id ?? id;
+  }
+
+  // Local store fallback
+  await writeDb((db) => {
+    db.workloadItems = db.workloadItems || [];
+    db.workloadItems.unshift({
+      id,
+      title: item.title,
+      category: item.category,
+      priority: item.priority,
+      estimated_hours: item.estimated_duration_hours,
+      scheduled_start: item.scheduled_date ? new Date(`${item.scheduled_date}T${item.scheduled_start_time || '00:00'}`).toISOString() : new Date().toISOString(),
+      scheduled_end: item.scheduled_date ? new Date(`${item.scheduled_date}T${item.scheduled_end_time || '23:59'}`).toISOString() : new Date().toISOString(),
+      status: item.status || 'scheduled',
+      calendar_event_id: item.calendar_event_id,
+      source: item.calendar_provider || 'manual',
+      createdAt: new Date().toISOString(),
+    });
+  });
+  return id;
+}
+
+export async function updateWorkloadItem(id: string, updates: Partial<TaskAnalysis>): Promise<void> {
+  if (hasSupabase) {
+    const patch: any = {};
+    if (updates.title) patch.title = updates.title;
+    if (updates.category) patch.category = updates.category;
+    if (updates.priority) patch.priority = updates.priority;
+    if (updates.estimated_duration_hours) patch.estimated_hours = updates.estimated_duration_hours;
+    if (updates.status) patch.status = updates.status;
+
+    if (updates.scheduled_date || updates.scheduled_start_time) {
+      const existing = await getWorkloadItemById(id);
+      if (existing) {
+        const date = updates.scheduled_date || existing.scheduled_date;
+        const start = updates.scheduled_start_time || existing.scheduled_start_time || '00:00';
+        patch.scheduled_start = new Date(`${date}T${start}`).toISOString();
+      }
+    }
+
+    if (updates.scheduled_date || updates.scheduled_end_time) {
+      const existing = await getWorkloadItemById(id);
+      if (existing) {
+        const date = updates.scheduled_date || existing.scheduled_date;
+        const end = updates.scheduled_end_time || existing.scheduled_end_time || '23:59';
+        patch.scheduled_end = new Date(`${date}T${end}`).toISOString();
+      }
+    }
+
+    if (updates.calendar_event_id) patch.calendar_event_id = updates.calendar_event_id;
+
+    const { error } = await supabase.from('workload_items').update(patch).eq('id', id);
+    if (error) throw error;
+  }
+
+  // Local store fallback
+  await writeDb((db) => {
+    const idx = (db.workloadItems || []).findIndex((item) => item.id === id);
+    if (idx >= 0) {
+      const item = db.workloadItems[idx];
+      const schedDate = updates.scheduled_date || (item.scheduled_start ? toISODate(new Date(item.scheduled_start)) : undefined);
+      const startTime = updates.scheduled_start_time || (item.scheduled_start ? new Date(item.scheduled_start).toTimeString().slice(0, 5) : undefined);
+      const endTime = updates.scheduled_end_time || (item.scheduled_end ? new Date(item.scheduled_end).toTimeString().slice(0, 5) : undefined);
+
+      db.workloadItems[idx] = {
+        ...item,
+        ...updates,
+        estimated_hours: updates.estimated_duration_hours ?? item.estimated_hours,
+        scheduled_start: (updates.scheduled_date || updates.scheduled_start_time) ? new Date(`${schedDate}T${startTime || '00:00'}`).toISOString() : item.scheduled_start,
+        scheduled_end: (updates.scheduled_date || updates.scheduled_end_time) ? new Date(`${schedDate}T${endTime || '23:59'}`).toISOString() : item.scheduled_end,
+      };
+    }
+  });
+}
+
+export async function deleteWorkloadItem(id: string): Promise<void> {
+  if (hasSupabase) {
+    const { error } = await supabase.from('workload_items').delete().eq('id', id);
+    if (error) throw error;
+  }
+
+  // Local store fallback
+  await writeDb((db) => {
+    db.workloadItems = (db.workloadItems || []).filter((item) => item.id !== id);
+  });
+}
+
+async function getWorkloadItemById(id: string): Promise<TaskAnalysis | null> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('workload_items')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (!data) return null;
+    return {
+      id: data.id,
+      title: data.title,
+      category: data.category,
+      priority: data.priority,
+      estimated_duration_hours: data.estimated_hours,
+      scheduled_date: toISODate(new Date(data.scheduled_start)),
+      scheduled_start_time: new Date(data.scheduled_start).toTimeString().slice(0, 5),
+      scheduled_end_time: data.scheduled_end ? new Date(data.scheduled_end).toTimeString().slice(0, 5) : undefined,
+      capacity_hours: data.estimated_hours,
+      rank: 0,
+      status: data.status,
+      calendar_event_id: data.calendar_event_id,
+      calendar_provider: data.source === 'google' || data.source === 'outlook' ? data.source : undefined,
+      createdAt: data.created_at,
+    };
+  }
+  return null;
+}
+
+export async function saveTaskAnalysis(analysis: TaskAnalysis): Promise<void> {
+  if (!isUuid(analysis.id)) {
+    analysis = { ...analysis, id: createTaskId() };
+  }
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) {
+      const error = new Error('Cannot save task analysis without an authenticated user');
+      console.error('saveTaskAnalysis authentication error:', error);
+      throw error;
+    }
+
+    const weekStart = analysis.week_start || toISODate();
+    const scheduledStart = analysis.scheduled_date
+        ? new Date(`${analysis.scheduled_date}T${analysis.scheduled_start_time || '00:00'}`).toISOString()
+        : new Date().toISOString();
+    const scheduledEnd = analysis.scheduled_date
+        ? new Date(`${analysis.scheduled_date}T${analysis.scheduled_end_time || '23:59'}`).toISOString()
+        : scheduledStart;
+
+    const payload = {
+        id: analysis.id,
+        user_id: userId,
+        week_start: weekStart,
+        title: analysis.title,
+        category: analysis.category,
+        priority: analysis.priority,
+        estimated_duration_hours: analysis.estimated_duration_hours,
+        scheduled_date: analysis.scheduled_date,
+        scheduled_start_time: analysis.scheduled_start_time,
+        scheduled_end_time: analysis.scheduled_end_time,
+        capacity_hours: analysis.capacity_hours,
+        rank: analysis.rank,
+        stress_score: analysis.stress_score,
+        ai_reasoning: analysis.ai_reasoning,
+        status: analysis.status || 'pending',
+        calendar_event_id: analysis.calendar_event_id,
+        calendar_provider: analysis.calendar_provider,
+      };
+
+    // Try upsert first (update if id already exists)
+    const { error: upsertError } = await supabase
+        .from('ai_task_analysis')
+        .upsert(payload, { onConflict: 'id' });
+
+    if (upsertError) {
+      console.error('saveTaskAnalysis database upsert failed:', upsertError);
+      throw upsertError;
+    }
+
+    // Supabase is authoritative when configured. Do not also write a local
+    // copy that can appear in the UI when the remote write failed.
+    return;
+  }
+
+  await writeDb((db) => {
+    db.taskAnalyses = db.taskAnalyses || [];
+    const idx = db.taskAnalyses.findIndex((t) => t.id === analysis.id);
+    if (idx >= 0) {
+      db.taskAnalyses[idx] = { ...db.taskAnalyses[idx], ...analysis };
+    } else {
+      db.taskAnalyses.push(analysis);
+    }
+  });
+}
+
+export async function getTaskAnalyses(weekStart?: string): Promise<TaskAnalysis[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      let query = supabase
+        .from('ai_task_analysis')
+        .select('*')
+        .eq('user_id', userId)
+        .order('rank', { ascending: true });
+
+      if (weekStart) {
+        query = query.eq('week_start', weekStart);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        console.error('getTaskAnalyses database query failed:', error);
+        throw error;
+      }
+      if (data && data.length > 0) {
+        return data.map((r: any) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          priority: r.priority,
+          estimated_duration_hours: r.estimated_duration_hours,
+          scheduled_date: r.scheduled_date,
+          scheduled_start_time: r.scheduled_start_time,
+          scheduled_end_time: r.scheduled_end_time,
+          capacity_hours: r.capacity_hours,
+          rank: r.rank,
+          ai_reasoning: r.ai_reasoning,
+          stress_score: r.stress_score,
+          status: r.status,
+          calendar_event_id: r.calendar_event_id,
+          calendar_provider: r.calendar_provider,
+          week_start: r.week_start,
+          createdAt: r.created_at,
+        }));
+      }
+
+      return [];
+    }
+  }
+
+  // Fallback to local store
+  const db = await readDb();
+  let list = db.taskAnalyses || [];
+  if (weekStart) {
+    list = list.filter((t) => t.week_start === weekStart);
+  }
+  return [...list].sort((a, b) => (a.rank || 0) - (b.rank || 0));
+}
+
+export async function approveTaskAnalysis(id: string, approved: boolean): Promise<void> {
+  const status = approved ? 'approved' : 'rejected';
+  if (hasSupabase && isUuid(id)) {
+    const { error } = await supabase
+      .from('ai_task_analysis')
+      .update({ status })
+      .eq('id', id);
+    if (error) {
+      console.error('approveTaskAnalysis database update failed:', error);
+      throw error;
+    }
+  }
+  let targetWeekStart: string | undefined;
+  await writeDb((db) => {
+    const item = (db.taskAnalyses || []).find((t) => t.id === id);
+    if (item) {
+      item.status = status;
+      targetWeekStart = item.week_start;
+    }
+  });
+  await recomputeCurrentWeekDerivedData(targetWeekStart);
+}
+
+/**
+ * Generic update for an AI task analysis row. Supports editing category,
+ * priority, rank, title, duration, schedule and status so the review UI can
+ * let the user override any auto-detected detail.
+ */
+export async function updateTaskAnalysis(
+  id: string,
+  patch: Partial<TaskAnalysis>,
+  skipDerivedRecompute = false
+): Promise<void> {
+  if (hasSupabase) {
+    const dbPatch: Record<string, unknown> = {};
+    if (patch.title !== undefined) dbPatch.title = patch.title;
+    if (patch.category !== undefined) dbPatch.category = patch.category;
+    if (patch.priority !== undefined) dbPatch.priority = patch.priority;
+    if (patch.rank !== undefined) dbPatch.rank = patch.rank;
+    if (patch.estimated_duration_hours !== undefined) dbPatch.estimated_duration_hours = patch.estimated_duration_hours;
+    if (patch.scheduled_date !== undefined) dbPatch.scheduled_date = patch.scheduled_date;
+    if (patch.scheduled_start_time !== undefined) dbPatch.scheduled_start_time = patch.scheduled_start_time;
+    if (patch.scheduled_end_time !== undefined) dbPatch.scheduled_end_time = patch.scheduled_end_time;
+    if (patch.status !== undefined) dbPatch.status = patch.status;
+    if (patch.stress_score !== undefined) dbPatch.stress_score = patch.stress_score;
+    if (patch.ai_reasoning !== undefined) dbPatch.ai_reasoning = patch.ai_reasoning;
+    if (patch.calendar_event_id !== undefined) dbPatch.calendar_event_id = patch.calendar_event_id;
+    if (patch.calendar_provider !== undefined) dbPatch.calendar_provider = patch.calendar_provider;
+    if (patch.week_start !== undefined) dbPatch.week_start = patch.week_start;
+    if (Object.keys(dbPatch).length > 0 && isUuid(id)) {
+      const { error } = await supabase.from('ai_task_analysis').update(dbPatch).eq('id', id);
+      if (error) {
+        console.error('updateTaskAnalysis database update failed:', error);
+        throw error;
+      }
+    }
+  }
+  let targetWeekStart: string | undefined = patch.week_start;
+  await writeDb((db) => {
+    const item = (db.taskAnalyses || []).find((t) => t.id === id);
+    if (item) {
+      Object.assign(item, patch);
+      if (!targetWeekStart) targetWeekStart = item.week_start;
+    }
+  });
+
+  if (!skipDerivedRecompute) {
+    await recomputeCurrentWeekDerivedData(targetWeekStart);
+  }
+}
+
+export async function deferTaskAnalysis(id: string, newDate?: string): Promise<void> {
+  const allTasks = await getTaskAnalyses();
+  const task = allTasks.find((item) => item.id === id);
+  const previousWeekStart = task?.week_start;
+  const deferredWeekStart = newDate
+    ? (() => {
+        const date = new Date(`${newDate}T00:00:00`);
+        const day = date.getDay();
+        date.setDate(date.getDate() - day + (day === 0 ? -6 : 1));
+        return toISODate(date);
+      })()
+    : previousWeekStart;
+
+  if (hasSupabase && isUuid(id)) {
+    const patch: any = { status: 'deferred' };
+    if (newDate) patch.scheduled_date = newDate;
+    if (deferredWeekStart) patch.week_start = deferredWeekStart;
+    const { error } = await supabase.from('ai_task_analysis').update(patch).eq('id', id);
+    if (error) {
+      console.error('deferTaskAnalysis database update failed:', error);
+      throw error;
+    }
+  }
+  let targetWeekStart: string | undefined;
+  await writeDb((db) => {
+    const item = (db.taskAnalyses || []).find((t) => t.id === id);
+    if (item) {
+      item.status = 'deferred';
+      if (newDate) item.scheduled_date = newDate;
+      if (deferredWeekStart) item.week_start = deferredWeekStart;
+    }
+  });
+  if (task?.calendar_event_id && newDate) {
+    await updateEventOnDeviceCalendar(task.calendar_event_id, {
+      title: task.title,
+      scheduled_date: newDate,
+      scheduled_start_time: task.scheduled_start_time,
+      scheduled_end_time: task.scheduled_end_time,
+    });
+  }
+  await recomputeCurrentWeekDerivedData(previousWeekStart);
+}
+
+export async function deleteTaskAnalysis(id: string): Promise<void> {
+  if (hasSupabase && isUuid(id)) {
+    const { error } = await supabase.from('ai_task_analysis').delete().eq('id', id);
+    if (error) {
+      console.error('deleteTaskAnalysis database delete failed:', error);
+      throw error;
+    }
+  }
+  let targetWeekStart: string | undefined;
+  await writeDb((db) => {
+    const item = (db.taskAnalyses || []).find((t) => t.id === id);
+    if (item) {
+      targetWeekStart = item.week_start;
+    }
+    db.taskAnalyses = (db.taskAnalyses || []).filter((t) => t.id !== id);
+  });
+  await recomputeCurrentWeekDerivedData(targetWeekStart);
+}
+
+export async function saveWeeklyCapacity(capacity: WeeklyCapacityAnalysis): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      await supabase.from('weekly_capacity_analyses').upsert({
+        user_id: userId,
+        week_start: capacity.week_start,
+        total_capacity_hours: capacity.total_capacity_hours,
+        used_capacity_hours: capacity.used_capacity_hours,
+        overload_warning: capacity.overload_warning,
+        category_breakdown: capacity.category_breakdown,
+        stress_score: capacity.stress_score,
+        ai_reasoning: capacity.ai_reasoning,
+      }, { onConflict: 'user_id,week_start' });
+    }
+  }
+  await writeDb((db) => {
+    db.weeklyCapacities = db.weeklyCapacities || [];
+    const idx = db.weeklyCapacities.findIndex((c) => c.week_start === capacity.week_start);
+    if (idx >= 0) {
+      db.weeklyCapacities[idx] = capacity;
+    } else {
+      db.weeklyCapacities.push(capacity);
+    }
+  });
+}
+
+export async function getWeeklyCapacity(weekStart?: string): Promise<WeeklyCapacityAnalysis | null> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      let query = supabase
+        .from('weekly_capacity_analyses')
+        .select('*')
+        .eq('user_id', userId);
+
+      if (weekStart) {
+        query = query.eq('week_start', weekStart);
+      } else {
+        query = query.order('week_start', { ascending: false }).limit(1);
+      }
+
+      const { data } = await query;
+      const row = data?.[0];
+      if (row) {
+        return {
+          id: row.id,
+          week_start: row.week_start,
+          total_capacity_hours: row.total_capacity_hours,
+          used_capacity_hours: row.used_capacity_hours,
+          overload_warning: row.overload_warning,
+          category_breakdown: row.category_breakdown || {},
+          stress_score: row.stress_score,
+          ai_reasoning: row.ai_reasoning,
+          createdAt: row.created_at,
+        };
+      }
+    }
+  }
+
+  // Fallback to local store
+  const db = await readDb();
+  const list = db.weeklyCapacities || [];
+  if (weekStart) {
+    return list.find((c) => c.week_start === weekStart) || null;
+  }
+  return list[list.length - 1] || null;
+}
+
+export async function saveChatLog(message: string, sender: 'user' | 'ai', taskId?: string): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      await supabase.from('task_chat_logs').insert({
+        user_id: userId,
+        message,
+        sender,
+        task_id: taskId,
+      });
+    }
+  }
+}
+
+export async function getChatLogs(limit = 50): Promise<Array<{ message: string; sender: string; createdAt: string }>> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      const { data } = await supabase
+        .from('task_chat_logs')
+        .select('message, sender, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      return (data ?? []).reverse().map((r: any) => ({
+        message: r.message,
+        sender: r.sender,
+        createdAt: r.created_at,
+      }));
+    }
+  }
+  return [];
+}
+
+/**
+ * Two-way task creation: Adds to device native calendar + persists in database + re-evaluates capacity.
+ */
+/**
+ * Recomputes and persists all derived data for the given week:
+ * 1. Re-ranks active tasks (Priority High > Medium > Low, then stress score / schedule; completed/deferred to bottom)
+ * 2. Analyzes weekly capacity with AI / heuristics
+ * 3. Persists WeeklyCapacityAnalysis to DB
+ * 4. Recomputes fused stress score
+ */
+export async function recomputeCurrentWeekDerivedData(
+  weekStartStr?: string
+): Promise<WeeklyCapacityAnalysis | null> {
+  const now = new Date();
+  const weekStart =
+    weekStartStr ||
+    (() => {
+      const d = new Date(now);
+      const day = d.getDay();
+      const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+      d.setDate(diff);
+      return toISODate(d);
+    })();
+
+  const allTasks = await getTaskAnalyses(weekStart);
+
+  // Re-rank active tasks
+  const priorityWeight: Record<string, number> = { high: 3, medium: 2, low: 1 };
+  const sorted = [...allTasks].sort((a, b) => {
+    if (a.status === 'completed' && b.status !== 'completed') return 1;
+    if (b.status === 'completed' && a.status !== 'completed') return -1;
+    if (a.status === 'deferred' && b.status !== 'deferred') return 1;
+    if (b.status === 'deferred' && a.status !== 'deferred') return -1;
+
+    const pDiff = (priorityWeight[b.priority] || 2) - (priorityWeight[a.priority] || 2);
+    if (pDiff !== 0) return pDiff;
+    return (b.stress_score ?? 50) - (a.stress_score ?? 50);
+  });
+
+  // Assign and persist new ranks if changed
+  for (let i = 0; i < sorted.length; i++) {
+    const newRank = i + 1;
+    if (sorted[i].rank !== newRank) {
+      sorted[i].rank = newRank;
+      await updateTaskAnalysis(sorted[i].id, { rank: newRank }, true);
+    }
+  }
+
+  const perceivedStress = await getBaseline();
+  const { analyzeWeeklyCapacity } = await import('@/services/aiService');
+  const activeTasks = sorted.filter((t) => t.status !== 'rejected' && t.status !== 'deferred');
+
+  let capacity: WeeklyCapacityAnalysis;
+  try {
+    capacity = await analyzeWeeklyCapacity(activeTasks, {
+      perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
+    });
+  } catch (err) {
+    console.error('recomputeCurrentWeekDerivedData: analyzeWeeklyCapacity failed:', err);
+    capacity = {
+      week_start: weekStart,
+      total_capacity_hours: 40,
+      used_capacity_hours: activeTasks.reduce((acc, t) => acc + (t.estimated_duration_hours || 1), 0),
+      overload_warning: false,
+      category_breakdown: {},
+      stress_score: 50,
+      ai_reasoning: 'Calculated from active scheduled tasks.',
+    };
+  }
+
+  const capacityRecord: WeeklyCapacityAnalysis = {
+    ...capacity,
+    week_start: weekStart,
+  };
+
+  await saveWeeklyCapacity(capacityRecord);
+
+  // Recompute fused stress score
+  try {
+    await recomputeFusedScore(capacityRecord.stress_score);
+  } catch (e) {
+    console.error('recomputeFusedScore error:', e);
+  }
+
+  return capacityRecord;
+}
+
+/**
+ * Two-way task creation: Adds to device native calendar + persists in database + re-evaluates capacity.
+ */
+export async function createAndSyncTask(task: Omit<TaskAnalysis, 'id' | 'createdAt'>): Promise<string> {
+  // 1. Sync to phone native calendar
+  const calEventId = await addEventToDeviceCalendar({
+    title: task.title,
+    scheduled_date: task.scheduled_date,
+    scheduled_start_time: task.scheduled_start_time,
+    scheduled_end_time: task.scheduled_end_time,
+  });
+
+  const now = new Date();
+  const day = now.getDay();
+  const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+  const weekStartDate = new Date(now);
+  weekStartDate.setDate(diff);
+  const weekStartStr = toISODate(weekStartDate);
+
+  const id = uid();
+  const taskRecord: TaskAnalysis = {
+    ...task,
+    id,
+    week_start: task.week_start || weekStartStr,
+    calendar_event_id: calEventId || undefined,
+    status: 'approved',
+    createdAt: new Date().toISOString(),
+  };
+
+  // 2. Persist in database
+  await saveTaskAnalysis(taskRecord);
+  try {
+    await createWorkloadItem(taskRecord);
+  } catch (e) {
+    // workload item insert optional
+  }
+
+  // 3. Re-evaluate all derived data
+  await recomputeCurrentWeekDerivedData(taskRecord.week_start);
+
+  return id;
+}
+
+/**
+ * Two-way task deletion: Deletes from device native calendar + removes from database + re-evaluates capacity.
+ */
+export async function deleteAndSyncTask(taskId: string, calendarEventId?: string): Promise<void> {
+  // 1. Delete from phone native calendar
+  if (calendarEventId) {
+    await deleteEventFromDeviceCalendar(calendarEventId);
+  }
+
+  // 2. Delete from database
+  await deleteTaskAnalysis(taskId);
+  if (hasSupabase) {
+    await supabase.from('workload_items').delete().eq('id', taskId);
+  }
+  await writeDb((db) => {
+    db.workloadItems = (db.workloadItems || []).filter((w) => w.id !== taskId);
+  });
+}
+
+/**
+ * Removes all task analyses, workload items, and capacity records that do NOT
+ * belong to the given current-week start date. Keeps the database focused on
+ * the active week only.
+ */
+export async function deleteTasksOutsideWeek(currentWeekStart: string): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (userId) {
+      await supabase
+        .from('ai_task_analysis')
+        .delete()
+        .eq('user_id', userId)
+        .neq('week_start', currentWeekStart);
+      await supabase
+        .from('weekly_capacity_analyses')
+        .delete()
+        .eq('user_id', userId)
+        .neq('week_start', currentWeekStart);
+    }
+  }
+
+  await writeDb((db) => {
+    db.taskAnalyses = (db.taskAnalyses || []).filter(
+      (t) => t.week_start === currentWeekStart
+    );
+    db.weeklyCapacities = (db.weeklyCapacities || []).filter(
+      (c) => c.week_start === currentWeekStart
+    );
+  });
+}
+
+/**
+ * Syncs calendar events into the database for the active week WITHOUT running AI:
+ * - Match task/calendar ID or (title + date + time) to prevent duplicate workloads
+ * - New -> insert into DB as pending
+ * - Unchanged -> skip
+ * - Changed -> update date/time/title in DB
+ */
+export async function syncCalendarToDb(weekStartStr?: string): Promise<{
+  tasksCreated: number;
+  tasksUpdated: number;
+  totalEvents: number;
+  changedTaskIds: string[];
+}> {
+  try {
+    const connections = await getCalendarConnections();
+    const hasConnection = connections.some((c) => c.connected);
+    if (!hasConnection) return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0, changedTaskIds: [] };
+
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const weekStartDate = new Date(now);
+    weekStartDate.setDate(diff);
+    const targetWeekStart = weekStartStr || toISODate(weekStartDate);
+
+    // Purge previous/next-week data so the DB only holds the current week
+    await deleteTasksOutsideWeek(targetWeekStart);
+
+    const allEvents = await syncCalendarEvents();
+    if (allEvents.error) {
+      console.error('syncCalendarToDb calendar error:', allEvents.error);
+      return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0, changedTaskIds: [] };
+    }
+
+    const existingTasks = await getTaskAnalyses(targetWeekStart);
+
+    let created = 0;
+    let updated = 0;
+    const changedTaskIds: string[] = [];
+
+    for (const ev of allEvents) {
+      const start = ev.startDate ? new Date(ev.startDate) : new Date();
+      const end = ev.endDate ? new Date(ev.endDate) : undefined;
+
+      // The calendar's raw times are irrelevant for an all-day event, but the
+      // *date* is not — use the local date of the event so an early-morning
+      // meeting never lands on yesterday.
+      const evStartDate = toISODate(start);
+      const evStartTime = start.toTimeString().slice(0, 5);
+      const evEndTime = end ? end.toTimeString().slice(0, 5) : undefined;
+
+      const durationHours = end
+        ? Math.max(0.25, (end.getTime() - start.getTime()) / (1000 * 60 * 60))
+        : 1;
+      const matchesByCalendarId = existingTasks.filter(
+        (t) => t.calendar_event_id && t.calendar_event_id === ev.id
+      );
+      const existing = matchesByCalendarId[0] || existingTasks.find(
+        (t) =>
+          t.id === ev.id ||
+          (t.title.toLowerCase().trim() === ev.title.toLowerCase().trim() &&
+            t.scheduled_date === evStartDate &&
+            (t.scheduled_start_time || '') === evStartTime)
+      );
+
+      for (const duplicate of matchesByCalendarId.slice(1)) {
+        await deleteTaskAnalysis(duplicate.id);
+        const duplicateIndex = existingTasks.findIndex((t) => t.id === duplicate.id);
+        if (duplicateIndex >= 0) existingTasks.splice(duplicateIndex, 1);
+      }
+
+      if (!existing) {
+        // Insert new task without duplicates
+        const newTask: TaskAnalysis = {
+          id: createTaskId(),
+          title: ev.title || 'Untitled Event',
+          category: '',
+          priority: 'medium',
+          estimated_duration_hours: durationHours,
+          scheduled_date: evStartDate,
+          scheduled_start_time: evStartTime,
+          scheduled_end_time: evEndTime,
+          allDay: Boolean(ev.allDay),
+          capacity_hours: durationHours,
+          rank: existingTasks.length + created + 1,
+          stress_score: 50,
+          ai_reasoning: 'Synced from device calendar.',
+          status: 'pending',
+          calendar_event_id: ev.id,
+          calendar_provider: 'device',
+          week_start: targetWeekStart,
+          createdAt: new Date().toISOString(),
+        };
+        await saveTaskAnalysis(newTask);
+        existingTasks.push(newTask);
+        changedTaskIds.push(newTask.id);
+        created++;
+      } else {
+        const isChanged =
+          existing.title !== ev.title ||
+          existing.scheduled_date !== evStartDate ||
+          (existing.scheduled_start_time || '') !== evStartTime ||
+          (existing.scheduled_end_time || '') !== (evEndTime || '');
+
+        if (isChanged) {
+          await updateTaskAnalysis(
+            existing.id,
+            {
+              title: ev.title,
+              scheduled_date: evStartDate,
+              scheduled_start_time: evStartTime,
+              scheduled_end_time: evEndTime,
+              allDay: Boolean(ev.allDay),
+              estimated_duration_hours: durationHours,
+              calendar_event_id: ev.id,
+              calendar_provider: 'device',
+            },
+            true
+          );
+          changedTaskIds.push(existing.id);
+          updated++;
+        }
+      }
+    }
+
+    const eventIds = new Set(allEvents.map((event) => event.id));
+    for (const task of [...existingTasks]) {
+      if (
+        task.calendar_provider === 'device' &&
+        task.calendar_event_id &&
+        !eventIds.has(task.calendar_event_id)
+      ) {
+        await deleteTaskAnalysis(task.id);
+      }
+    }
+
+    return {
+      tasksCreated: created,
+      tasksUpdated: updated,
+      totalEvents: allEvents.length,
+      changedTaskIds,
+    };
+  } catch (err) {
+    console.error('syncCalendarToDb error:', err);
+    return { tasksCreated: 0, tasksUpdated: 0, totalEvents: 0, changedTaskIds: [] };
+  }
+}
+
+/**
+ * Runs AI task analysis on the active week's tasks in the DB.
+ */
+export async function analyzeCurrentWeekTasks(
+  weekStartStr?: string,
+  taskIds?: string[]
+): Promise<TaskAnalysis[]> {
+  try {
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const weekStartDate = new Date(now);
+    weekStartDate.setDate(diff);
+    const targetWeekStart = weekStartStr || toISODate(weekStartDate);
+
+    const allTasks = await getTaskAnalyses(targetWeekStart);
+    const tasks = taskIds
+      ? allTasks.filter((task) => taskIds.includes(task.id))
+      : allTasks.filter((task) => task.status === 'pending');
+    if (tasks.length === 0) return allTasks;
+
+    const eventsToAnalyze: CalendarEventItem[] = tasks.map((t) => {
+      const startTime = t.scheduled_start_time || '09:00';
+      const endTime = t.scheduled_end_time || '10:00';
+      return {
+        id: t.calendar_event_id || t.id,
+        title: t.title,
+        startDate: `${t.scheduled_date}T${startTime}:00`,
+        endDate: `${t.scheduled_date}T${endTime}:00`,
+      };
+    });
+
+    const perceivedStress = await getBaseline();
+    const { analyzeCalendarTasks } = await import('@/services/aiService');
+    const analyzedTasks = await analyzeCalendarTasks(eventsToAnalyze, {
+      perceivedStressBaseline: perceivedStress.perceivedStressBaseline ?? undefined,
+    });
+
+    for (const t of tasks) {
+      const analyzed =
+        analyzedTasks.find((a) => a.id === t.calendar_event_id || a.id === t.id) ||
+        analyzedTasks.find((a) => a.title.toLowerCase().trim() === t.title.toLowerCase().trim());
+
+      if (analyzed) {
+        await updateTaskAnalysis(
+          t.id,
+          {
+            category: analyzed.category || t.category,
+            priority: analyzed.priority || t.priority,
+            estimated_duration_hours: analyzed.estimated_duration_hours || t.estimated_duration_hours,
+            stress_score: analyzed.stress_score ?? t.stress_score,
+            ai_reasoning: analyzed.ai_reasoning || t.ai_reasoning,
+            rank: analyzed.rank || t.rank,
+          },
+          true
+        );
+      }
+    }
+
+    await recomputeCurrentWeekDerivedData(targetWeekStart);
+    return await getTaskAnalyses(targetWeekStart);
+  } catch (err) {
+    console.error('analyzeCurrentWeekTasks error:', err);
+    return await getTaskAnalyses(weekStartStr);
+  }
+}
+
+/**
+ * Syncs calendar events for the active week with differential matching:
+ * - Match task/calendar ID
+ * - New -> insert into DB and run AI analysis
+ * - Unchanged -> skip AI analysis and skip DB update
+ * - Changed -> update DB and run AI analysis
+ * - AI failure/errors -> console.error()
+ * - Recomputes all derived data
+ */
+export async function syncAndAnalyzeCalendar(): Promise<{
+  tasksCreated: number;
+  tasksUpdated: number;
+  capacityAnalyzed: boolean;
+}> {
+  try {
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const currentWeekDate = new Date(now);
+    currentWeekDate.setDate(diff);
+    const currentWeekStart = toISODate(currentWeekDate);
+    const syncRes = await syncCalendarToDb(currentWeekStart);
+    if (syncRes.changedTaskIds.length > 0) {
+      await analyzeCurrentWeekTasks(currentWeekStart, syncRes.changedTaskIds);
+    }
+    await recomputeCurrentWeekDerivedData(currentWeekStart);
+    return {
+      tasksCreated: syncRes.tasksCreated,
+      tasksUpdated: syncRes.tasksUpdated,
+      capacityAnalyzed: true,
+    };
+  } catch (err) {
+    console.error('syncAndAnalyzeCalendar error:', err);
+    return { tasksCreated: 0, tasksUpdated: 0, capacityAnalyzed: false };
+  }
+}
+
+/* ── Recovery garden: wallet & owned items ───────────────────────── */
+
+/**
+ * The user's current seed balance. Seeds are only ever positive; a deficit
+ * cannot exist, so callers must spend via purchaseGardenItem which checks.
+ */
+export async function getGardenWallet(): Promise<GardenWallet> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return { seeds: 0 };
+    const { data } = await supabase
+      .from('garden_wallet')
+      .select('seeds, updated_at')
+      .eq('user_id', userId)
+      .maybeSingle();
+    return { seeds: data?.seeds ?? 0, updatedAt: data?.updated_at ?? new Date().toISOString() };
+  }
+  const db = await readDb();
+  return { seeds: db.gardenWallet?.seeds ?? 0, updatedAt: db.gardenWallet?.updatedAt };
+}
+
+/** Adjusts the seed balance by a signed amount, never dropping below zero. */
+export async function earnSeeds(amount: number): Promise<GardenWallet> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return { seeds: 0 };
+    const current = await getGardenWallet();
+    const next = Math.max(0, current.seeds + Math.round(amount));
+    const updatedAt = new Date().toISOString();
+    const { error } = await supabase
+      .from('garden_wallet')
+      .upsert({ user_id: userId, seeds: next, updated_at: updatedAt }, { onConflict: 'user_id' });
+    if (error) throw error;
+    return { seeds: next, updatedAt };
+  }
+  let wallet: GardenWallet = { seeds: 0, updatedAt: new Date().toISOString() };
+  await writeDb((db) => {
+    const current = db.gardenWallet?.seeds ?? 0;
+    db.gardenWallet = { seeds: Math.max(0, current + Math.round(amount)), updatedAt: new Date().toISOString() };
+    wallet = db.gardenWallet;
+  });
+  return wallet;
+}
+
+/** What the user owns in their garden, oldest first. */
+export async function getGardenItems(): Promise<GardenItem[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return [];
+    const { data } = await supabase
+      .from('garden_items')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: true });
+    return (data ?? []).map((r: any) => ({
+      id: r.id,
+      itemKey: r.item_key,
+      name: r.name,
+      emoji: r.emoji,
+      kind: r.kind,
+      placedAt: r.created_at ?? r.placed_at,
+      position: r.position ?? undefined,
+    }));
+  }
+  const db = await readDb();
+  return db.gardenItems ?? [];
+}
+
+/** Updates the position of a garden item (drag-to-decorate). */
+export async function updateGardenItemPosition(
+  itemId: string,
+  position: { x: number; y: number }
+): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return;
+    await supabase
+      .from('garden_items')
+      .update({ position })
+      .eq('id', itemId)
+      .eq('user_id', userId);
+    return;
+  }
+  await writeDb((db) => {
+    db.gardenItems = (db.gardenItems ?? []).map((item) =>
+      item.id === itemId ? { ...item, position } : item
+    );
+  });
+}
+
+/** Spends seeds on a catalogue item and adds it to the garden. */
+export async function purchaseGardenItem(
+  item: { key: string; name: string; emoji: string; kind: 'plant' | 'flower' | 'pet' | 'decoration' },
+  cost: number
+): Promise<GardenItem> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) throw new Error('Sign in to grow your garden.');
+    const wallet = await getGardenWallet();
+    if (wallet.seeds < cost) throw new Error('Not enough seeds yet. Complete a recovery activity to earn more.');
+    // Default position: grid layout based on existing item count
+    const existing = await getGardenItems();
+    const position = defaultPositionForIndex(existing.length);
+    const base = { user_id: userId, item_key: item.key, name: item.name, emoji: item.emoji, kind: item.kind };
+    // The item is written first and the seeds are only spent once it exists:
+    // deducting first meant a failed insert silently ate the user's seeds and
+    // left nothing in the garden. `position` is added on a best-effort basis —
+    // a project whose garden_items predates that column still gets the item
+    // rather than an error, and it simply falls back to the default layout.
+    let { data, error } = await supabase
+      .from('garden_items')
+      .insert({ ...base, position })
+      .select()
+      .single();
+    if (error && /position/i.test(error.message)) {
+      ({ data, error } = await supabase.from('garden_items').insert(base).select().single());
+    }
+    if (error) throw error;
+    await earnSeeds(-cost);
+    return {
+      id: data.id,
+      itemKey: data.item_key,
+      name: data.name,
+      emoji: data.emoji,
+      kind: data.kind,
+      placedAt: data.created_at,
+      position: data.position ?? position,
+    };
+  }
+  let created!: GardenItem;
+  const wallet = await getGardenWallet();
+  if (wallet.seeds < cost) throw new Error('Not enough seeds yet. Complete a recovery activity to earn more.');
+  await writeDb((db) => {
+    db.gardenWallet = { seeds: db.gardenWallet.seeds - cost, updatedAt: new Date().toISOString() };
+    created = {
+      id: uid(),
+      itemKey: item.key,
+      name: item.name,
+      emoji: item.emoji,
+      kind: item.kind,
+      placedAt: new Date().toISOString(),
+      position: defaultPositionForIndex(db.gardenItems?.length ?? 0),
+    };
+    db.gardenItems = [...(db.gardenItems ?? []), created];
+  });
+  return created;
+}
+
+/** Compute a default grid position for the nth garden item (0-indexed). */
+function defaultPositionForIndex(index: number): { x: number; y: number } {
+  const cols = 4;
+  const col = index % cols;
+  const row = Math.floor(index / cols);
+  // Spread items across the garden area (10% margin, evenly spaced)
+  const x = 10 + col * (80 / (cols - 1 || 1));
+  const y = 10 + row * 25;
+  return { x, y };
+}
+
+/** Gives the very first starter item when the garden is empty. */
+export async function ensureStarterGardenItem(): Promise<GardenItem | null> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    if (!userId) return null;
+    const items = await getGardenItems();
+    if (items.length > 0) return null;
+    await earnSeeds(20);
+    const position = { x: 50, y: 50 };
+    const base = { user_id: userId, item_key: 'starter', name: 'Your first sprout', emoji: '🌱', kind: 'plant' };
+    // Same fallback as purchaseGardenItem: if this project's garden_items has no
+    // `position` column yet, plant the starter without it instead of failing the
+    // whole garden load over an optional layout hint.
+    let { data, error } = await supabase
+      .from('garden_items')
+      .insert({ ...base, position })
+      .select()
+      .single();
+    if (error && /position/i.test(error.message)) {
+      ({ data, error } = await supabase.from('garden_items').insert(base).select().single());
+    }
+    if (error) throw error;
+    return {
+      id: data.id,
+      itemKey: data.item_key,
+      name: data.name,
+      emoji: data.emoji,
+      kind: data.kind,
+      placedAt: data.created_at,
+      position: data.position ?? position,
+    };
+  }
+  const db = await readDb();
+  if ((db.gardenItems ?? []).length > 0) return null;
+  await earnSeeds(20);
+  let created!: GardenItem;
+  await writeDb((inner) => {
+    created = {
+      id: uid(),
+      itemKey: 'starter',
+      name: 'Your first sprout',
+      emoji: '🌱',
+      kind: 'plant',
+      placedAt: new Date().toISOString(),
+      position: { x: 50, y: 50 },
+    };
+    inner.gardenItems = [created];
+  });
+  return created;
+}
 

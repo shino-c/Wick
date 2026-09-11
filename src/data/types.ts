@@ -181,95 +181,201 @@ export interface SupportNudge {
   seenAt: string | null;
 }
 
-/* ── Pillar 1: Workload, Calendar Sync & Load Balancer ───────────── */
+/* ── Calendar & Workload Types ─────────────────────────────────────────── */
 
-export type WorkloadCategory = 'academic' | 'social' | 'physical' | 'errands' | 'mental';
-export type WorkloadPriority = 'low' | 'medium' | 'high';
-export type WorkloadSource = 'google' | 'outlook' | 'manual';
-export type WorkloadStatus = 'scheduled' | 'deferred' | 'completed';
+export interface CalendarConnection {
+  provider: string;
+  connected: boolean;
+  accountEmail?: string;
+  lastSyncedAt?: string;
+}
+
+export interface CalendarEventItem {
+  id: string;
+  title: string;
+  startDate: string;
+  endDate: string;
+  allDay?: boolean;
+  location?: string | null;
+  notes?: string | null;
+}
+
+export type CalendarEvent = CalendarEventItem;
+
+export type TaskCategory =
+  | 'academic'
+  | 'work'
+  | 'social'
+  | 'physical'
+  | 'mental'
+  | 'errands'
+  | 'other';
+
+export type TaskPriority = 'high' | 'medium' | 'low';
+
+export interface TaskAnalysis {
+  id: string;
+  title: string;
+  category: string;
+  priority: TaskPriority;
+  estimated_duration_hours: number;
+  scheduled_date: string;
+  scheduled_start_time?: string;
+  scheduled_end_time?: string;
+  /** True when the calendar event spans a whole day (blocks the full day). */
+  allDay?: boolean;
+  capacity_hours?: number;
+  rank: number;
+  ai_reasoning?: string;
+  stress_score?: number;
+  status: 'pending' | 'approved' | 'rejected' | 'scheduled' | 'completed' | 'deferred';
+  calendar_event_id?: string;
+  calendar_provider?: 'device' | 'google' | 'outlook' | string;
+  week_start?: string;
+  createdAt?: string;
+}
 
 export interface WorkloadItem {
   id: string;
   title: string;
-  category: WorkloadCategory;
-  estimatedHours: number;
-  priority: WorkloadPriority;
-  source: WorkloadSource;
-  status: WorkloadStatus;
-  scheduledStart: string | null;
-  scheduledEnd: string | null;
-  createdAt: string;
+  category: string;
+  priority: TaskPriority;
+  estimated_hours: number;
+  scheduled_start?: string;
+  scheduled_end?: string;
+  status: string;
+  calendar_event_id?: string;
+  source?: string;
+  createdAt?: string;
 }
 
-export interface CalendarConnection {
-  provider: 'google' | 'outlook';
-  connected: boolean;
-  accountEmail: string | null;
-  lastSyncedAt: string;
+export interface WeeklyCapacityAnalysis {
+  id?: string;
+  week_start: string;
+  total_capacity_hours: number;
+  used_capacity_hours: number;
+  overload_warning: boolean;
+  category_breakdown: Record<string, number>;
+  stress_score: number;
+  ai_reasoning?: string;
+  createdAt?: string;
 }
 
-export interface CategoryLoadSummary {
-  category: WorkloadCategory;
-  name: string;
-  emoji: string;
-  hours: number;
-  percentage: number;
-  taskCount: number;
-  topDescription: string;
-  items: WorkloadItem[];
+export interface LoadBalanceSuggestion {
+  taskId: string;
+  taskTitle: string;
+  reason: string;
+  suggestedDate?: string;
+  hoursSaved: number;
 }
 
-export interface WorkloadAnalysis {
-  totalCapacityPct: number;
-  weeklyHours: number;
-  capacityMaxHours: number;
-  categoryBreakdown: Record<WorkloadCategory, CategoryLoadSummary>;
-  spikingCategory: WorkloadCategory | null;
-  isOverloaded: boolean;
-  recommendedDeferrals: WorkloadItem[];
-}
+/* ── Pillar 5: recovery & garden ─────────────────────────────────── */
 
-export interface RankedTask extends WorkloadItem {
-  rank: number;
-  dayName: string;
-  timeFormatted: string;
-}
-
-export interface DailyStressPoint {
-  dayIndex: number; // 0..6
-  dayLabel: string; // 'M', 'T', 'W', 'T', 'F', 'S', 'S'
-  fullDate: string; // YYYY-MM-DD
-  stressScore: number;
-  biometricScore: number | null;
-  selfReportScore: number | null;
-  loadScore: number;
-  isPeak: boolean;
-  isToday: boolean;
-}
-
-export interface WeeklyStressAnalysis {
-  points: DailyStressPoint[];
-  peakDay: string;
-  peakScore: number;
-  domainDriver: string;
-  driverPercentage: number;
-  insight: string;
-  fusedScore: number;
-  confidence: 'Low' | 'Medium' | 'High';
-  biometricScore: number | null;
-  selfReportScore: number | null;
-  loadScore: number | null;
-}
-
+/** One day of recovery activity, keyed by ISO date. */
 export interface RecoveryDay {
   date: string;
   completedPlanIds: string[];
-  gameCompleted: boolean;
-  gameMinutes: number;
-  outdoorCompleted: boolean;
-  /** The device-calendar event Wick reserved for today's recovery, when available. */
+  gameCompleted?: boolean;
+  gameMinutes?: number;
+  outdoorCompleted?: boolean;
   recoveryEventId?: string | null;
   recoveryEventStart?: string | null;
-  recoveryPct: number;
-  updatedAt: string;
+  recoveryPct?: number;
+  updatedAt?: string;
 }
+
+/** A real gap in today's schedule, as "HH:MM" label + minutes of freedom. */
+export interface AvailableSlot {
+  start: string;
+  end: string;
+  minutes: number;
+}
+
+/** One gentle, optional recovery suggestion matched to a free slot. */
+export interface RecoverySuggestion {
+  id: string;
+  emoji: string;
+  title: string;
+  detail: string;
+  minutes: number;
+  reason: string;
+  slot?: AvailableSlot;
+  /**
+   * When set, this suggestion is a shared challenge from the Social page, not a
+   * timed pause. It is a fixed plan with a set time, so it does not need a free
+   * slot — the circle holds the time for you.
+   */
+  challengeId?: string;
+  /** Whether the user already joined this challenge (it then reads as a fixed plan). */
+  challengeJoined?: boolean;
+  /** The challenge's raw schedule, formatted on the client via formatSchedule(). */
+  challengeScheduledFor?: string | null;
+  /**
+   * How "done" is actually measured. A plan is never finished by tapping a
+   * button — `steps` is met by the pedometer, `minutes` by a real timer.
+   */
+  targetType: 'steps' | 'minutes';
+  /** The real target: number of steps, or number of minutes. */
+  targetValue: number;
+}
+
+/**
+ * A started recovery plan. Persisted so progress and completion survive
+ * reloads and reflect real tracking, never a guessed "done".
+ */
+export interface RecoveryPlanSession {
+  id: string;
+  /** The recovery day the plan belongs to (ISO date). */
+  date: string;
+  /** The plan / suggestion id this session belongs to. */
+  planKey: string;
+  title: string;
+  emoji: string;
+  detail?: string | null;
+  targetType: 'steps' | 'minutes' | 'none';
+  targetValue: number;
+  /** Current measured progress: steps taken, or minutes elapsed. */
+  progressValue: number;
+  status: 'started' | 'completed';
+  startedAt: string;
+  completedAt?: string | null;
+  /** Whether the one-time seed reward was already granted for this session. */
+  rewardAwarded?: boolean;
+  createdAt: string;
+}
+
+/** The day's plan: free time plus a few gentle optional suggestions. */
+export interface DailyRecoveryPlan {
+  date: string;
+  slots: AvailableSlot[];
+  suggestions: RecoverySuggestion[];
+  note: string;
+}
+
+/** Seed balance held by the user to grow their garden. */
+export interface GardenWallet {
+  seeds: number;
+  updatedAt?: string;
+}
+
+/** A purchasable garden object (static catalogue entry). */
+export interface GardenCatalogItem {
+  key: string;
+  name: string;
+  emoji: string;
+  kind: 'plant' | 'flower' | 'pet' | 'decoration';
+  seeds: number;
+}
+
+/** An item the user owns, persisted in the garden. */
+export interface GardenItem {
+  id: string;
+  itemKey: string;
+  name: string;
+  emoji: string;
+  kind: 'plant' | 'flower' | 'pet' | 'decoration';
+  placedAt?: string;
+  /** Relative position in the garden (0-100% of width/height). Used for drag-to-decorate. */
+  position?: { x: number; y: number };
+}
+

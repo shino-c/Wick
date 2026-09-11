@@ -1,51 +1,95 @@
-import * as Haptics from "expo-haptics";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
-import { LinearGradient } from "expo-linear-gradient";
+import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
-import {
-	Check,
-	RefreshCw,
-	Volume2,
-	VolumeX,
-} from "lucide-react-native";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	Animated,
 	Pressable,
 	ScrollView,
 	StyleSheet,
 	Text,
-	View
+	View,
 } from "react-native";
 import { NavBar, Screen } from "../components/base";
-import { recordRecoveryMinute } from "../services/recoveryService";
+import { earnSeeds } from "../services/repository";
 
 const BUBBLE_COUNT = 25;
-const REWARD_SECONDS = 60;
+/** Every completed 30 seconds of play adds 5 seeds to the garden. */
+const SEED_REWARD_SECONDS = 30;
+const SEED_REWARD_AMOUNT = 5;
+
+/**
+ * Bubbles pop once every ~700ms at most; a slightly higher cap keeps up with
+ * a fast thumb without stacking so many voices that it turns into a drone.
+ */
+const MAX_CONCURRENT_POPS = 6;
+const POP_REPLAY_GAP_MS = 70;
+
+/**
+ * The pop sound. Drop the file at `assets/bubble-pop.wav` — it is required
+ * lazily and inside a try/catch so the screen still runs before it exists.
+ */
+function loadBubblePopSource() {
+	try {
+		return require("../assets/sounds/bubble-pop.mp3");
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * A tiny fixed pool of preloaded players. `useAudioPlayer` creates exactly one
+ * voice, so a second tap would restart the first and the board would sound
+ * glitchy under a fast thumb. Each `play(voice)` on the return value is fired
+ * on the native side, so taps never wait on the UI thread.
+ */
+function useAudioPlayers(source: number | null) {
+	const p0 = useAudioPlayer(source ?? undefined);
+	const p1 = useAudioPlayer(source ?? undefined);
+	const p2 = useAudioPlayer(source ?? undefined);
+	const p3 = useAudioPlayer(source ?? undefined);
+	const p4 = useAudioPlayer(source ?? undefined);
+	const p5 = useAudioPlayer(source ?? undefined);
+
+	return useMemo(
+		() => ({
+			seekTo: (voice: number, seconds: number) =>
+				[p0, p1, p2, p3, p4, p5][voice]?.seekTo(seconds),
+			play: (voice: number) => {
+				const player = [p0, p1, p2, p3, p4, p5][voice];
+				if (!player) return;
+				// A voice that just finished needs to rewind before it can re-fire.
+				if (player.playing) player.seekTo(0);
+				player.play();
+			},
+		}),
+		[p0, p1, p2, p3, p4, p5]
+	);
+}
 
 const PALETTE = [
 	{
-		colors: ["#FFF9EB", "#FCE8BD"] as const,
+		light: "#FFF9EB",
 		border: "#F2D79E",
 		spark: "#E8A855",
 	},
 	{
-		colors: ["#FFEFEA", "#FCD3C7"] as const,
+		light: "#FFEFEA",
 		border: "#F3B4A3",
 		spark: "#E07A5F",
 	},
 	{
-		colors: ["#F0F7EE", "#CFE7CA"] as const,
+		light: "#F0F7EE",
 		border: "#A8D3A2",
 		spark: "#6A994E",
 	},
 	{
-		colors: ["#F6F2FF", "#DED4F7"] as const,
+		light: "#F6F2FF",
 		border: "#BFB0ED",
 		spark: "#9B84D3",
 	},
 	{
-		colors: ["#EFF7FD", "#CAE5FA"] as const,
+		light: "#EFF7FD",
 		border: "#A2CEF2",
 		spark: "#5B9BD5",
 	},
@@ -122,13 +166,11 @@ function TactileBubble({ index, popped, onPress }: BubbleProps) {
 					},
 				]}
 			>
-				<LinearGradient
-					colors={palette.colors}
-					start={{ x: 0.05, y: 0.05 }}
-					end={{ x: 0.9, y: 0.95 }}
+				<View
 					style={[
 						styles.bubble,
 						{
+							backgroundColor: palette.light,
 							borderColor: palette.border,
 						},
 						popped && styles.poppedBubble,
@@ -153,7 +195,7 @@ function TactileBubble({ index, popped, onPress }: BubbleProps) {
 							popped && styles.poppedBottomShade,
 						]}
 					/>
-				</LinearGradient>
+				</View>
 			</Animated.View>
 		</Pressable>
 	);
@@ -161,15 +203,51 @@ function TactileBubble({ index, popped, onPress }: BubbleProps) {
 
 export default function BubblePopScreen() {
 	const router = useRouter();
-	const popPlayer = useAudioPlayer(require("../../assets/sounds/bubble-pop.wav"));
 
 	const [popped, setPopped] = useState<number[]>(INITIAL_POPPED);
 	const [elapsed, setElapsed] = useState(0);
-	const [rewardedMinutes, setRewardedMinutes] = useState(0);
-	const [muted, setMuted] = useState(false);
+	const [hapticsOn, setHapticsOn] = useState(true);
+	const [soundOn, setSoundOn] = useState(true);
+	const [seedsEarned, setSeedsEarned] = useState(0);
 
-	const rewardedMinutesRef = useRef(0);
-	const rewardInFlightRef = useRef(false);
+	const seedsAwardedRef = useRef(0);
+	const seedRewardInFlightRef = useRef(false);
+
+	// One pooled player per pop voice, so rapid taps can overlap instead of
+	// cutting each other off. Missing file just means silent bubbles.
+	const popSource = useMemo(loadBubblePopSource, []);
+	const popPlayers = useAudioPlayers(popSource);
+	const popVoiceRef = useRef(0);
+	const lastPopAtRef = useRef(0);
+
+	const soundOnRef = useRef(soundOn);
+	soundOnRef.current = soundOn;
+
+	// So the pop still plays with the iOS ringer switch flipped.
+	useEffect(() => {
+		setAudioModeAsync({ playsInSilentMode: true }).catch(() => {
+			/* audio session is best-effort */
+		});
+	}, []);
+
+	/** Fire the bubble-pop sound. Never awaited — haptics must stay instant. */
+	const playPopSound = useCallback(() => {
+		if (!soundOnRef.current) return;
+		const now = Date.now();
+		if (now - lastPopAtRef.current < POP_REPLAY_GAP_MS) return;
+		lastPopAtRef.current = now;
+
+		void (async () => {
+			try {
+				const voice = popVoiceRef.current;
+				popVoiceRef.current = (voice + 1) % MAX_CONCURRENT_POPS;
+				await popPlayers.seekTo(voice, 0);
+				popPlayers.play(voice);
+			} catch {
+				/* never let a sound failure break the tap */
+			}
+		})();
+	}, [popPlayers]);
 
 	useEffect(() => {
 		const timer = setInterval(() => {
@@ -179,39 +257,50 @@ export default function BubblePopScreen() {
 		return () => clearInterval(timer);
 	}, []);
 
+	/**
+	 * Every completed 30 seconds of play is worth 5 seeds. Rewards accumulate
+	 * for as long as the session runs, so a longer visit keeps growing the
+	 * garden, and the metric simply counts the seeds this session added.
+	 */
 	useEffect(() => {
-		const minutes = Math.floor(elapsed / REWARD_SECONDS);
+		const milestone = Math.floor(elapsed / SEED_REWARD_SECONDS);
 
-		if (
-			minutes <= rewardedMinutesRef.current ||
-			rewardInFlightRef.current
-		) {
+		if (milestone <= seedsAwardedRef.current || seedRewardInFlightRef.current) {
 			return;
 		}
 
-		rewardInFlightRef.current = true;
+		seedRewardInFlightRef.current = true;
 
-		recordRecoveryMinute()
+		earnSeeds(SEED_REWARD_AMOUNT)
 			.then(() => {
-				rewardedMinutesRef.current = minutes;
-				setRewardedMinutes(minutes);
+				seedsAwardedRef.current = milestone;
+				setSeedsEarned(milestone * SEED_REWARD_AMOUNT);
+			})
+			.catch(() => {
+				/* seeds are best-effort: the counter still reflects play */
 			})
 			.finally(() => {
-				rewardInFlightRef.current = false;
+				seedRewardInFlightRef.current = false;
 			});
-	}, [elapsed, rewardedMinutes]);
+	}, [elapsed]);
 
-	const popBubble = async (index: number) => {
+	const popBubble = (index: number) => {
+		// Only a bubble that was actually re-grown pops: no sound on a
+		// double-tap of one that is already flat on the board.
+		const alreadyPopped = popped.includes(index);
+
 		setPopped((current) =>
 			current.includes(index) ? current : [...current, index]
 		);
 
-		if (!muted) {
-			await popPlayer.seekTo(0);
-			popPlayer.play();
-			await Haptics.impactAsync(
-				Haptics.ImpactFeedbackStyle.Soft
-			);
+		if (alreadyPopped) return;
+
+		playPopSound();
+
+		if (hapticsOn) {
+			Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Soft).catch(() => {
+				/* haptics are best-effort */
+			});
 		}
 
 		setTimeout(() => {
@@ -225,38 +314,26 @@ export default function BubblePopScreen() {
 		setPopped([]);
 	};
 
-	const rewardProgress = elapsed % REWARD_SECONDS;
-	const canReturn = elapsed >= REWARD_SECONDS;
-
-	useEffect(() => {
-		void setAudioModeAsync({
-			playsInSilentMode: true,
-			shouldPlayInBackground: false,
-			interruptionMode: "mixWithOthers",
-		});
-	}, []);
-
 	return (
 		<Screen scroll={false}>
 			<NavBar
 				title="Bubble Pop"
 				onBack={() => router.back()}
 				right={
-				<Pressable
-					accessibilityLabel={
-						muted ? "Turn audio on" : "Mute audio"
-					}
-					style={styles.audioIconButton}
-					onPress={() => setMuted((value) => !value)}
-				>
-					{muted ? (
-						<VolumeX size={16} color="#7C5730" />
-					) : (
-						<Volume2 size={16} color="#7C5730" />
-					)}
-
-				</Pressable>
-			}
+					<Pressable
+						accessibilityLabel={
+							soundOn ? "Turn audio off" : "Turn audio on"
+						}
+						accessibilityRole="button"
+						accessibilityState={{ checked: soundOn }}
+						style={styles.audioIconButton}
+						onPress={() => setSoundOn((value) => !value)}
+					>
+						<Text style={styles.audioIcon}>
+							{soundOn ? "🔊" : "🔇"}
+						</Text>
+					</Pressable>
+				}
 			/>
 
 			<ScrollView
@@ -278,18 +355,18 @@ export default function BubblePopScreen() {
 
 					<View style={styles.metricBlock}>
 						<Text style={styles.metricLabel}>
-							RECOVERY ADDED
+							SEEDS ADDED
 						</Text>
 
 						<Text style={styles.metricValue}>
-							{rewardedMinutes * 5}%
+							{seedsEarned}
 						</Text>
 					</View>
 				</View>
 
 				<Text style={styles.reminder}>
-					Play Bubble Pop for at least 1 minute to add recovery
-					capacity.
+					Every 30 seconds of play adds {SEED_REWARD_AMOUNT} seeds to
+					your garden.
 				</Text>
 
 				{/* ========================= */}
@@ -326,60 +403,35 @@ export default function BubblePopScreen() {
 				</Text>
 
 				<View style={styles.controlBar}>
-					<Text style={styles.soundMode}>Soft Pop</Text>
-
-					<Pressable
-						accessibilityLabel="Reset bubbles"
-						style={styles.resetButton}
-						onPress={resetBoard}
-					>
-						<RefreshCw size={16} color="#523921" />
-					</Pressable>
-				</View>
-
-				<View style={styles.rewardCard}>
-					<View style={styles.rewardHeader}>
-						<View>
-							<Text style={styles.rewardLabel}>
-								NEXT CAPACITY REWARD
-							</Text>
-
-							<Text style={styles.rewardTitle}>
-								{canReturn
-									? "You can return or keep playing"
-									: "Keep playing for 1 minute"}
-							</Text>
-						</View>
-
-						{canReturn ? (
-							<Check size={22} color="#5B9E7E" />
-						) : null}
-					</View>
-
-					<View style={styles.rewardTrack}>
-						<View
-							style={[
-								styles.rewardFill,
-								{
-									width: `${
-										(rewardProgress /
-											REWARD_SECONDS) *
-										100
-									}%`,
-								},
-							]}
-						/>
-					</View>
-
-					<Text style={styles.rewardText}>
-						{canReturn
-							? `+${rewardedMinutes * 5}% capacity added. Continue playing or return to Recovery.`
-							: `${
-									REWARD_SECONDS -
-									rewardProgress
-							  }s until +5% capacity`}
+					<Text style={styles.soundMode}>
+						{soundOn ? "Soft Pop" : "Sound off"}
 					</Text>
+
+					<View style={styles.controlActions}>
+						<Pressable
+							accessibilityLabel={
+								hapticsOn
+									? "Turn haptics off"
+									: "Turn haptics on"
+							}
+							style={styles.resetButton}
+							onPress={() => setHapticsOn((value) => !value)}
+						>
+							<Text style={styles.resetIcon}>
+								{hapticsOn ? "📳" : "🚫"}
+							</Text>
+						</Pressable>
+
+						<Pressable
+							accessibilityLabel="Reset bubbles"
+							style={styles.resetButton}
+							onPress={resetBoard}
+						>
+							<Text style={styles.resetIcon}>↻</Text>
+						</Pressable>
+					</View>
 				</View>
+
 			</ScrollView>
 		</Screen>
 	);
@@ -409,6 +461,10 @@ const styles = StyleSheet.create({
 			height: 2,
 		},
 		elevation: 2,
+	},
+
+	audioIcon: {
+		fontSize: 15,
 	},
 
 	content: {
@@ -642,6 +698,12 @@ const styles = StyleSheet.create({
 		color: "#6B5036",
 	},
 
+	controlActions: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 8,
+	},
+
 	resetButton: {
 		width: 32,
 		height: 32,
@@ -651,52 +713,9 @@ const styles = StyleSheet.create({
 		justifyContent: "center",
 	},
 
-	rewardCard: {
-		marginTop: 14,
-		padding: 15,
-		borderRadius: 20,
-		backgroundColor: "#FFFFFF",
-		borderWidth: 1,
-		borderColor: "#F4EDE0",
-	},
-
-	rewardHeader: {
-		flexDirection: "row",
-		alignItems: "center",
-		justifyContent: "space-between",
-	},
-
-	rewardLabel: {
-		fontSize: 9,
-		letterSpacing: 0.8,
-		color: "#81756C",
-	},
-
-	rewardTitle: {
-		marginTop: 4,
-		fontSize: 14,
-		fontWeight: "700",
+	resetIcon: {
+		fontSize: 16,
 		color: "#523921",
-	},
-
-	rewardTrack: {
-		height: 7,
-		marginTop: 12,
-		borderRadius: 7,
-		backgroundColor: "#F2EEDE",
-		overflow: "hidden",
-	},
-
-	rewardFill: {
-		height: "100%",
-		borderRadius: 7,
-		backgroundColor: "#6A994E",
-	},
-
-	rewardText: {
-		marginTop: 8,
-		fontSize: 11,
-		color: "#6E6A61",
 	},
 
 });

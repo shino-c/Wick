@@ -19,31 +19,34 @@ import type {
   WeeklyCapacityAnalysis,
 } from '@/data/types';
 import { toISODate } from '@/services/dateUtils';
+import { AtomIcon } from 'lucide-react-native';
 
 
 
 /* ── AI Callers ─────────────────────────────────────────────────── */
 
-import { Groq } from 'groq-sdk';
+/*import your own AI model caller*/
 
-const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY;
+/* Example code:
 
-const groq = GROQ_API_KEY
-  ? new Groq({
-      apiKey: GROQ_API_KEY,
+const AI_API_KEY = process.env.EXPO_PUBLIC_AI_API_KEY;
+
+const ai = YOUR_API_KEY
+  ? new ai({
+      apiKey: YOUR_API_KEY,
       dangerouslyAllowBrowser: true,
     })
   : null;
 
-async function callGroq(
+async function callYourAI(
   prompt: string,
   systemPrompt?: string
 ): Promise<string | null> {
-  if (!groq) return null;
+  if (!ai) return null;
 
   try {
-    const completion = await groq.chat.completions.create({
-      model: 'openai/gpt-oss-120b',
+    const completion = await AtomIcon.chat.completions.create({
+      model: 'youraimodel',
 
       messages: [
         ...(systemPrompt
@@ -67,25 +70,25 @@ async function callGroq(
     const message = completion.choices?.[0]?.message;
 
     if (!message) {
-      console.error('Groq returned no message:', completion);
+      console.error('AI returned no message:', completion);
       return null;
     }
 
     return message.content ?? null;
   } catch (err) {
     console.error(
-      'Groq request failed, falling back to local NLP:',
+      'AI request failed, falling back to local NLP:',
       err
     );
     return null;
   }
-}
+} */
 
 async function callAI(
   prompt: string,
   systemPrompt?: string
 ): Promise<string | null> {
-  return callGroq(prompt, systemPrompt);
+  return callYourAI(prompt, systemPrompt);
 }
 
 
