@@ -100,6 +100,7 @@ export default function BaselineScreen() {
   const [tasksToReview, setTasksToReview] = useState<TaskAnalysis[]>([]);
   const [taskIdsToAnalyze, setTaskIdsToAnalyze] = useState<string[]>([]);
   const [editingTask, setEditingTask] = useState<TaskAnalysis | null>(null);
+  const [savingTaskEdit, setSavingTaskEdit] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
   const currentWeekStart = getWeekStart();
@@ -219,7 +220,10 @@ export default function BaselineScreen() {
 
   const handleSaveTaskEdit = async () => {
     if (!editingTask) return;
+    setSavingTaskEdit(true);
     try {
+      // Persist the edited fields to the database (also recomputes this week's
+      // derived capacity/stress data).
       await updateTaskAnalysis(editingTask.id, {
         title: editingTask.title,
         category: editingTask.category,
@@ -230,13 +234,19 @@ export default function BaselineScreen() {
         scheduled_start_time: editingTask.scheduled_start_time,
         scheduled_end_time: editingTask.scheduled_end_time,
       });
+      // Push the same change to the user's device calendar.
       await updateEventOnDeviceCalendar(editingTask.calendar_event_id, editingTask);
       setTasksToReview((prev) =>
         prev.map((t) => (t.id === editingTask.id ? editingTask : t))
       );
+      // Return to the review list so the user can keep reviewing tasks.
       setEditingTask(null);
+      await refresh();
     } catch (err) {
       console.error('Error saving task edit:', err);
+      Alert.alert('Error', 'Could not save your changes. Please try again.');
+    } finally {
+      setSavingTaskEdit(false);
     }
   };
 
@@ -623,9 +633,14 @@ export default function BaselineScreen() {
                     </Pressable>
                     <Pressable
                       onPress={handleSaveTaskEdit}
-                      style={styles.reviewSaveBtn}
+                      disabled={savingTaskEdit}
+                      style={[styles.reviewSaveBtn, savingTaskEdit && { opacity: 0.7 }]}
                     >
-                      <Text style={styles.reviewSaveBtnText}>Save Changes</Text>
+                      {savingTaskEdit ? (
+                        <ActivityIndicator size="small" color={colors.cream} />
+                      ) : (
+                        <Text style={styles.reviewSaveBtnText}>Save Changes</Text>
+                      )}
                     </Pressable>
                   </View>
                 </View>
