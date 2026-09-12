@@ -1,3 +1,66 @@
+/*
+ * Web-only presentation for the iPhone preview shell
+ * (src/components/WebPhoneShell.tsx).
+ *
+ * Kept in CSS rather than React Native styles on purpose: the backdrop gradient,
+ * the vignette and the off-device label have no native equivalent, and doing them
+ * here means the shell has no dependency on a styling library.
+ *
+ * Everything is scoped to `@media (min-width: 0px)`, which is true on every
+ * browser but never matches in a native build, so this can never leak into
+ * Android or iOS.
+ */
+@media (min-width: 0px) {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    /* Warm, neutral studio backdrop — close enough to the app's cream to look
+     * deliberate, dark enough that the black phone bezel reads as an object.
+     */
+    background-color: #e7e3da;
+    background-image:
+      radial-gradient(120% 90% at 50% 0%, #fdfaf3 0%, #e9e4d9 45%, #d8d2c6 100%),
+      radial-gradient(60% 50% at 50% 110%, rgba(107, 80, 56, 0.14) 0%, transparent 70%);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /*
+   * The prototype label sits outside the phone — deliberately not part of the
+   * application UI. `pointer-events: none` keeps it out of the way of the app,
+   * and `position: fixed` keeps it clear of the shell's own layout.
+   */
+  .wick-preview-label {
+    position: fixed;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%);
+    pointer-events: none;
+    user-select: none;
+    font-family:
+      'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.28em;
+    text-indent: 0.28em;
+    color: rgba(61, 58, 52, 0.42);
+    white-space: nowrap;
+  }
+
+  /* Below this width the phone takes the whole viewport, so the label would sit
+   * on top of the app. Drop it. */
+  @media (max-width: 520px) {
+    .wick-preview-label {
+      display: none;
+    }
+  }
+}
+
 :root {
   --font-display:
     Spline Sans, Inter, ui-sans-serif, system-ui, sans-serif, Apple Color Emoji, Segoe UI Emoji,

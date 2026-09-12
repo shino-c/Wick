@@ -5,7 +5,6 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -18,9 +17,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-native-svg';
 
+import { AppModal } from '@/components/base';
 import BottomNavigation from '@/components/bottombar';
 import { DateChipPicker, TimePicker } from '@/components/taskPickers';
 import TopNavigation from '@/components/topbar';
+import { demoTodayIndex, isDemoActive, realWeekStartISO } from '@/lib/demoMode';
+import { usePhoneViewport } from '@/components/WebPhoneShell';
 import type {
   CalendarConnection,
   LoadBalanceSuggestion,
@@ -70,12 +72,15 @@ const COLORS = {
   mental: '#E9D5FF',
 };
 
-function getWeekStart(date = new Date()): string {
-  const d = new Date(date);
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  d.setDate(diff);
-  return toISODate(d);
+/**
+ * Monday of the current week.
+ *
+ * Delegates to the demo module rather than recomputing, so the dashboard, the
+ * calendar sync and the seeded simulation week can never disagree about which
+ * week "this week" is.
+ */
+function getWeekStart(_date = new Date()): string {
+  return realWeekStartISO();
 }
 
 const CATEGORY_EMOJI: Record<string, string> = {
@@ -108,16 +113,30 @@ const WEEKDAY_NAMES = [
   'Sunday',
 ];
 
+/** "today" / "tomorrow" read better than a weekday name for the next 48 hours. */
+function relativeDayName(dayIdx: number, todayIdx: number): string {
+  const delta = dayIdx - todayIdx;
+  if (delta === 0) return 'today';
+  if (delta === 1) return 'tomorrow';
+  return WEEKDAY_NAMES[dayIdx];
+}
+
 /**
  * Builds the "Early Warning Insight" banner for the stress chart.
  *
  * The copy is driven by the week's peak day and never tells the user to
  * schedule something on a day that has already passed: recovery/rest
  * recommendations are only offered when the peak is today or still ahead.
+ *
+ * `demoMode` is threaded through rather than read from a module global, because
+ * the simulation week needs one extra rule: its peak can only ever be a day
+ * that is still ahead, and saying "this week's peak" about a day six days out
+ * would read as a forecast the app cannot actually make.
  */
 function buildEarlyWarningInsight(
   dayStress: { score: number; hasData: boolean }[],
-  todayIdx: number
+  todayIdx: number,
+  demoMode = false
 ): { title: string; icon: 'warning' | 'notifications-active'; urgent: boolean; text: string } {
   const today = dayStress[todayIdx];
   const todayIn = (today?.hasData ?? false) ? (today?.score ?? 0) : null;
@@ -143,6 +162,10 @@ function buildEarlyWarningInsight(
   }
 
   const peakDay = WEEKDAY_NAMES[peak.i];
+  // Relative phrasing for the next two days: "tomorrow is shaping up to be the
+  // peak" is what the sentence is actually trying to say, and it is also the
+  // case the demo week hits (Monday, peak on Tuesday).
+  const peakDayRel = relativeDayName(peak.i, todayIdx);
   const peakIsToday = peak.i === todayIdx;
   const peakIsPast = peak.i < todayIdx;
   const urgentToday = todayIn !== null && todayIn >= 60;
@@ -182,6 +205,17 @@ function buildEarlyWarningInsight(
     };
   }
 
+  // A simulated Monday with the week's worst day still ahead: lead with what the
+  // user can act on now, and name today honestly rather than only the peak.
+  if (demoMode && todayIn !== null) {
+    return {
+      title,
+      icon: todayIn >= 60 ? 'warning' : 'notifications-active',
+      urgent: todayIn >= 60,
+      text: `You are at ${todayIn}/100 today, and the week builds to ${peak.score}/100 around ${peakDayRel} \u2014 comfortably past what a ${peak.score >= 80 ? 'light' : 'steady'} week should carry. Move a lower-priority item or two out of the middle of the week.`,
+    };
+  }
+
   // Moderate week — gentle steer, no alarm.
   const todayLead = urgentToday ? `Today is at ${todayIn}/100. ` : '';
   return {
@@ -194,6 +228,17 @@ function buildEarlyWarningInsight(
 
 export default function Home() {
   const router = useRouter();
+
+  /**
+   * The phone's own viewport, not the browser's.
+   *
+   * `useWindowDimensions()` on web reports the browser window — 1280px on a
+   * laptop — which is how the stress chart ended up drawing itself against a
+   * width it was never rendered at and squashing the curve. The shell publishes
+   * the real phone measurements through this context; on native it is the real
+   * device window, so both platforms measure the same thing.
+   */
+  const viewport = usePhoneViewport();
 
   // Core Data State
   const [tasks, setTasks] = useState<TaskAnalysis[]>([]);
@@ -502,7 +547,10 @@ export default function Home() {
   // but hasData stays false so they never count as the week's peak.
   const WEEK_WEIGHTS = { biometric: 0.4, selfReport: 0.3, aiLoad: 0.3 } as const;
   const dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-  const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
+  // Mon=0 .. Sun=6. In simulation mode this is pinned to Monday: the demo week
+  // is presented as the start of a heavy week, which is also the only day on
+  // which "defer some of this" is advice the user can still act on.
+  const todayIdx = demoTodayIndex();
   const weekStartMs = new Date(currentWeekStart + 'T00:00:00').getTime();
 
   const avgOf = (vals: (number | null)[]) => {
@@ -579,6 +627,47 @@ export default function Home() {
     dayStress.push({ score, hasData });
   }
 
+  // The chart's drawing coordinates live in a 380x120 box (see the SVG viewBox
+  // below). That box is mapped onto the measured container width, so the height
+  // has to track the width too — otherwise a wider phone would stretch the graph
+  // sideways while it stayed 120pt tall, flattening the curve and squashing the
+  // labels. Deriving the height from the same ratio keeps the plot's proportions
+  // intact on every screen width.
+  //
+  // The width itself is measured two ways on purpose:
+  //   · `chartWidth` is what `onLayout` reports once the frame has laid out.
+  //   · `plotWidth` falls back to the phone viewport minus the card's own
+  //     padding, because the very first render has no measurement yet and the
+  //     graph would otherwise be drawn 0-wide — which on the web preview (where
+  //     the app is inside a phone frame, not a browser window) is what made the
+  //     curve collapse into a flat line until you resized the page.
+  const CARD_INNER_INSET = 48; // screen padding + card padding, both sides
+  const CHART_VIEWBOX_W = 380;
+  const CHART_VIEWBOX_H = 120;
+  const CHART_MIN_H = 120;
+  // On a small screen the plot may be taller than the 380:120 ratio implies.
+  // The cap keeps seven days of curve readable without the card eating the page.
+  const CHART_MAX_H = Math.max(140, Math.min(240, Math.round(viewport.height * 0.26)));
+
+  const plotWidth = chartWidth > 0
+    ? chartWidth
+    : Math.max(220, viewport.width - CARD_INNER_INSET);
+
+  const chartHeight = Math.max(
+    CHART_MIN_H,
+    Math.min(CHART_MAX_H, Math.round((plotWidth * CHART_VIEWBOX_H) / CHART_VIEWBOX_W))
+  );
+
+  // The SVG scales its viewBox to fit (preserveAspectRatio defaults to `meet`),
+  // so the pixels the drawing actually occupies can be narrower than the frame
+  // whenever the clamp above forces a height off the 380:120 ratio. The tap
+  // zones and the tooltip are positioned in real pixels, not viewBox units, so
+  // they have to be laid out against the drawn width — otherwise they drift
+  // from the points they are supposed to sit under.
+  const chartScale = Math.min(plotWidth / CHART_VIEWBOX_W, chartHeight / CHART_VIEWBOX_H);
+  const drawnWidth = CHART_VIEWBOX_W * chartScale;
+  const drawnOffsetX = (plotWidth - drawnWidth) / 2;
+
   // Build SVG path — every day gets a point (score 0 when no data)
   // Chart area: x 20..365, y 100 (score=0) to 20 (score=100)
   const chartLeft = 20;
@@ -614,6 +703,17 @@ export default function Home() {
   const capacityPct = Math.min(100, Math.round((usedHours / totalHours) * 100));
   const isOverloaded = capacity?.overload_warning || capacityPct >= 85;
 
+  /** The simulation week, if that is what the dashboard is showing. */
+  const demoActive = isDemoActive();
+
+  /**
+   * The week's own reasoning, from the analyser. The simulation week carries a
+   * real computed reasoning like any other week — and in simulation mode the
+   * app stays quiet about *what* the week is rather than announcing it, so no
+   * "this is a demo/sample week" copy appears anywhere on the dashboard.
+   */
+  const capacityReasoning = capacity?.ai_reasoning;
+
   // Real Category Percentages from capacity breakdown
   const academicPct = capacity?.category_breakdown?.academic ?? 0;
   const workPct = capacity?.category_breakdown?.work ?? 0;
@@ -627,8 +727,14 @@ export default function Home() {
   const recoveryReminderVisible =
     isOverloaded || (todayStress.hasData && todayStress.score >= 60);
 
-  /** Early Warning Insight copy built from the week's per-day stress */
-  const earlyWarning = buildEarlyWarningInsight(dayStress, todayIdx);
+  /**
+   * Early Warning Insight copy built from the week's per-day stress.
+   *
+   * It is rebuilt whenever the simulation toggles, because the message is a
+   * function of which day is "today" — a live week and a simulated Monday need
+   * genuinely different sentences about the same curve.
+   */
+  const earlyWarning = buildEarlyWarningInsight(dayStress, todayIdx, demoActive);
 
   return (
     // Only the top edge — the shared Screen does the same, so the bottom nav
@@ -677,13 +783,16 @@ export default function Home() {
             {/* Stress Line Chart */}
             <View
               style={styles.chartContainer}
+              // The layout callback is what makes the plot respond to whatever
+              // width it is actually given — a narrow phone, a wide phone, or the
+              // preview frame's glass — rather than to the browser window.
               onLayout={(e) => {
                 const w = e.nativeEvent.layout.width;
                 if (w > 0) setChartWidth(w);
               }}
             >
-              <View style={styles.chartFrame}>
-                <Svg height="120" width="100%" viewBox="0 0 380 120">
+              <View style={[styles.chartFrame, { height: chartHeight }]}>
+                <Svg height={chartHeight} width="100%" viewBox="0 0 380 120">
                   <Defs>
                     <LinearGradient id="stressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
                       <Stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.22" />
@@ -742,11 +851,13 @@ export default function Home() {
                   })}
                 </Svg>
 
-                {/* Tap zones — one column per day, tap to reveal the exact score */}
-                {chartWidth > 0 &&
+                {/* Tap zones — one column per day, tap to reveal the exact score.
+                    Mapped through the drawn geometry (not the raw frame width) so
+                    each column stays over the point it selects at every size. */}
+                {drawnWidth > 0 &&
                   points.map((p, i) => {
-                    const zoneW = Math.max(22, (chartWidth / 380) * xStep);
-                    const left = (p.x / 380) * chartWidth - zoneW / 2;
+                    const zoneW = Math.max(22, chartScale * xStep);
+                    const left = drawnOffsetX + p.x * chartScale - zoneW / 2;
                     return (
                       <Pressable
                         key={`tap-${i}`}
@@ -758,16 +869,18 @@ export default function Home() {
                   })}
 
                 {/* Tooltip with the exact score for the tapped day */}
-                {selectedDayIdx !== null && points[selectedDayIdx] && chartWidth > 0 && (
+                {selectedDayIdx !== null && points[selectedDayIdx] && (
                   <View
                     style={[
                       styles.tooltip,
                       {
+                        // Clamped against the same width the points were drawn
+                        // against, so the tooltip can never float off the card.
                         left: Math.max(
-                          6,
+                          4,
                           Math.min(
-                            (points[selectedDayIdx].x / 380) * chartWidth - 46,
-                            chartWidth - 98
+                            drawnOffsetX + points[selectedDayIdx].x * chartScale - 46,
+                            plotWidth - 100
                           )
                         ),
                       },
@@ -887,10 +1000,14 @@ export default function Home() {
               <View style={styles.capacityWarning}>
                 <MaterialIcons name="warning" size={20} color="#CA8A04" style={{ marginRight: 10, marginTop: 2 }} />
                 <View style={styles.warningContent}>
-                  <Text style={styles.warningTitle}>Overload Warning ({capacityPct}% capacity)</Text>
+                  <Text style={styles.warningTitle}>
+                    {demoActive
+                      ? `Near Limit (${capacityPct}% capacity)`
+                      : `Overload Warning (${capacityPct}% capacity)`}
+                  </Text>
                   <Text style={styles.warningText}>
-                    You have {usedHours}h of scheduled load against a {totalHours}h threshold. Consider deferring
-                    lower-priority tasks below.
+                    {capacityReasoning ??
+                      `You have ${usedHours}h of scheduled load against a ${totalHours}h threshold. Consider deferring lower-priority tasks below.`}
                   </Text>
                 </View>
               </View>
@@ -1169,9 +1286,8 @@ export default function Home() {
       </View>
 
       {/* ── AI REVIEW MODAL (Triggered for newly synced weekly tasks) ─────── */}
-      <Modal visible={showReviewModal} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+      <AppModal visible={showReviewModal} maxWidth={420}>
+        <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.modalTitle}>
@@ -1360,18 +1476,16 @@ export default function Home() {
                 </Pressable>
               </View>
             )}
-          </View>
         </View>
-      </Modal>
+      </AppModal>
 
       {/* ── QUICK ADD NLP CHATBOT MODAL (2-Way Calendar Sync) ─────────────── */}
-      <Modal visible={showAddModal} transparent animationType="fade">
+      <AppModal visible={showAddModal} maxWidth={420}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={{ flex: 1 }}
+          style={{ width: '100%' }}
         >
-          <View style={styles.modalOverlay}>
-            <View style={[styles.modalContent, { maxHeight: '92%' }]}>
+            <View style={[styles.modalContent, { maxHeight: '92%', minHeight: 400, alignSelf: 'center' }]}>
               <View style={styles.modalHeader}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.modalTitle}>
@@ -1625,14 +1739,16 @@ export default function Home() {
                 </ScrollView>
               )}
             </View>
-          </View>
         </KeyboardAvoidingView>
-      </Modal>
+      </AppModal>
 
       {/* ── NOTIFICATIONS MODAL ─────────────────────────────────────────────── */}
-      {false && (<Modal visible={false} transparent animationType="fade" onRequestClose={() => setShowNotifications(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+      <AppModal
+        visible={showNotifications}
+        onRequestClose={() => setShowNotifications(false)}
+        maxWidth={420}
+      >
+        <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.modalTitle}>Notifications</Text>
@@ -1685,9 +1801,8 @@ export default function Home() {
                 ))
               )}
             </ScrollView>
-          </View>
         </View>
-      </Modal>)}
+      </AppModal>
     </SafeAreaView>
   );
 }
@@ -1757,6 +1872,7 @@ function TaskRow({
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },
   container: { flex: 1 },
+
   scrollContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 24 },
   card: {
     backgroundColor: COLORS.surface,
@@ -1922,7 +2038,7 @@ const styles = StyleSheet.create({
   resyncButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
   /* Modals — centered on screen with internal scroll for long content */
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
-  modalContent: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, maxHeight: '85%', maxWidth: '92%', width: 420 },
+  modalContent: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, maxHeight: '85%', maxWidth: '96%', width: 360, alignSelf: 'center' },
   modalScrollContent: { paddingBottom: 12 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
@@ -1968,7 +2084,7 @@ const styles = StyleSheet.create({
   reviewSaveBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.brown, alignItems: 'center' },
   reviewSaveBtnText: { fontSize: 13, fontWeight: '700', color: colors.cream },
   /* Quick Add Modal */
-  chatInput: { backgroundColor: '#FAF8F5', borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, fontSize: 14, minHeight: 70, textAlignVertical: 'top', color: COLORS.text },
+  chatInput: { backgroundColor: '#FAF8F5', borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, fontSize: 14, minHeight: 150, textAlignVertical: 'top', color: COLORS.text },
   nlpParseButton: { backgroundColor: colors.brown, borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginTop: 10 },
   nlpParseButtonText: { color: colors.cream, fontSize: 13, fontWeight: '700' },
   /* previewHeader reused for multi-task detected label */

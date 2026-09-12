@@ -1,4 +1,5 @@
 import { readDb, writeDb } from '@/data/localStore';
+import { isDemoActive, setupDemoMode } from './demoMode';
 import { hasSupabase, supabase } from './supabaseClient';
 
 export interface BootstrapResult {
@@ -6,9 +7,17 @@ export interface BootstrapResult {
   backend: 'supabase' | 'local';
   warning: string | null;
   authenticated: boolean;
+  /** True when nothing is configured and the simulation week is in use. */
+  demo: boolean;
 }
 
 export async function bootstrap(): Promise<BootstrapResult> {
+  // Configure the simulation before anything reads the week's data. When there
+  // is no Supabase project and nothing of the user's own on this device, this
+  // seeds one realistic week — which is what makes a fresh clone run with zero
+  // setup instead of showing an empty dashboard.
+  await setupDemoMode();
+
   const db = await readDb();
 
   // Supabase isn't configured — use the local demo store.
@@ -18,6 +27,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
       backend: 'local',
       warning: null,
       authenticated: false,
+      demo: isDemoActive(),
     };
   }
 
@@ -32,6 +42,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
       backend: 'supabase',
       warning: null,
       authenticated: false,
+      demo: false,
     };
   }
 
@@ -49,9 +60,16 @@ export async function bootstrap(): Promise<BootstrapResult> {
     backend: 'supabase',
     warning: null,
     authenticated: true,
+    demo: false,
   };
 }
 
+/**
+ * Marks setup complete.
+ *
+ * In simulation mode there is no account to update, so this writes only the
+ * local flag — the same place the local backend keeps it either way.
+ */
 export async function markOnboarded(): Promise<void> {
   if (hasSupabase) {
     const {

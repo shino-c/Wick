@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, radius, spacing } from '@/theme';
 import { Txt } from './base';
 import { cameraAvailable } from '@/camera/CaptureCamera';
+import { isDemoActive } from '@/lib/demoMode';
 
 /**
  * A small, dismissible truth-teller.
@@ -11,6 +12,11 @@ import { cameraAvailable } from '@/camera/CaptureCamera';
  * It matters during a demo that nobody — including us — mistakes simulated
  * biometrics for a live camera read, or a device-local store for a live
  * backend. This says which is which, once, and gets out of the way.
+ *
+ * In the zero-configuration simulation it stays silent: the demo is meant to
+ * be walked through as if it were the real thing, so no "local demo store /
+ * simulated camera" window floats over it. Once anything is configured the
+ * banner behaves exactly as it always has.
  */
 export function BackendBanner({
   backend,
@@ -21,6 +27,8 @@ export function BackendBanner({
 }) {
   const insets = useSafeAreaInsets();
   const [dismissed, setDismissed] = React.useState(false);
+
+  if (isDemoActive()) return null;
 
   const notes: string[] = [];
   if (warning) notes.push(warning);

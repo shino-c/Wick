@@ -531,7 +531,7 @@ OUTPUT STRICT JSON ARRAY ONLY (no markdown, just [ ... ]).`;
       const parsed = JSON.parse(clean);
       const arr = Array.isArray(parsed) ? parsed : [parsed];
       if (arr.length > 0 && arr[0]?.title) {
-        return arr.map((item: any, idx: number) => {
+        const mapped = arr.map((item: any, idx: number) => {
           const category = normalizeCategory(item.category);
           const priority = (item.priority === 'high' || item.priority === 'low' ? item.priority : 'medium') as 'high' | 'medium' | 'low';
           const hours = Number(item.estimated_duration_hours) || 1;
@@ -551,6 +551,46 @@ OUTPUT STRICT JSON ARRAY ONLY (no markdown, just [ ... ]).`;
             calendar_provider: 'device',
           };
         });
+
+        // The AI may under-count when the input carries quantities ("2
+        // assignments Fri 1 presentation Sun" → 3 tasks, not 2). The day-count
+        // is a lower bound; the real expected count is the sum of the leading
+        // quantities in each day-anchored chunk. If the AI returned fewer
+        // tasks than that, fall through to the deterministic heuristic so the
+        // user still gets the tasks they asked for.
+        const DAY_RE =
+          /\b(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|tomorrow|today)\b/gi;
+        const QTY_RE = /^\s*(\d+)\s+(?!h|hr|hours?|m|min|minutes?)/i;
+        const expectedCount = input
+          .split(/\s*[,;]\s*|\s+and\s+/i)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .reduce((total, seg) => {
+            const dayMatches = [...seg.matchAll(new RegExp(DAY_RE.source, 'gi'))];
+            if (dayMatches.length <= 1) {
+              const q = seg.match(QTY_RE);
+              return total + (q ? Math.min(parseInt(q[1], 10), 8) : 1);
+            }
+            // Split on day boundaries and sum the quantity of each chunk.
+            let start = 0;
+            let segTotal = 0;
+            for (const m of dayMatches) {
+              if (m.index === undefined) continue;
+              const end = m.index + m[0].length;
+              const chunk = seg.slice(start, end).trim();
+              if (chunk) {
+                const q = chunk.match(QTY_RE);
+                segTotal += q ? Math.min(parseInt(q[1], 10), 8) : 1;
+              }
+              start = end;
+            }
+            return total + segTotal;
+          }, 0);
+        if (mapped.length < expectedCount && expectedCount > 1) {
+          // Fall through to the heuristic fallback below.
+        } else {
+          return mapped;
+        }
       }
     } catch (e) {
       console.error('AI NLP parse error, falling back to local heuristic:', e);
@@ -558,13 +598,73 @@ OUTPUT STRICT JSON ARRAY ONLY (no markdown, just [ ... ]).`;
   }
 
   // ── Heuristic Fallback ────────────────────────────────────────────────────
-  // Split on comma / semicolon / "and" separators to detect multiple tasks
   const segments = input
     .split(/\s*[,;]\s*|\s+and\s+/i)
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
-  return segments.map((segment, idx) => heuristicParseSegment(segment, idx + 1));
+  // Each segment that contains multiple day references ("assignments
+  // Fri 1 presentation Sun") is itself split on day-name boundaries.
+  const DAY_RE =
+    /\b(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|tomorrow|today)\b/i;
+  const expanded: string[] = [];
+  for (const seg of segments) {
+    const dayMatches = [...seg.matchAll(new RegExp(DAY_RE.source, 'gi'))];
+    if (dayMatches.length <= 1) {
+      expanded.push(seg);
+      continue;
+    }
+    // Split at the end of each day anchor. The day anchor belongs to the
+    // task text that precedes it: "2 assignments Fri 1 presentation Sun"
+    // → ["2 assignments Fri", "1 presentation Sun"].
+    let start = 0;
+    for (const m of dayMatches) {
+      if (m.index === undefined) continue;
+      const end = m.index + m[0].length;
+      const chunk = seg.slice(start, end).trim();
+      if (chunk) expanded.push(chunk);
+      start = end;
+    }
+    // Trailing text after the last day anchor without its own day reference
+    // is dropped — it has no scheduling target.
+  }
+
+  // A segment without day references that carries multiple task keywords
+  // ("assignment presentation project") is itself multiple tasks. Split on
+  // space boundaries between those keywords so space-only input still
+  // produces the several tasks the user asked for.
+  const TASK_KWORDS =
+    /\b(assignments?|presentations?|projects?|essays?|reports?|exams?|stud(y|ying)|meetings?|gyms?|workouts?|calls?|emails?|reviews?|reads?|writ(e|ing)|researches?|prep(arations?)?)\b/gi;
+  const expandedByKeyword: string[] = [];
+  for (const seg of expanded) {
+    const kwMatches = [...seg.matchAll(TASK_KWORDS)];
+    if (kwMatches.length <= 1) {
+      expandedByKeyword.push(seg);
+      continue;
+    }
+    let lastEnd = 0;
+    for (let k = 0; k < kwMatches.length; k++) {
+      const m = kwMatches[k];
+      if (m.index === undefined) continue;
+      const next = kwMatches[k + 1];
+      const chunkEnd = next?.index ?? seg.length;
+      const chunk = seg.slice(lastEnd, chunkEnd).trim();
+      if (chunk) expandedByKeyword.push(chunk);
+      lastEnd = chunkEnd;
+    }
+  }
+
+  // Each segment is parsed individually. A leading number is a quantity
+  // ("2 assignments Fri" → 2 tasks), so expand before mapping.
+  const tasks: Omit<TaskAnalysis, 'id' | 'createdAt'>[] = [];
+  for (const segment of expandedByKeyword) {
+    const qtyMatch = segment.match(/^\s*(\d+)\s+(?!h|hr|hours?|m|min|minutes?)/i);
+    const quantity = qtyMatch ? Math.min(parseInt(qtyMatch[1], 10), 8) : 1;
+    for (let q = 0; q < quantity; q++) {
+      tasks.push(heuristicParseSegment(segment, tasks.length + 1));
+    }
+  }
+  return tasks;
 }
 
 /** Parse a single text segment into a task using deterministic heuristics. */
@@ -629,6 +729,7 @@ function heuristicParseSegment(
   const endTime = `${endHour.toString().padStart(2, '0')}:${startTime.split(':')[1]}`;
 
   const cleanTitle = input
+    .replace(/^\d+\s+/, '')
     .replace(/\b(?:due|at|on|for|tomorrow|today|fri|sat|sun|mon|tue|wed|thu)\b.*/gi, '')
     .trim() || input;
 

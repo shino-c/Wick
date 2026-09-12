@@ -10,6 +10,7 @@ import type {
   TaskAnalysis,
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
+import { DEMO_WEEK_START_ISO, isDemoActive } from '@/lib/demoMode';
 import { generateDailyRecoveryPlan } from '@/services/aiService';
 import { toISODate, todayISO } from '@/services/dateUtils';
 import {
@@ -606,25 +607,36 @@ async function buildDailyRecoveryPlan(date: string): Promise<DailyRecoveryPlan> 
     getRecoveryDay(date),
   ]);
 
-  // Load this week's analysed tasks. If the week-scoped query misses today
-  // (older rows written with a UTC-shifted week_start, for example), fall back
-  // to any real task scheduled for today so a full calendar is never reported
-  // as free time.
+  /**
+   * Simulation: the demo presents its Monday as "today", so the plan is built
+   * for that day and its free windows come from the seeded Monday schedule —
+   * the real pipeline over simulated inputs. A configured account keeps
+   * building the plan for the real `date`, exactly as before.
+   */
+  const demoActive = isDemoActive();
+  const planDate = demoActive ? DEMO_WEEK_START_ISO : date;
+
+  // Load this week's analysed tasks. If the week-scoped query misses the plan
+  // day (older rows written with a UTC-shifted week_start, for example), fall
+  // back to any real task scheduled for that day so a full calendar is never
+  // reported as free time.
   let tasks = await getTaskAnalyses(weekStartStr);
-  if (!tasks.some((t) => t.scheduled_date === date)) {
-    const todaysTasks = (await getTaskAnalyses()).filter((t) => t.scheduled_date === date);
-    if (todaysTasks.length > 0) tasks = todaysTasks;
+  if (!tasks.some((t) => t.scheduled_date === planDate)) {
+    const planDayTasks = (await getTaskAnalyses()).filter((t) => t.scheduled_date === planDate);
+    if (planDayTasks.length > 0) tasks = planDayTasks;
   }
 
-  // Only windows with time still ahead of us are usable today.
-  const slots = prunePastSlots(computeAvailableSlots(tasks, date), date);
+  // Only windows with time still ahead of us are usable today. In simulation
+  // the plan day is the demo Monday — not the real `today` — so the pruning is
+  // a no-op by design: the demo's morning is always still ahead.
+  const slots = prunePastSlots(computeAvailableSlots(tasks, planDate), planDate);
   const latestScore = scores[0]?.fusedScore ?? null;
   const capacityPct = capacity
     ? Math.round((capacity.used_capacity_hours / Math.max(1, capacity.total_capacity_hours)) * 100)
     : 0;
 
   const plan = await generateDailyRecoveryPlan({
-    date,
+    date: planDate,
     slots,
     capacityPct,
     overloaded: capacity?.overload_warning ?? capacityPct >= 85,
@@ -643,6 +655,19 @@ async function buildDailyRecoveryPlan(date: string): Promise<DailyRecoveryPlan> 
   for (const suggestion of slotSuggestions) {
     if (suggestions.length >= 3) break;
     suggestions.push(suggestion);
+  }
+
+  // Simulation: the demo page always presents the full trio of gentle plans,
+  // so top up from the generator's remaining suggestions, anchored to the
+  // widest window. A configured account keeps the fit-to-slot rule as its only
+  // filter.
+  if (demoActive && suggestions.length < 3) {
+    const widest = slots.slice().sort((a, b) => b.minutes - a.minutes)[0];
+    for (const suggestion of plan.suggestions) {
+      if (suggestions.length >= 3) break;
+      if (suggestions.some((s) => s.id === suggestion.id)) continue;
+      suggestions.push({ ...suggestion, slot: suggestion.slot ?? widest });
+    }
   }
 
   return { ...plan, suggestions };

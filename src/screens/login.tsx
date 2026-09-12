@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -22,6 +21,7 @@ import {
   setRememberMe,
 } from '@/lib/rememberMe';
 import { hasSupabase, supabase } from '@/lib/supabaseClient';
+import { AppModal } from '@/components/base';
 import { colors, font, radius, shadow, spacing } from '@/theme';
 
 /* ─── validation helpers ────────────────────────────────────────────────── */
@@ -166,14 +166,18 @@ export default function LoginScreen() {
 
   const handleLogin = async () => {
     setTouched({ identifier: true, password: true });
-    if (hasAnyError) return;
 
+    // No backend configured — skip credential validation and proceed to the
+    // demo. The form's email/password rules are meaningless without a
+    // Supabase project to check against.
     if (!hasSupabase) {
-      setServerError(
-        'Supabase is not configured. Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY to your .env file.',
-      );
+      await setRememberMe(rememberMe);
+      await setRememberedIdentifier(rememberMe ? identifier : '');
+      router.replace('/baseline');
       return;
     }
+
+    if (hasAnyError) return;
 
     setLoading(true);
     setServerError(null);
@@ -381,11 +385,10 @@ export default function LoginScreen() {
       </ScrollView>
 
       {/* Forgot password modal */}
-      <Modal
+      <AppModal
         visible={showForgot}
-        transparent
-        animationType="fade"
         onRequestClose={() => setShowForgot(false)}
+        maxWidth={420}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -439,7 +442,7 @@ export default function LoginScreen() {
             </View>
           </View>
         </View>
-      </Modal>
+      </AppModal>
     </KeyboardAvoidingView>
   );
 }

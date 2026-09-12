@@ -1,3 +1,4 @@
+import { colors, radius, shadow, spacing, type } from '@/theme';
 import React from 'react';
 import {
   ActivityIndicator,
@@ -12,9 +13,67 @@ import {
   type TextStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { colors, radius, shadow, spacing, type } from '@/theme';
 
 /* ── Text ─────────────────────────────────────────────────────────── */
+
+/* ── AppModal ─────────────────────── */
+
+/**
+ * The app's modal, and the reason every screen must use it rather than
+ * react-native's `Modal` directly.
+ *
+ * React Native Web implements `Modal` with a *portal*: the overlay is mounted
+ * into `document.body`, outside the app's element tree. That is invisible for a
+ * full-screen phone app, and very visible in the browser preview, where the
+ * phone is a frame in the middle of the page — the dimmer then covered the whole
+ * browser and the dialog was drawn beside the device instead of inside it.
+ *
+ * The portal is not the problem in itself: on a real device there is one root,
+ * so `body` and the app root are the same rectangle. The problem is inheriting
+ * `document.body`'s box. So this: the overlay is sized to the app window and
+ * positioned against the app's own root rather than against the page.
+ *
+ * ── Why `absolute`, not `fixed` ─────────────────────
+ * A React portal keeps the DOM location of its parent, so the modal's node is a
+ * child of whatever rendered it — the app's root view. That root is also the
+ * nearest *positioned* ancestor, so `position: absolute; inset: 0` resolves to
+ * the phone's frame, while `position: fixed` would resolve to the browser
+ * viewport and put the overlay straight back over the whole page.
+ */
+export function AppModal({
+  visible,
+  onRequestClose,
+  children,
+  maxWidth = 420,
+}: {
+  visible: boolean;
+  onRequestClose?: () => void;
+  children: React.ReactNode;
+  /** The widest the dialog itself may be, inside the frame. */
+  maxWidth?: number;
+}) {
+  // Unmounting when hidden (rather than passing `visible={false}`) is what lets
+  // the host view be skipped entirely, so a closed modal costs no layout at all.
+  if (!visible) return null;
+
+  return (
+    <View style={styles.modalHost} pointerEvents="box-none">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Close dialog"
+        onPress={onRequestClose}
+        style={styles.modalOpaqueOverlay}
+      />
+      <View style={styles.modalFill} pointerEvents="box-none">
+        <View style={[styles.modalCenter, { maxWidth }]} pointerEvents="box-none">
+          {children}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/* ── Text ─────────────────────────── */
 
 type Variant = keyof typeof type;
 type TxtProps = TextProps & { v?: Variant; color?: string; center?: boolean };
@@ -267,10 +326,20 @@ export function Emoji({
   );
 }
 
+/**
+ * Screen header for the stack screens.
+ *
+ * The back button and the title are in-flow children of the same row
+ * (`alignItems: 'center'`), so they always share one row and one vertical
+ * centre — no wrapper insets to push the button below the page name.
+ *
+ * The title is a `flex: 1` child between two fixed 40px side slots, so it
+ * stays horizontally centred whatever its text length.
+ */
 export function NavBar({ title, onBack, right }: { title: string; onBack?: () => void; right?: React.ReactNode }) {
   return (
     <View style={styles.navBar}>
-      <View style={{ width: 40, alignItems: 'flex-start' }}>
+      <View style={styles.navSide}>
         {onBack && (
           <Pressable
             onPress={onBack}
@@ -283,8 +352,8 @@ export function NavBar({ title, onBack, right }: { title: string; onBack?: () =>
           </Pressable>
         )}
       </View>
-      <Text style={styles.navTitle}>{title.toUpperCase()}</Text>
-      <View style={{ width: 40, alignItems: 'flex-end' }}>{right}</View>
+      <Text style={styles.navTitle} numberOfLines={1}>{title.toUpperCase()}</Text>
+      <View style={[styles.navSide, { alignItems: 'flex-end' }]}>{right}</View>
     </View>
   );
 }
@@ -294,35 +363,45 @@ const styles = StyleSheet.create({
     height: 58,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing(2),
+    paddingHorizontal: spacing(4),
   },
-  backButton: {
+  navSide: {
     width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.line,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
   },
-  backIcon: { fontSize: 32, lineHeight: 34, color: colors.ink, fontWeight: '300' },
   navTitle: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    textAlign: 'center',
+    flex: 1,
     color: colors.inkSoft,
     fontSize: 13,
     fontWeight: '700',
     letterSpacing: 3,
+    textAlign: 'center',
   },
+ backButton: {
+  width: 40,
+  height: 40,
+  borderRadius: 20,
+  backgroundColor: colors.surface,
+  borderWidth: 1,
+  borderColor: colors.line,
+  shadowColor: '#000',
+  shadowOpacity: 0.06,
+  shadowRadius: 4,
+  shadowOffset: { width: 0, height: 2 },
+  elevation: 2,
+  alignItems: 'center',
+  justifyContent: 'center',
+  transform: [{ translateX: -15}],
+},
+
+backIcon: {
+  fontSize: 32,
+  lineHeight: 34,
+  color: colors.ink,
+  fontWeight: '300',
+  textAlign: 'center',
+  transform: [{ translateX: -1 }],
+},
+
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
@@ -349,5 +428,36 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing(2.5),
     paddingVertical: spacing(1.5),
     borderRadius: radius.pill,
+  },
+  /* AppModal — sized to the app window, never to the browser page. */
+  modalHost: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 50,
+  },
+  /** The dimmer is part of the app tree, so it is clipped to the phone glass. */
+  modalOpaqueOverlay: {
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  /** Centers the dialog both ways inside the full-screen host. */
+  modalFill: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** The dialog's own box — no flex, so it shrinks to its content and stays
+   *  centred by the parent rather than stretching to any edge. */
+  modalCenter: {
+    width: '100%',
+    alignItems: 'center',
+    paddingHorizontal: spacing(4),
   },
 });

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, Platform, View } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -15,6 +15,23 @@ import { bootstrap, type BootstrapResult } from '@/lib/bootstrap';
 import { colors } from '@/theme';
 import { BackendBanner } from '@/components/BackendBanner';
 import { NotificationProvider } from '@/components/NotificationProvider';
+import { WebPhoneShell } from '@/components/WebPhoneShell';
+
+/**
+ * `expo start --web` renders into a laptop browser, where a 390pt phone layout
+ * stretched across 1920px is not what the app looks like. On web only, the real
+ * running app is placed inside a decorative iPhone frame so the preview reads
+ * the way the product does. Native gets none of it: the frame is pure web
+ * presentation, and Android/iOS render the stack exactly as before.
+ *
+ * This is a display wrapper, not a second navigation layer — the same <Stack>
+ * element is passed through either way, so routing, state and data are the real
+ * ones on both platforms.
+ */
+function withPhoneShell(node: React.ReactNode) {
+  if (Platform.OS !== 'web') return node;
+  return <WebPhoneShell>{node}</WebPhoneShell>;
+}
 
 /**
  * Root layout. Holds the two things every route needs before it can render:
@@ -52,7 +69,7 @@ export default function RootLayout() {
     );
   }
 
-  return (
+  return withPhoneShell(
     <SafeAreaProvider>
       <NotificationProvider>
         <StatusBar style="dark" />
@@ -82,3 +99,4 @@ export default function RootLayout() {
     </SafeAreaProvider>
   );
 }
+

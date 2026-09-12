@@ -29,6 +29,7 @@ import type {
   WorkloadItem
 } from '@/data/types';
 import { currentUserId, hasSupabase, supabase } from '@/lib/supabaseClient';
+import { isDemoActive } from '@/lib/demoMode';
 import {
   addEventToDeviceCalendar,
   deleteEventFromDeviceCalendar,
@@ -106,6 +107,45 @@ function rollingBaseline(values: number[]): number | null {
  * aggregate can disagree with the rows it summarises after any change to how it
  * is computed — deriving it means it cannot.
  */
+/**
+ * How many usable finger spot checks have been recorded.
+ *
+ * Derived here once and shared, because two callers need the same answer and
+  * only one of them needs the rest of the baseline: `getBaseline()` for the Desk
+  * Mode gate, and the baseline screen's own progress row.
+  *
+  * ── A deliberate widening, and why ──────────────────
+  * `getBaseline()` counts only good finger scans *with an RMSSD*, because it
+  * derives a median from those values and a null would poison it. This counts
+  * good finger scans whether or not a value is present — because what it answers
+  * is "how many spot checks has this person done", and the calibration gate is
+  * about participation, not about whether the analyser found a clean pulse.
+  *
+  * The distinction is load-bearing for the simulation week: its seeded rows carry
+  * no HRV (nothing was measured, so inventing a number would be dishonest), and
+  * the old shared count therefore read 0/3 on a week where the checks had already
+  * been done. Widening here fixes that without touching the median above.
+  *
+  * `signalQuality === 'good'` is still required: Wick only records a scan when a
+  * finger was actually read, so a rejected burst must not count.
+  */
+ export async function getCalibrationScans(): Promise<number> {
+   if (hasSupabase) {
+     const userId = await currentUserId();
+     const { data } = await supabase
+       .from('ppg_scans')
+       .select('id')
+       .eq('user_id', userId)
+       .eq('source', 'finger')
+       .eq('signal_quality', 'good')
+       .limit(BASELINE_WINDOW);
+     return (data ?? []).length;
+   }
+
+   const db = await readDb();
+   return db.scans.filter((sc) => sc.source === 'finger' && sc.signalQuality === 'good').length;
+ }
+
 export async function getBaseline(): Promise<Baseline> {
   if (hasSupabase) {
     const userId = await currentUserId();
@@ -1821,6 +1861,10 @@ export async function deleteTasksOutsideWeek(currentWeekStart: string): Promise<
  * - New -> insert into DB as pending
  * - Unchanged -> skip
  * - Changed -> update date/time/title in DB
+ *
+ * In simulation mode this clears and re-seeds the demo week instead. A real
+ * device calendar is not what the demo is describing, so diffing against it
+ * would add an unrelated week of events on top of the simulated one.
  */
 export async function syncCalendarToDb(weekStartStr?: string): Promise<{
   tasksCreated: number;
@@ -1828,6 +1872,14 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
   totalEvents: number;
   changedTaskIds: string[];
 }> {
+  if (isDemoActive()) {
+    const { reseedDemoWeek } = await import('@/lib/demoMode');
+    const totalEvents = await reseedDemoWeek();
+    // Nothing is left pending: the demo week is a finished picture of a week,
+    // not a queue of tasks waiting for the user to approve them one by one.
+    return { tasksCreated: 0, tasksUpdated: 0, totalEvents, changedTaskIds: [] };
+  }
+
   try {
     const connections = await getCalendarConnections();
     const hasConnection = connections.some((c) => c.connected);
@@ -1965,11 +2017,22 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
 
 /**
  * Runs AI task analysis on the active week's tasks in the DB.
+ *
+ * Skipped entirely in simulation mode: the seeded week already carries the
+ * analysis, and re-deriving it would quietly replace the demo's numbers with
+ * whatever a model guessed.
  */
 export async function analyzeCurrentWeekTasks(
   weekStartStr?: string,
   taskIds?: string[]
 ): Promise<TaskAnalysis[]> {
+  // The simulated week carries its own analysis — every task already has a
+  // category, priority, duration and stress score — so there is nothing to
+  // analyse and no reason to spend tokens re-deriving it.
+  if (isDemoActive()) {
+    return await getTaskAnalyses(weekStartStr);
+  }
+
   try {
     const now = new Date();
     const day = now.getDay();
