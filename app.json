@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Wick",
-    "slug": "Wick",
+    "slug": "goodquestion-wick",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
@@ -71,7 +71,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "92a85016-f847-42e4-8a4b-b80d6350d7ad"
+        "projectId": "935f4c61-5edf-4c22-8942-8bf137d84216"
       }
     },
     "owner": "weiru"
