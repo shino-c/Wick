@@ -32,7 +32,7 @@ import type {
 } from '@/data/types';
 import { analyzeWeeklyCapacity, parseQuickTasksNLP, suggestLoadBalance } from '@/services/aiService';
 import { isNewWeek, updateEventOnDeviceCalendar } from '@/services/calendarSync';
-import { toISODate } from '@/services/dateUtils';
+import { formatTaskTime, formatWeekday, toISODate } from '@/services/dateUtils';
 import {
   approveTaskAnalysis,
   createAndSyncTask,
@@ -878,6 +878,7 @@ export default function Home() {
                     key={i}
                     style={[
                       styles.dayLabelWrap,
+                      { left: `${(points[i].x / 380) * 100}%` },
                       i === todayIdx && styles.dayLabelWrapActive,
                     ]}
                   >
@@ -1181,8 +1182,12 @@ export default function Home() {
                         </View>
                         <Text style={[styles.taskSubDetail, done && styles.taskSubDone]}>
                           {task.category} • {task.estimated_duration_hours}h
-                          {task.scheduled_start_time ? ` • ${task.scheduled_start_time}` : ''}
-                          {task.scheduled_date ? ` • ${task.scheduled_date}` : ''}
+                          {formatTaskTime(task.scheduled_start_time)
+                            ? ` • ${formatTaskTime(task.scheduled_start_time)}`
+                            : ''}
+                          {task.scheduled_date
+                            ? ` • ${formatWeekday(task.scheduled_date) ?? task.scheduled_date}`
+                            : ''}
                         </Text>
                       </View>
                     </View>
@@ -1435,7 +1440,9 @@ export default function Home() {
                     </View>
                     <Text style={styles.reviewTaskTitle}>{task.title}</Text>
                     <Text style={styles.reviewTaskDetails}>
-                      {task.category} • {task.estimated_duration_hours}h • {task.scheduled_date} {task.scheduled_start_time || 'All Day'}
+                      {task.category} • {task.estimated_duration_hours}h •{' '}
+                      {formatWeekday(task.scheduled_date) ?? task.scheduled_date}{' '}
+                      {formatTaskTime(task.scheduled_start_time) || 'All Day'}
                     </Text>
                     {task.stress_score != null && (
                       <Text style={styles.reviewTaskStress}>Stress Impact: {task.stress_score}%</Text>
@@ -1689,10 +1696,11 @@ export default function Home() {
                       {parsedTasks.map((task, idx) => {
                         const catEmoji = getCategoryEmoji(task.category);
                         const priorityStyle = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.medium;
-                        const timeLabel = task.scheduled_start_time
+                        const timeLabel = formatTaskTime(task.scheduled_start_time)
                           ? (() => {
-                              const h = parseInt(task.scheduled_start_time.split(':')[0], 10);
-                              const m = task.scheduled_start_time.split(':')[1];
+                              const time = formatTaskTime(task.scheduled_start_time)!;
+                              const h = parseInt(time.split(':')[0], 10);
+                              const m = time.split(':')[1];
                               return h < 12 ? `${h}:${m}am` : h === 12 ? `12:${m}pm` : `${h - 12}:${m}pm`;
                             })()
                           : 'All Day';
@@ -1720,7 +1728,8 @@ export default function Home() {
                               </View>
                             </View>
                             <Text style={styles.parsedTaskMeta}>
-                              {task.category} • {task.estimated_duration_hours}h • {task.scheduled_date} • {timeLabel}
+                              {task.category} • {task.estimated_duration_hours}h •{' '}
+                              {formatWeekday(task.scheduled_date) ?? task.scheduled_date} • {timeLabel}
                             </Text>
                             <Pressable
                               onPress={() => setParsedTasks(prev => prev.filter((_, i) => i !== idx))}
@@ -1930,21 +1939,23 @@ const styles = StyleSheet.create({
   tooltipScore: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
   tooltipUnit: { fontSize: 10, color: '#F8EEDE', fontWeight: '600' },
   tooltipNote: { fontSize: 9, color: '#F8EEDE', fontStyle: 'italic', marginTop: 1 },
-  /*
-   * The label row is padded by exactly the same fraction of the width that the
-   * chart's first and last data points are inset in the 380-unit viewBox
-   * (chartLeft = 20, chartRight = 365 → 20/380 = 5.263%), and each day then
-   * occupies a 1/7 column of the remaining space. Centre of column i is then
-   * 20 + (i + 0.5) * (345/7), which is precisely the SVG's x for point i — so
-   * every letter sits under its own dot at any frame width.
-   */
+  /* The labels use the exact same x coordinate as their SVG points. The first
+     and last points are inset at 20/380 and 365/380 of the chart width, so each
+     label is positioned from that same viewBox coordinate instead of using flex
+     columns (which would put their centres at different x values). */
   daysRow: {
-    flexDirection: 'row',
+    position: 'relative',
     width: '100%',
+    height: 24,
     marginTop: 8,
-    paddingHorizontal: '5.263%',
   },
-  dayLabelWrap: { flex: 1, alignItems: 'center' },
+  dayLabelWrap: {
+    position: 'absolute',
+    top: 0,
+    width: 28,
+    marginLeft: -14,
+    alignItems: 'center',
+  },
   dayLabelWrapActive: {
     backgroundColor: colors.yellow,
     borderRadius: 50,

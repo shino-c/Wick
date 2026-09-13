@@ -27,7 +27,7 @@ import {
   getCalendarPermissionStatus,
   updateEventOnDeviceCalendar,
 } from '@/services/calendarSync';
-import { toISODate } from '@/services/dateUtils';
+import { formatTaskTime, formatWeekday, toISODate } from '@/services/dateUtils';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import {
   analyzeCurrentWeekTasks,
@@ -522,8 +522,8 @@ export default function BaselineScreen() {
                 </View>
                 <Text style={styles.reviewTaskDetails}>
                   {task.category} • {task.estimated_duration_hours}h •{' '}
-                  {task.scheduled_date}{' '}
-                  {task.scheduled_start_time || 'All Day'}
+                  {formatWeekday(task.scheduled_date) ?? task.scheduled_date}{' '}
+                  {formatTaskTime(task.scheduled_start_time) || 'All Day'}
                 </Text>
                 {task.stress_score != null && (
                   <Text style={styles.reviewTaskStress}>

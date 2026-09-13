@@ -23,3 +23,18 @@ export function toISODate(d: Date = new Date()): string {
 
 /** Today's local calendar date, as the app's "YYYY-MM-DD" keys expect. */
 export const todayISO = () => toISODate();
+
+/** Short local weekday for an ISO calendar date, e.g. "Mon" or "Tue". */
+export function formatWeekday(isoDate?: string): string | null {
+  if (!isoDate) return null;
+  const date = new Date(`${isoDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString(undefined, { weekday: 'short' });
+}
+
+/** Keep task-card times at minute precision, e.g. "09:05". */
+export function formatTaskTime(time?: string | null): string | null {
+  if (!time) return null;
+  const match = time.match(/^(\d{1,2}:\d{2})/);
+  return match?.[1] ?? time;
+}
