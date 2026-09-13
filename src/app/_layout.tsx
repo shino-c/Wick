@@ -14,6 +14,7 @@ import {
 import { bootstrap, type BootstrapResult } from '@/lib/bootstrap';
 import { colors } from '@/theme';
 import { BackendBanner } from '@/components/BackendBanner';
+import { NotificationProvider } from '@/components/NotificationProvider';
 
 /**
  * Root layout. Holds the two things every route needs before it can render:
@@ -54,29 +55,31 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <StatusBar style="dark" />
-      <Stack
-        screenOptions={{
-          headerShown: false,
-          contentStyle: { backgroundColor: colors.cream },
-        }}
-      >
-        {/* Tabs must not animate.
-            These are siblings reached with router.replace, not a hierarchy, so
-            the default push transition slid one "page" over another and made
-            switching tabs feel like leaving the app you were in. With no
-            animation the pinned header and tab bar stay put and only the
-            content between them changes, which is what a tab bar promises. */}
-        <Stack.Screen name="home" options={{ animation: 'none' }} />
-        <Stack.Screen name="desk" options={{ animation: 'none' }} />
-        <Stack.Screen name="social" options={{ animation: 'none' }} />
-        <Stack.Screen name="recovery" options={{ animation: 'none' }} />
-        <Stack.Screen name="bubblepop" options={{ animation: 'slide_from_right' }} />
+      <NotificationProvider>
+        <Stack
+          screenOptions={{
+            headerShown: false,
+            contentStyle: { backgroundColor: colors.cream },
+          }}
+        >
+          {/* Tabs must not animate.
+              These are siblings reached with router.replace, not a hierarchy, so
+              the default push transition slid one "page" over another and made
+              switching tabs feel like leaving the app you were in. With no
+              animation the pinned header and tab bar stay put and only the
+              content between them changes, which is what a tab bar promises. */}
+          <Stack.Screen name="home" options={{ animation: 'none' }} />
+          <Stack.Screen name="desk" options={{ animation: 'none' }} />
+          <Stack.Screen name="social" options={{ animation: 'none' }} />
+          <Stack.Screen name="recovery" options={{ animation: 'none' }} />
+          <Stack.Screen name="bubblepop" options={{ animation: 'slide_from_right' }} />
 
-        {/* A focus session must not be swipeable-away mid-reading, and the
-            enforced pause depends on it. */}
-        <Stack.Screen name="session" options={{ gestureEnabled: false, animation: 'fade' }} />
-        <Stack.Screen name="summary" options={{ gestureEnabled: false }} />
-      </Stack>
+          {/* A focus session must not be swipeable-away mid-reading, and the
+              enforced pause depends on it. */}
+          <Stack.Screen name="session" options={{ gestureEnabled: false, animation: 'fade' }} />
+          <Stack.Screen name="summary" options={{ gestureEnabled: false }} />
+        </Stack>
+      </NotificationProvider>
       <BackendBanner backend={boot.backend} warning={boot.warning} />
     </SafeAreaProvider>
   );

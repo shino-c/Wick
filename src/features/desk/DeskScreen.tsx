@@ -1,6 +1,6 @@
 import React from 'react';
 import { Pressable, View } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Badge, Button, Card, Eyebrow, Row, Screen, Spacer, Txt } from '@/components/base';
 import { Sparkline } from '@/components/charts';
@@ -15,6 +15,12 @@ import BottomNavigation from '@/components/bottombar';
 import TopNavigation from '@/components/topbar';
 
 const DURATIONS = [15, 25, 35, 45];
+
+/** The longest offered block that still fits `requested`, or the usual default. */
+function snapToDuration(requested: number): number {
+  const fits = DURATIONS.filter((d) => d <= requested);
+  return fits.length > 0 ? Math.max(...fits) : POMODORO.DEFAULT_MINUTES;
+}
 
 /**
  * Battery figures are measured on the target device (vivo V2202, 5000 mAh) over
@@ -45,7 +51,30 @@ const SENSING_MODES: { id: SensingMode; label: string; blurb: string; battery: s
 
 export default function DeskScreen() {
   const router = useRouter();
-  const [minutes, setMinutes] = React.useState<number>(POMODORO.DEFAULT_MINUTES);
+  /**
+   * Set when the user arrived from a nudge ("your exam is Friday — 45 minutes?").
+   * Carrying the task through matters for more than a preselected duration: it
+   * is the only point where the app knows what a block is *for*, so it is the
+   * only place the guess on the summary screen can come from.
+   */
+  const params = useLocalSearchParams<{
+    minutes?: string;
+    taskId?: string;
+    taskTitle?: string;
+    category?: string;
+  }>();
+  const suggestedMinutes = Number(params.minutes) || 0;
+  const taskId = params.taskId ?? null;
+  const taskTitle = params.taskTitle ?? null;
+  const taskCategory = params.category ?? null;
+
+  const [minutes, setMinutes] = React.useState<number>(
+    // A nudge sizes its offer to the real gap, so it can ask for 40 minutes
+    // when the chip row only offers 35. Snap *down* to the nearest offered
+    // length: the block then still fits the window the nudge measured, and the
+    // selected chip matches the number the user was just shown a button for.
+    snapToDuration(suggestedMinutes)
+  );
   const [breakMinutes, setBreakMinutes] = React.useState<number>(POMODORO.DEFAULT_BREAK_MINUTES);
   const [soundscape, setSoundscape] = React.useState<SoundscapeId>('rain');
   const [sensing, setSensing] = React.useState<SensingMode>('continuous');
@@ -85,6 +114,22 @@ export default function DeskScreen() {
       </Txt>
 
       <Spacer h={5} />
+
+      {taskTitle && (
+        <>
+          <Card style={{ backgroundColor: colors.yellowWash, borderColor: colors.yellowDeep }}>
+            <Eyebrow color={colors.brown}>This block is for</Eyebrow>
+            <Spacer h={2} />
+            <Txt v="heading">{taskTitle}</Txt>
+            <Spacer h={1} />
+            <Txt v="small" color={colors.inkSoft}>
+              Logged against this when you finish, so your hours land somewhere
+              instead of vanishing into {'“'}focused for 45 minutes{'”'}.
+            </Txt>
+          </Card>
+          <Spacer h={3} />
+        </>
+      )}
 
       {!baselineReady && (
         <>
@@ -353,6 +398,9 @@ export default function DeskScreen() {
               breakMinutes: String(breakMinutes),
               soundscape,
               sensing,
+              ...(taskId ? { taskId } : {}),
+              ...(taskTitle ? { taskTitle } : {}),
+              ...(taskCategory ? { category: taskCategory } : {}),
             },
           })
         }

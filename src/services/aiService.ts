@@ -18,8 +18,8 @@ import type {
   TaskAnalysis,
   WeeklyCapacityAnalysis,
 } from '@/data/types';
+import { readDb, writeDb } from '@/data/localStore';
 import { toISODate } from '@/services/dateUtils';
-import { AtomIcon } from 'lucide-react-native';
 
 
 
@@ -88,7 +88,16 @@ async function callAI(
   prompt: string,
   systemPrompt?: string
 ): Promise<string | null> {
-  return callYourAI(prompt, systemPrompt);
+  // No model is wired up yet — the commented block above is the template to
+  // fill in. Returning null rather than calling an undefined function is not a
+  // placeholder for its own sake: every caller in this file already has a
+  // deterministic fallback, so a fresh clone with no API key is a fully working
+  // app rather than a crash on first sync.
+  //
+  // To enable: implement the example caller above and return it from here.
+  void prompt;
+  void systemPrompt;
+  return null;
 }
 
 
@@ -871,3 +880,90 @@ function heuristicSuggestions(ctx: RecoveryPlanContext): RecoverySuggestion[] {
       ];
 }
 
+
+/* ── Nudge phrasing ───────────────────────────────────────────────────────
+ *
+ * The engine in nudgeService.ts decides *whether* to interrupt and *what
+ * about*, entirely from arithmetic. This decides only how that sounds.
+ *
+ * The split is deliberate. A popup has to render the instant the screen
+ * focuses, so nothing about showing it can wait on a network call — and a
+ * decision to interrupt someone should be reproducible in a test, which an
+ * LLM's judgement is not. So the copy is rewritten in the background and
+ * cached against the nudge id for the rest of the day: the first sighting uses
+ * the deterministic wording, and any repeat within the day gets the warmer one.
+ */
+
+/** Cached copy for a nudge id, or null when nothing has been rewritten yet. */
+export async function getCachedNudgePhrase(
+  nudgeId: string,
+  date = toISODate()
+): Promise<{ title: string; body: string } | null> {
+  const db = await readDb();
+  const hit = (db.nudgePhrases ?? []).find((p) => p.nudgeId === nudgeId && p.date === date);
+  return hit ? { title: hit.title, body: hit.body } : null;
+}
+
+/**
+ * Rewrite one nudge in a warmer voice and cache it for the day.
+ *
+ * Fire-and-forget: callers show the deterministic copy immediately and let this
+ * resolve behind it. Returns null when there is no model configured or the
+ * reply cannot be trusted, and the caller keeps what it already had.
+ *
+ * The facts are passed in already computed and the model is told not to invent
+ * any. A nudge's whole credibility rests on its evidence line being literally
+ * true — "your exam is Friday and you have 90 free minutes" is worth reading
+ * precisely because Wick checked, and one hallucinated deadline would cost
+ * that permanently.
+ */
+export async function phraseNudge(nudge: {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  evidence: string;
+}): Promise<{ title: string; body: string } | null> {
+  const date = toISODate();
+  const cached = await getCachedNudgePhrase(nudge.id, date);
+  if (cached) return cached;
+
+  const prompt = `Rewrite one gentle in-app nudge for a stressed student.
+
+Kind: ${nudge.kind}
+The facts (already verified — do not add, change or invent any): ${nudge.evidence}
+Current wording — title: "${nudge.title}" body: "${nudge.body}"
+
+Reply with STRICT JSON: {"title": "...", "body": "..."}
+Rules: title max 40 chars, body max 160 chars, one sentence or two short ones.
+Warm, optional, never pressuring. It must stay obvious that saying no is fine.
+Never use 'must', 'should', 'need to', 'streak', 'don't break', or an exclamation mark.
+Keep every number and name from the facts exactly as given. Invent nothing.
+OUTPUT STRICT VALID JSON ONLY (no markdown fences).`;
+
+  const raw = await callAI(
+    prompt,
+    'You are a kind, low-pressure companion for stressed students. You never exaggerate and never invent facts.'
+  );
+  if (!raw) return null;
+
+  try {
+    const clean = raw.trim().replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+    const parsed = JSON.parse(clean);
+    const title = String(parsed?.title ?? '').trim();
+    const body = String(parsed?.body ?? '').trim();
+    // A model that ignored the length rules also ignored the tone rules, so the
+    // deterministic copy is the safer thing to keep.
+    if (!title || !body || title.length > 60 || body.length > 220) return null;
+
+    const phrase = { nudgeId: nudge.id, date, title, body };
+    await writeDb((db) => {
+      const kept = (db.nudgePhrases ?? []).filter((p) => p.date === date && p.nudgeId !== nudge.id);
+      db.nudgePhrases = [...kept, phrase];
+    });
+    return { title, body };
+  } catch (e) {
+    console.error('Failed to parse AI nudge phrasing, keeping the plain wording:', e);
+    return null;
+  }
+}
