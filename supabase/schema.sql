@@ -172,10 +172,21 @@ create table if not exists focus_sessions (
   enforced_breaks int default 0,
   stress_delta_pct double precision,
   soundscape text,
+  -- What the block was spent on. Guessed from the overlapping calendar task,
+  -- confirmed in one tap on the summary screen. Nullable on purpose: the user
+  -- is always allowed to skip the question, and every session written before
+  -- this column existed is legitimately unknown rather than miscategorised.
+  task_id text,
+  category text,
   created_at timestamptz default now()
 );
 
+-- Additive for projects created before session categorisation shipped.
+alter table focus_sessions add column if not exists task_id text;
+alter table focus_sessions add column if not exists category text;
+
 create index if not exists focus_sessions_user_time on focus_sessions (user_id, created_at desc);
+create index if not exists focus_sessions_user_category on focus_sessions (user_id, category, started_at desc);
 
 alter table focus_sessions enable row level security;
 drop policy if exists "own sessions" on focus_sessions;

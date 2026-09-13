@@ -43,8 +43,13 @@ const blankSession = (date: string): RecoveryPlanSession => ({
 });
 
 /** Day window we consider "free time", so we never suggest meeting time at 2am. */
-const DAY_START_MIN = 8 * 60;
-const DAY_END_MIN = 22 * 60;
+/**
+ * Exported because the nudge engine has to agree with these exactly — a popup
+ * at 06:40 about a free window that does not officially start until 08:00
+ * would be the app contradicting itself.
+ */
+export const DAY_START_MIN = 8 * 60;
+export const DAY_END_MIN = 22 * 60;
 const MIN_FREE_MINUTES = 5;
 
 /** Seeds rewarded instantly when the user joins a shared circle challenge. */
@@ -197,7 +202,7 @@ export function computeAvailableSlots(tasks: TaskAnalysis[], date: string): Avai
  * MIN_FREE_MINUTES still remaining, clamping a window already in progress so
  * it reflects what is actually left.
  */
-function prunePastSlots(slots: AvailableSlot[], date: string, now = new Date()): AvailableSlot[] {
+export function prunePastSlots(slots: AvailableSlot[], date: string, now = new Date()): AvailableSlot[] {
   if (date !== toISODate(now)) return slots;
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const kept: AvailableSlot[] = [];

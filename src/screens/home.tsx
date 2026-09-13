@@ -22,6 +22,9 @@ import { AppModal } from '@/components/base';
 import BottomNavigation from '@/components/bottombar';
 import { DateChipPicker, TimePicker, endTimeFrom } from '@/components/taskPickers';
 import TopNavigation from '@/components/topbar';
+import { NudgeSheet } from '@/components/NudgeSheet';
+import { useNudge } from '@/hooks/use-nudge';
+import { listNudgeEvents } from '@/services/nudgeService';
 import type {
   CalendarConnection,
   LoadBalanceSuggestion,
@@ -194,8 +197,21 @@ function buildEarlyWarningInsight(
   };
 }
 
+/** How long ago, in the loose phrasing the notification list uses. */
+function relativeTime(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
 export default function Home() {
   const router = useRouter();
+
+  // The one nudge, if the engine has anything to say right now.
+  const { nudge, close: closeNudge } = useNudge();
 
   // Core Data State
   const [tasks, setTasks] = useState<TaskAnalysis[]>([]);
@@ -286,6 +302,29 @@ export default function Home() {
       // Generate AI Load Balance Suggestions
       const suggestions = await suggestLoadBalance(allTasks, capacityValue || undefined);
       setLoadSuggestions(suggestions);
+
+      // The bell is the nudge ledger, not a second inbox. Anything Wick has
+      // said is here, so a nudge that arrived while the user was mid-task is
+      // still findable afterwards instead of being lost with the sheet.
+      // "Unread" is derived rather than stored: a nudge is outstanding until
+      // the user actually did something with it.
+      const events = await listNudgeEvents(60);
+      const latestByNudge = new Map<string, (typeof events)[number]>();
+      for (const event of events) {
+        if (!latestByNudge.has(event.nudgeId)) latestByNudge.set(event.nudgeId, event);
+      }
+      setNotifications(
+        [...latestByNudge.values()]
+          .sort((a, b) => (a.at < b.at ? 1 : -1))
+          .slice(0, 20)
+          .map((event) => ({
+            id: event.id,
+            title: event.title,
+            body: event.body,
+            time: relativeTime(event.at),
+            read: event.outcome !== 'shown',
+          }))
+      );
     } catch (err) {
       console.error('Error loading dashboard data:', err);
     } finally {
@@ -1832,6 +1871,10 @@ export default function Home() {
           </View>
         </View>
       </Modal>)}
+
+      {/* Sits above everything, including the review modal's own backdrop —
+          but only ever one at a time, because the engine only ever emits one. */}
+      <NudgeSheet nudge={nudge} onClose={closeNudge} />
     </SafeAreaView>
   );
 }

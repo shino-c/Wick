@@ -30,6 +30,9 @@ export default function SessionScreen() {
     soundscape?: string;
     sensing?: string;
     breakMinutes?: string;
+    taskId?: string;
+    taskTitle?: string;
+    category?: string;
   }>();
 
   // Route params arrive as strings; parse once and defend against a deep link
@@ -101,9 +104,18 @@ export default function SessionScreen() {
     // The soundscape was chosen here, so it is recorded here. The session row
     // used to store null unconditionally, which meant the one thing a user
     // actively picks about a session was the one thing never saved.
-    stageSessionSummary({ ...summary, soundscape: sound });
+    stageSessionSummary({
+      ...summary,
+      soundscape: sound,
+      // Passed straight through so the summary screen can pre-fill its guess.
+      // Null when the user started a block cold, which is a legitimate answer:
+      // the summary asks rather than assuming.
+      taskId: params.taskId ?? null,
+      taskTitle: params.taskTitle ?? null,
+      category: params.category ?? null,
+    });
     router.replace('/summary');
-  }, [router, session, sound]);
+  }, [router, session, sound, params.taskId, params.taskTitle, params.category]);
 
   // Hardware back must not be an escape hatch out of an enforced pause.
   React.useEffect(() => {

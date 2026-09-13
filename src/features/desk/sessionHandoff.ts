@@ -13,13 +13,25 @@ import type { SessionSummary } from '@/camera/useDeskSession';
  * link, a refresh on web) yields null rather than a stale session from an hour
  * ago, and the summary screen handles that.
  */
-let pending: SessionSummary | null = null;
+/**
+ * What the block was for, when the user got here from a nudge or picked a task
+ * on the Desk screen. Carried alongside the summary rather than inside
+ * SessionSummary because useDeskSession measures a session; it has no business
+ * knowing which calendar row prompted one.
+ */
+export interface StagedSession extends SessionSummary {
+  taskId?: string | null;
+  taskTitle?: string | null;
+  category?: string | null;
+}
 
-export function stageSessionSummary(summary: SessionSummary): void {
+let pending: StagedSession | null = null;
+
+export function stageSessionSummary(summary: StagedSession): void {
   pending = summary;
 }
 
-export function takeSessionSummary(): SessionSummary | null {
+export function takeSessionSummary(): StagedSession | null {
   const summary = pending;
   pending = null;
   return summary;

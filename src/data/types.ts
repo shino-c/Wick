@@ -57,6 +57,17 @@ export interface FocusSessionRow {
   enforcedBreaks: number;
   stressDeltaPct: number | null;
   soundscape: string | null;
+  /**
+   * What the block was actually spent on.
+   *
+   * Guessed from whichever calendar task the session overlapped, then confirmed
+   * (or corrected) on the summary screen in one tap. Without it a focus session
+   * is an anonymous 45 minutes: it can tell you that you focused, never on
+   * what — so nothing can say "three hours of academic work, none of it on the
+   * exam", which is the whole point of tracking it.
+   */
+  taskId: string | null;
+  category: string | null;
   createdAt: string;
 }
 
@@ -379,3 +390,66 @@ export interface GardenItem {
   position?: { x: number; y: number };
 }
 
+
+
+/* ── Nudge engine ────────────────────────────────────────────────────
+ *
+ * One queue, one cap. Desk Mode, Recovery and the circle's challenges all
+ * produce *candidates*; the engine scores them on a single scale and emits at
+ * most one. Three independent reminders would each be individually reasonable
+ * and collectively a nag — and a bad day, when the user is least able to
+ * absorb it, is exactly when all three would fire at once.
+ */
+
+export type NudgeKind = 'desk' | 'recovery' | 'challenge' | 'spot_check';
+
+/** What the user did with a nudge. Everything else is derived from these. */
+export type NudgeOutcome = 'shown' | 'accepted' | 'dismissed' | 'snoozed';
+
+export interface NudgeAction {
+  label: string;
+  /** An expo-router pathname, e.g. "/desk". */
+  href: string;
+  params?: Record<string, string>;
+}
+
+export interface Nudge {
+  /**
+   * Stable across evaluations — "desk:task:<id>", not a fresh uid. Dismissal
+   * cooldowns key off this, so a nudge the user waved away must come back with
+   * the same id or it would simply reappear a minute later wearing a new one.
+   */
+  id: string;
+  kind: NudgeKind;
+  /** 0..1, comparable across kinds. */
+  score: number;
+  title: string;
+  body: string;
+  /** The real reason, shown verbatim: "Data Structures exam, Fri · 90 min free now". */
+  evidence: string;
+  action: NudgeAction;
+  /** Offered alongside the main action when stress and deadline pressure collide. */
+  secondaryAction?: NudgeAction;
+  /** A nudge about a 14:00 gap is dead at 14:30. */
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface NudgeEvent {
+  id: string;
+  nudgeId: string;
+  kind: NudgeKind;
+  outcome: NudgeOutcome;
+  score: number;
+  title: string;
+  body: string;
+  at: string;
+}
+
+/** AI-written copy for one nudge id, cached for the day that produced it. */
+export interface NudgePhrase {
+  nudgeId: string;
+  date: string;
+  title: string;
+  body: string;
+}

@@ -25,6 +25,8 @@ import type {
     RecoveryPlanSession,
     SelfReport,
     StressScoreRow,
+    NudgeEvent,
+    NudgePhrase,
     SupportNudge,
     TaskAnalysis,
     WeeklyCapacityAnalysis,
@@ -57,6 +59,19 @@ export interface LocalDb {
   dailyRecoveryPlans: DailyRecoveryPlan[];
   gardenWallet: GardenWallet;
   gardenItems: GardenItem[];
+  /* ── Nudge engine ──────────────────────────────────────────────────
+   * Deliberately device-local, even when Supabase is configured. A nudge
+   * record is a log of when the app chose to interrupt someone and how they
+   * reacted — behavioural data with no second reader, so it stays on device.
+   */
+  nudgeEvents: NudgeEvent[];
+  /** AI-written copy for a nudge, cached per day so a popup never waits on a network call. */
+  nudgePhrases: NudgePhrase[];
+  /**
+   * "This event is actually academic." Keyed by normalised task title, because
+   * the calendar row is recreated on every sync but the title survives.
+   */
+  categoryOverrides: Record<string, string>;
 }
 
 export const uid = () =>
@@ -92,6 +107,9 @@ function emptyDb(): LocalDb {
     dailyRecoveryPlans: [],
     gardenWallet: { seeds: 0, updatedAt: new Date().toISOString() },
     gardenItems: [],
+    nudgeEvents: [],
+    nudgePhrases: [],
+    categoryOverrides: {},
   };
 }
 

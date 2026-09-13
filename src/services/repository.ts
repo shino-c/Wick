@@ -523,6 +523,8 @@ export async function saveSession(row: Omit<FocusSessionRow, 'id' | 'createdAt'>
         enforced_breaks: row.enforcedBreaks,
         stress_delta_pct: row.stressDeltaPct,
         soundscape: row.soundscape,
+        task_id: row.taskId,
+        category: row.category,
       })
       .select('id')
       .single();
@@ -532,6 +534,87 @@ export async function saveSession(row: Omit<FocusSessionRow, 'id' | 'createdAt'>
     db.sessions.unshift({ ...row, id, createdAt: new Date().toISOString() });
   });
   return id;
+}
+
+/**
+ * Attach (or correct) what a finished session was spent on.
+ *
+ * Separate from saveSession because the row is written the moment the block
+ * ends — before the user has been asked anything. Waiting for the answer would
+ * mean a session that is never confirmed is never saved at all.
+ */
+export async function setSessionCategory(
+  sessionId: string,
+  category: string | null,
+  taskId: string | null = null
+): Promise<void> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    await supabase
+      .from('focus_sessions')
+      .update({ category, task_id: taskId })
+      .eq('id', sessionId)
+      .eq('user_id', userId);
+    return;
+  }
+  await writeDb((db) => {
+    const session = db.sessions.find((s) => s.id === sessionId);
+    if (session) {
+      session.category = category;
+      session.taskId = taskId;
+    }
+  });
+}
+
+export async function listSessions(limit = 50): Promise<FocusSessionRow[]> {
+  if (hasSupabase) {
+    const userId = await currentUserId();
+    const { data } = await supabase
+      .from('focus_sessions')
+      .select('*')
+      .eq('user_id', userId)
+      .order('started_at', { ascending: false })
+      .limit(limit);
+    return (data ?? []).map((r: any) => ({
+      id: r.id,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      plannedMinutes: r.planned_minutes,
+      actualMinutes: r.actual_minutes,
+      breaksTaken: r.breaks_taken,
+      enforcedBreaks: r.enforced_breaks,
+      stressDeltaPct: r.stress_delta_pct,
+      soundscape: r.soundscape,
+      taskId: r.task_id ?? null,
+      category: r.category ?? null,
+      createdAt: r.created_at,
+    }));
+  }
+  return (await readDb()).sessions.slice(0, limit);
+}
+
+/**
+ * Minutes of real focus per task and per category over the last `days`.
+ *
+ * This is what turns "you have a 4-hour exam prep task" into "…and you have
+ * already spent 3 of those hours", which is the difference between a nudge
+ * that helps and one that repeats itself until the exam.
+ */
+export async function focusMinutesSince(
+  days = 7
+): Promise<{ byTask: Record<string, number>; byCategory: Record<string, number> }> {
+  const cutoff = Date.now() - days * 86_400_000;
+  const sessions = (await listSessions(200)).filter(
+    (s) => new Date(s.startedAt).getTime() >= cutoff
+  );
+  const byTask: Record<string, number> = {};
+  const byCategory: Record<string, number> = {};
+  for (const s of sessions) {
+    const minutes = s.actualMinutes ?? 0;
+    if (s.taskId) byTask[s.taskId] = (byTask[s.taskId] ?? 0) + minutes;
+    if (s.category) byCategory[s.category] = (byCategory[s.category] ?? 0) + minutes;
+  }
+  return { byTask, byCategory };
 }
 
 export async function saveAccuracyFeedback(
