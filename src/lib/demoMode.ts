@@ -292,7 +292,10 @@ const DEMO_SELF_REPORT = 62;
  * for the same reason — a fused score is supposed to mean a sensor reading
  * happened.
  */
-const DEMO_BASELINE_SCANS = 3;
+// Demo onboarding intentionally starts with two completed spot checks on every
+// app launch. A scan made during the current run can move the count upward, but
+// the next launch restores this clean starting point without affecting real mode.
+const DEMO_BASELINE_SCANS = 2;
 
 /**
  * The seeded task list, rebuilt from the templates and the current week's dates.
@@ -500,8 +503,58 @@ export async function shouldEnterDemoMode(): Promise<boolean> {
  * is on screen, so re-syncing does something visible (and honest) rather than
  * pulling a real device calendar over the top of a simulated week.
  */
-export async function reseedDemoWeek(): Promise<number> {
-  await seedDemoWeek(status.weekStart || DEMO_WEEK_START);
+/**
+ * Reset only the simulated finger-check history at app launch.
+ *
+ * This is deliberately called from setupDemoMode(), not from screen focus or
+ * calendar re-sync. A user can make additional checks during one app run, but
+ * reopening the zero-configuration simulation always starts from its two-check
+ * baseline. Real accounts never enter this function.
+ */
+async function resetDemoCalibrationForLaunch(): Promise<void> {
+  await writeDb((db) => {
+    const nonFingerScans = db.scans.filter((scan) => scan.source !== 'finger');
+    const seedScans = Array.from({ length: DEMO_BASELINE_SCANS }, (_, i) => ({
+      id: uid(),
+      source: 'finger' as const,
+      heartRate: null,
+      hrvRmssd: null,
+      stressLevel: null,
+      deviationPct: null,
+      signalQuality: 'good' as const,
+      createdAt: new Date(`${demoDate(Math.min(i, 6))}T07:30:00`).toISOString(),
+    }));
+    db.scans = [...seedScans, ...nonFingerScans];
+    db.baseline = {
+      ...db.baseline,
+      scanCount: DEMO_BASELINE_SCANS,
+      calibrationScans: DEMO_BASELINE_SCANS,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+}
+
+export async function reseedDemoWeek(weekStart = status.weekStart || DEMO_WEEK_START): Promise<number> {
+  // Calendar re-sync replaces only the simulated task week. Preserve any spot
+  // checks made during this app run; launch-time reset is handled separately by
+  // setupDemoMode(), so re-sync never unexpectedly changes the progress row.
+  const before = await readDb();
+  const fingerScans = before.scans.filter((scan) => scan.source === 'finger');
+  const baselineBefore = before.baseline;
+
+  await seedDemoWeek(weekStart);
+
+  await writeDb((db) => {
+    const nonFingerScans = db.scans.filter((scan) => scan.source !== 'finger');
+    db.scans = [...fingerScans, ...nonFingerScans];
+    db.baseline = {
+      ...db.baseline,
+      scanCount: baselineBefore.scanCount,
+      calibrationScans: baselineBefore.calibrationScans,
+      rmssdBaseline: baselineBefore.rmssdBaseline,
+      updatedAt: new Date().toISOString(),
+    };
+  });
   return DEMO_TASKS.length;
 }
 
@@ -563,6 +616,7 @@ export async function setupDemoMode(): Promise<DemoStatus> {
   // free-window list; drop exactly those so the next read rebuilds the plan
   // from the seeded week. Configured accounts never enter this path.
   if (status.active) {
+    await resetDemoCalibrationForLaunch();
     await writeDb((db) => {
       if (db.dailyRecoveryPlans?.some((plan) => plan.slots.length === 0)) {
         db.dailyRecoveryPlans = db.dailyRecoveryPlans.filter((plan) => plan.slots.length > 0);

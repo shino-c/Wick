@@ -205,14 +205,20 @@ export async function getBaseline(): Promise<Baseline> {
   }
 
   const db = await readDb();
-  const values = db.scans
-    .filter((sc) => sc.source === 'finger' && sc.signalQuality === 'good' && sc.hrvRmssd !== null)
+  const fingerScans = db.scans.filter(
+    (sc) => sc.source === 'finger' && sc.signalQuality === 'good'
+  );
+  const values = fingerScans
+    .filter((sc) => sc.hrvRmssd !== null)
     .slice(0, BASELINE_WINDOW)
     .map((sc) => sc.hrvRmssd as number);
   return {
     ...db.baseline,
     rmssdBaseline: rollingBaseline(values) ?? db.baseline.rmssdBaseline,
-    calibrationScans: values.length,
+    // The zero-configuration simulation seeds scans without fabricated HRV
+    // values. Count those participation records in demo mode, while retaining
+    // the original HRV-backed count for every configured/local real flow.
+    calibrationScans: isDemoActive() ? fingerScans.length : values.length,
   };
 }
 

@@ -20,6 +20,7 @@ import { DateChipPicker, TimePicker, endTimeFrom } from '@/components/taskPicker
 import type { TaskAnalysis } from '@/data/types';
 import { ITEMS } from '@/features/calibration/questionnaire';
 import { markOnboarded } from '@/lib/bootstrap';
+import { isDemoActive } from '@/lib/demoMode';
 import { supabase } from '@/lib/supabaseClient';
 import {
   connectCalendar,
@@ -103,6 +104,7 @@ export default function BaselineScreen() {
   const [confirming, setConfirming] = useState(false);
 
   const currentWeekStart = getWeekStart();
+  const demoMode = isDemoActive();
 
   const refresh = React.useCallback(async () => {
     const [baseline, self, questionnaireCompleted, connections, tasks] = await Promise.all([
@@ -167,9 +169,11 @@ export default function BaselineScreen() {
         currentWeekStart,
         taskIdsToAnalyze.length > 0 ? taskIdsToAnalyze : undefined
       );
-      const reviewTasks = taskIdsToAnalyze.length > 0
-        ? analyzedTasks.filter((task) => taskIdsToAnalyze.includes(task.id))
-        : analyzedTasks.filter((task) => task.status === 'pending');
+      const reviewTasks = demoMode
+        ? analyzedTasks
+        : taskIdsToAnalyze.length > 0
+          ? analyzedTasks.filter((task) => taskIdsToAnalyze.includes(task.id))
+          : analyzedTasks.filter((task) => task.status === 'pending');
 
       if (reviewTasks.length > 0) {
         setTasksToReview(reviewTasks);
@@ -280,7 +284,7 @@ export default function BaselineScreen() {
 
   const setupComplete =
     questionnaireDone &&
-    scansLeft === 0 &&
+    (demoMode || scansLeft === 0) &&
     calendarConnected;
 
 

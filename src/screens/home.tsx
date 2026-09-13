@@ -30,6 +30,7 @@ import type {
   TaskAnalysis,
   WeeklyCapacityAnalysis,
 } from '@/data/types';
+import { demoTodayIndex, isDemoActive } from '@/lib/demoMode';
 import { analyzeWeeklyCapacity, parseQuickTasksNLP, suggestLoadBalance } from '@/services/aiService';
 import { isNewWeek, updateEventOnDeviceCalendar } from '@/services/calendarSync';
 import { formatTaskTime, formatWeekday, toISODate } from '@/services/dateUtils';
@@ -562,7 +563,9 @@ export default function Home() {
   // but hasData stays false so they never count as the week's peak.
   const WEEK_WEIGHTS = { biometric: 0.4, selfReport: 0.3, aiLoad: 0.3 } as const;
   const dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-  const todayIdx = (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
+  // The zero-configuration simulation presents Monday as the current day. Real
+  // accounts keep the actual local weekday calculation unchanged.
+  const todayIdx = isDemoActive() ? demoTodayIndex() : (new Date().getDay() + 6) % 7; // Mon=0 .. Sun=6
   const weekStartMs = new Date(currentWeekStart + 'T00:00:00').getTime();
 
   const avgOf = (vals: (number | null)[]) => {
