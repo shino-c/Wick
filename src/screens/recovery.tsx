@@ -1,13 +1,13 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    ImageBackground,
-    PanResponder,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    View,
+	ActivityIndicator,
+	ImageBackground,
+	PanResponder,
+	Pressable,
+	ScrollView,
+	StyleSheet,
+	View,
 } from "react-native";
 
 import { AppModal, Badge, Card, Emoji, Row, Screen, Txt } from "@/components/base";
@@ -15,33 +15,33 @@ import BottomNavigation from "@/components/bottombar";
 import TopNavigation from "@/components/topbar";
 import { GARDEN_CATALOG } from "@/data/gardenCatalog";
 import type {
-    DailyRecoveryPlan,
-    GardenItem,
-    GardenWallet,
-    RecoveryPlanSession,
-    RecoverySuggestion,
+	DailyRecoveryPlan,
+	GardenItem,
+	GardenWallet,
+	RecoveryPlanSession,
+	RecoverySuggestion,
 } from "@/data/types";
 import { formatSchedule } from "@/features/circles/scheduling";
 import {
-    completePlanSession,
-    getDailyRecoveryPlan,
-    getPlanSessions,
-    setChallengeJoinedForToday,
-    startPlanSession,
-    updatePlanProgress,
+	completePlanSession,
+	getDailyRecoveryPlan,
+	getPlanSessions,
+	setChallengeJoinedForToday,
+	startPlanSession,
+	updatePlanProgress,
 } from "@/services/recoveryService";
 import {
-    ensureStarterGardenItem,
-    getGardenItems,
-    getGardenWallet,
-    purchaseGardenItem,
-    toggleChallenge,
-    updateGardenItemPosition,
+	ensureStarterGardenItem,
+	getGardenItems,
+	getGardenWallet,
+	purchaseGardenItem,
+	toggleChallenge,
+	updateGardenItemPosition,
 } from "@/services/repository";
 import {
-    ensureStepPermission,
-    isStepTrackingAvailable,
-    watchStepsFromNow,
+	ensureStepPermission,
+	isStepTrackingAvailable,
+	watchStepsFromNow,
 } from "@/services/stepTracking";
 import { colors, radius, spacing } from "@/theme";
 
@@ -296,8 +296,28 @@ export default function RecoveryScreen() {
 			scroll={false}
 			padded={false}
 			header={<TopNavigation />}
-			footer={<BottomNavigation activeTab="Recovery" router={router} />}
-		>
+				footer={<BottomNavigation activeTab="Recovery" router={router} />}
+				overlay={
+			<>
+			{activePlan && (
+			<PlanDetailModal
+				suggestion={activePlan}
+				session={sessionFor(activePlan.id)}
+				onClose={() => setActivePlan(null)}
+				onPlanChanged={handlePlanCompleted}
+			/>
+			)}
+			<ShopModal
+			visible={showShop}
+			wallet={wallet}
+			garden={garden}
+			purchasingKey={purchasingKey}
+				onClose={() => setShowShop(false)}
+				onBuy={handleBuy}
+			/>
+			</>
+			}
+			>
 			{loading ? (
 				<View style={styles.center}>
 					<ActivityIndicator color={colors.brown} />
@@ -325,21 +345,21 @@ export default function RecoveryScreen() {
 					{/* GARDEN SCENE */}
 					<View style={styles.gardenHeader}>
 						<Txt v="heading" style={{ fontSize: 25 }}>Your Garden</Txt>
-					
+
 					<View style={styles.walletPill}>
 						<Emoji size={16}>🌱</Emoji>
 						<Txt v="small" color={colors.brown} style={{ fontWeight: "700" }}>
 							{wallet?.seeds ?? 0} seeds
-						</Txt>	
+						</Txt>
 					</View>
-					</View>		
+					</View>
 					<Card style={styles.gardenCard}>
 						<ImageBackground
 							source={require("../../assets/images/real-garden.png")}
 							style={styles.gardenScene}
 							imageStyle={styles.gardenBackground}
 						>
-							
+
 
 							{garden.length === 0 && (
 								<View style={styles.emptyGarden}>
@@ -559,25 +579,7 @@ export default function RecoveryScreen() {
 				</ScrollView>
 			)}
 
-			{/* PLAN DETAIL + TRACKING */}
-			{activePlan && (
-				<PlanDetailModal
-					suggestion={activePlan}
-					session={sessionFor(activePlan.id)}
-					onClose={() => setActivePlan(null)}
-					onPlanChanged={handlePlanCompleted}
-				/>
-			)}
-
-			{/* SHOP SHEET */}
-			<ShopModal
-				visible={showShop}
-				wallet={wallet}
-				garden={garden}
-				purchasingKey={purchasingKey}
-				onClose={() => setShowShop(false)}
-				onBuy={handleBuy}
-			/>
+			
 
 			{toast && (
 				<View style={styles.toast}>
@@ -1012,8 +1014,8 @@ function ShopModal({
 	);
 
 	return (
-	<AppModal visible={visible} onRequestClose={onClose} maxWidth={420}>
-	<View style={styles.sheet}>
+	<AppModal visible={visible} onRequestClose={onClose} maxWidth={420} maxHeightPct={75}>
+	<View style={styles.shopSheet}>
 
 					<Row style={[styles.sheetHeader, { justifyContent: 'space-between', width: '100%' }]}>
 						<Badge label="Shop" fg={colors.warn} bg={colors.warnWash} />
@@ -1359,6 +1361,15 @@ function ShopModal({
 	backgroundColor: colors.cream,
 	borderRadius: radius.lg,
 	padding: spacing(5),
+	width: '100%',
+	flexShrink: 1,
+	},
+	/* The shop is intentionally a little more compact than the recovery-plan
+	   sheet, while its inventory still scrolls inside the card when needed. */
+	shopSheet: {
+	backgroundColor: colors.cream,
+	borderRadius: radius.lg,
+	padding: spacing(4),
 	width: '100%',
 	flexShrink: 1,
 	},
