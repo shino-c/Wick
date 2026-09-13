@@ -18,8 +18,9 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Line, LinearGradient, Path, Stop } from 'react-native-svg';
 
+import { AppModal } from '@/components/base';
 import BottomNavigation from '@/components/bottombar';
-import { DateChipPicker, TimePicker } from '@/components/taskPickers';
+import { DateChipPicker, TimePicker, endTimeFrom } from '@/components/taskPickers';
 import TopNavigation from '@/components/topbar';
 import type {
   CalendarConnection,
@@ -351,9 +352,22 @@ export default function Home() {
     }
   };
 
-  // Edit a single pending task's field
+  // Edit a single pending task's field.
+  //
+  // Duration is the one field with a knock-on effect: the task's end time is a
+  // function of its start time and its length, so changing either recomputes the
+  // other here. That single update is what the save path then persists to the
+  // database and mirrors to the device calendar, so the calendar block always
+  // matches the hours shown in the editor.
   const handleEditField = (field: keyof TaskAnalysis, value: unknown) => {
-    setEditingTask(prev => prev ? { ...prev, [field]: value } : prev);
+    setEditingTask((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, [field]: value } as TaskAnalysis;
+      if (field === 'estimated_duration_hours' || field === 'scheduled_start_time') {
+        next.scheduled_end_time = endTimeFrom(next.scheduled_start_time, next.estimated_duration_hours);
+      }
+      return next;
+    });
   };
 
   // Open the inline editor for a task coming from the review modal list.
@@ -406,6 +420,10 @@ export default function Home() {
         scheduled_end_time: editingTask.scheduled_end_time,
         status: editingTask.status,
       });
+      // The device-calendar mirror is best-effort: `updateEventOnDeviceCalendar`
+      // already returns `false` rather than throwing when there is no calendar
+      // permission or no linked event, so a calendar problem must not roll back a
+      // database edit the user has already confirmed.
       await updateEventOnDeviceCalendar(editingTask.calendar_event_id, editingTask);
       setPendingTasks(prev => prev.map(t => t.id === editingTask.id ? editingTask : t));
       closeEditor(fromList);
@@ -725,7 +743,28 @@ export default function Home() {
               }}
             >
               <View style={styles.chartFrame}>
-                <Svg height="120" width="100%" viewBox="0 0 380 120">
+                {/*
+                 * `preserveAspectRatio="none"` is what keeps the plotted points
+                 * aligned with the day labels underneath.
+                 *
+                 * The chart is drawn in a fixed 380x120 viewBox but rendered at
+                 * 100% of a container whose width is only known at runtime. SVG's
+                 * default (`xMidYMid meet`) fits the viewBox inside the box while
+                 * preserving its aspect ratio, so at any width where
+                 * width/height != 380/120 the drawing is scaled down and centred
+                 * with letterboxing — the grid lines and every data point then sit
+                 *inside* the frame, shifted away from the day labels, which are
+                 * laid out against the full container width by the daysRow below.
+                 * Stretching the viewBox to exactly fill the frame makes the SVG's
+                 * x axis identical to the container's, which is the coordinate
+                 * space the label row and the tap zones already use.
+                 */}
+                <Svg
+                  height="120"
+                  width="100%"
+                  viewBox="0 0 380 120"
+                  preserveAspectRatio="none"
+                >
                   <Defs>
                     <LinearGradient id="stressGradient" x1="0%" y1="0%" x2="0%" y2="100%">
                       <Stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.22" />
@@ -787,8 +826,14 @@ export default function Home() {
                 {/* Tap zones — one column per day, tap to reveal the exact score */}
                 {chartWidth > 0 &&
                   points.map((p, i) => {
-                    const zoneW = Math.max(22, (chartWidth / 380) * xStep);
-                    const left = (p.x / 380) * chartWidth - zoneW / 2;
+                    // Mini tap targets span a whole day column; the hitSlop below
+                    // grows the touch area beyond the visual dot without
+                    // overlapping its neighbours.
+                    const zoneW = Math.max(18, (chartWidth / 380) * xStep);
+                    const left = Math.min(
+                      Math.max(0, (p.x / 380) * chartWidth - zoneW / 2),
+                      Math.max(0, chartWidth - zoneW)
+                    );
                     return (
                       <Pressable
                         key={`tap-${i}`}
@@ -1210,8 +1255,11 @@ export default function Home() {
       </View>
 
       {/* ── AI REVIEW MODAL (Triggered for newly synced weekly tasks) ─────── */}
-      <Modal visible={showReviewModal} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
+      <AppModal
+        visible={showReviewModal}
+        onRequestClose={editingTask ? handleCancelEdit : () => setShowReviewModal(false)}
+        maxWidth={420}
+      >
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
@@ -1230,8 +1278,17 @@ export default function Home() {
             </View>
 
             {editingTask ? (
-              /* ── Inline Task Editor ─── */
-              <ScrollView style={{ maxHeight: 480 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              /* ── Inline Task Editor ───
+               * The duration stepper writes `estimated_duration_hours` through
+               * handleEditField, which recomputes `scheduled_end_time` from the
+               * start time — so the block drawn on the phone calendar grows and
+               * shrinks with the hours, and Save persists both. */
+              <ScrollView
+                style={styles.modalScroll}
+                contentContainerStyle={styles.modalScrollContent}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+              >
                 <View style={styles.reviewEditorCard}>
                   {/* Title */}
                   <View style={styles.reviewEditorField}>
@@ -1355,7 +1412,11 @@ export default function Home() {
               </ScrollView>
             ) : (
               /* ── Task List View ─── */
-              <ScrollView style={{ maxHeight: 480 }} showsVerticalScrollIndicator={false}>
+              <ScrollView
+                style={styles.modalScroll}
+                contentContainerStyle={styles.modalScrollContent}
+                showsVerticalScrollIndicator={false}
+              >
                 {pendingTasks.map((task) => (
                   <View key={task.id} style={styles.reviewTaskItem}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1410,17 +1471,19 @@ export default function Home() {
               </View>
             )}
           </View>
-        </View>
-      </Modal>
+      </AppModal>
 
       {/* ── QUICK ADD NLP CHATBOT MODAL (2-Way Calendar Sync) ─────────────── */}
-      <Modal visible={showAddModal} transparent animationType="fade">
+      <AppModal
+        visible={showAddModal}
+        onRequestClose={() => setShowAddModal(false)}
+        maxWidth={420}
+      >
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={{ flex: 1 }}
+          style={{ width: '100%' }}
         >
-          <View style={styles.modalOverlay}>
-            <View style={[styles.modalContent, { maxHeight: '92%' }]}>
+            <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.modalTitle}>
@@ -1455,11 +1518,27 @@ export default function Home() {
                 /* ── Step 3: Edit one parsed task ─── */
                 (() => {
                   const task = parsedTasks[editingParsedIdx];
+                  // Same knock-on rule as the review editor: the end time follows
+                  // the duration (and the start time), so the value handed to
+                  // createAndSyncTask — and therefore the device-calendar event —
+                  // matches the hours the user just set.
                   const updateField = (field: string, value: unknown) => {
-                    setParsedTasks(prev => prev.map((t, i) => i === editingParsedIdx ? { ...t, [field]: value } : t));
+                    setParsedTasks(prev => prev.map((t, i) => {
+                      if (i !== editingParsedIdx) return t;
+                      const next = { ...t, [field]: value } as Omit<TaskAnalysis, 'id' | 'createdAt'>;
+                      if (field === 'estimated_duration_hours' || field === 'scheduled_start_time') {
+                        next.scheduled_end_time = endTimeFrom(next.scheduled_start_time, next.estimated_duration_hours);
+                      }
+                      return next;
+                    }));
                   };
                   return (
-                    <ScrollView style={{ maxHeight: 440 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                    <ScrollView
+                      style={styles.modalScroll}
+                      contentContainerStyle={styles.modalScrollContent}
+                      showsVerticalScrollIndicator={false}
+                      keyboardShouldPersistTaps="handled"
+                    >
                       <View style={styles.reviewEditorCard}>
                         {/* Title */}
                         <View style={styles.reviewEditorField}>
@@ -1570,7 +1649,12 @@ export default function Home() {
                 })()
               ) : (
                 /* ── Step 1 & 2: Input + Card Review ─── */
-                <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }}>
+                <ScrollView
+                  style={styles.modalScroll}
+                  showsVerticalScrollIndicator={false}
+                  keyboardShouldPersistTaps="handled"
+                  contentContainerStyle={styles.modalScrollContent}
+                >
                   {parsedTasks.length === 0 && (
                     <>
                       <TextInput
@@ -1674,9 +1758,8 @@ export default function Home() {
                 </ScrollView>
               )}
             </View>
-          </View>
         </KeyboardAvoidingView>
-      </Modal>
+      </AppModal>
 
       {/* ── NOTIFICATIONS MODAL ─────────────────────────────────────────────── */}
       {false && (<Modal visible={false} transparent animationType="fade" onRequestClose={() => setShowNotifications(false)}>
@@ -1847,7 +1930,20 @@ const styles = StyleSheet.create({
   tooltipScore: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
   tooltipUnit: { fontSize: 10, color: '#F8EEDE', fontWeight: '600' },
   tooltipNote: { fontSize: 9, color: '#F8EEDE', fontStyle: 'italic', marginTop: 1 },
-  daysRow: { flexDirection: 'row', width: '100%', marginTop: 8, paddingHorizontal: 10 },
+  /*
+   * The label row is padded by exactly the same fraction of the width that the
+   * chart's first and last data points are inset in the 380-unit viewBox
+   * (chartLeft = 20, chartRight = 365 → 20/380 = 5.263%), and each day then
+   * occupies a 1/7 column of the remaining space. Centre of column i is then
+   * 20 + (i + 0.5) * (345/7), which is precisely the SVG's x for point i — so
+   * every letter sits under its own dot at any frame width.
+   */
+  daysRow: {
+    flexDirection: 'row',
+    width: '100%',
+    marginTop: 8,
+    paddingHorizontal: '5.263%',
+  },
   dayLabelWrap: { flex: 1, alignItems: 'center' },
   dayLabelWrapActive: {
     backgroundColor: colors.yellow,
@@ -1969,9 +2065,28 @@ const styles = StyleSheet.create({
   resyncSubtext: { fontSize: 11, color: '#713F12' },
   resyncButton: { backgroundColor: '#854D0E', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
   resyncButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
-  /* Modals — centered on screen with internal scroll for long content */
+  /* Modals — AppModal owns the centring and the height cap; this is just the
+     card. `width: '100%'` + no fixed height lets it fill the (already padded and
+     capped) modal box and shrink to its content, so a short dialog stays small
+     and a tall one scrolls internally instead of being clipped. */
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
-  modalContent: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, maxHeight: '85%', maxWidth: '92%', width: 420 },
+  modalContent: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 20,
+    width: '100%',
+    /*
+     * `flexShrink` lets the card give space back to the scroll region instead of
+     * pushing past the modal's height cap. Without it a form taller than the cap
+     * overflowed its own clipping box and the Save row at the bottom became
+     * unreachable; the inner ScrollView below is what then absorbs the overflow.
+     */
+    flexShrink: 1,
+  },
+  /* The scroll region inside a modal: it grows with its content and only starts
+     scrolling once the card has hit AppModal's maxHeight, so short dialogs show
+     everything at once (no stray inner scrollbar). */
+  modalScroll: { flexGrow: 0, flexShrink: 1 },
   modalScrollContent: { paddingBottom: 12 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },

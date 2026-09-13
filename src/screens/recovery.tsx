@@ -1,48 +1,47 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-	ActivityIndicator,
-	ImageBackground,
-	Modal,
-	PanResponder,
-	Pressable,
-	ScrollView,
-	StyleSheet,
-	View,
+    ActivityIndicator,
+    ImageBackground,
+    PanResponder,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    View,
 } from "react-native";
 
-import { Badge, Card, Emoji, Row, Screen, Txt } from "@/components/base";
+import { AppModal, Badge, Card, Emoji, Row, Screen, Txt } from "@/components/base";
 import BottomNavigation from "@/components/bottombar";
 import TopNavigation from "@/components/topbar";
 import { GARDEN_CATALOG } from "@/data/gardenCatalog";
 import type {
-	DailyRecoveryPlan,
-	GardenItem,
-	GardenWallet,
-	RecoveryPlanSession,
-	RecoverySuggestion,
+    DailyRecoveryPlan,
+    GardenItem,
+    GardenWallet,
+    RecoveryPlanSession,
+    RecoverySuggestion,
 } from "@/data/types";
 import { formatSchedule } from "@/features/circles/scheduling";
 import {
-	completePlanSession,
-	getDailyRecoveryPlan,
-	getPlanSessions,
-	setChallengeJoinedForToday,
-	startPlanSession,
-	updatePlanProgress,
+    completePlanSession,
+    getDailyRecoveryPlan,
+    getPlanSessions,
+    setChallengeJoinedForToday,
+    startPlanSession,
+    updatePlanProgress,
 } from "@/services/recoveryService";
 import {
-	ensureStarterGardenItem,
-	getGardenItems,
-	getGardenWallet,
-	purchaseGardenItem,
-	toggleChallenge,
-	updateGardenItemPosition,
+    ensureStarterGardenItem,
+    getGardenItems,
+    getGardenWallet,
+    purchaseGardenItem,
+    toggleChallenge,
+    updateGardenItemPosition,
 } from "@/services/repository";
 import {
-	ensureStepPermission,
-	isStepTrackingAvailable,
-	watchStepsFromNow,
+    ensureStepPermission,
+    isStepTrackingAvailable,
+    watchStepsFromNow,
 } from "@/services/stepTracking";
 import { colors, radius, spacing } from "@/theme";
 
@@ -606,17 +605,14 @@ function PlanDetailModal({
 }) {
 	const completed = session?.status === "completed";
 
-	return (
-		<Modal visible transparent animationType="fade" onRequestClose={onClose}>
-			<Pressable style={styles.sheetBackdrop} onPress={onClose}>
-				<Pressable
-					style={styles.sheet}
-					onPress={(event) => event.stopPropagation()}
-				>
-					<ScrollView
-						showsVerticalScrollIndicator={false}
-						contentContainerStyle={styles.sheetScrollContent}
-					>
+	 return (
+	<AppModal visible onRequestClose={onClose} maxWidth={420}>
+	<View style={styles.sheet}>
+	<ScrollView
+	style={styles.sheetScroll}
+		showsVerticalScrollIndicator={false}
+	contentContainerStyle={styles.sheetScrollContent}
+	>
 						<Row style={styles.sheetHeader}>
 							<View style={styles.sheetEmoji}>
 								<Emoji size={34}>{(suggestion as RecoverySuggestion).emoji}</Emoji>
@@ -674,14 +670,13 @@ function PlanDetailModal({
 						) : (
 							<MinuteTracker suggestion={suggestion} session={session} onCompleted={onPlanChanged} />
 						)}
-					</ScrollView>
-				</Pressable>
-			</Pressable>
-		</Modal>
-	);
-}
+								</ScrollView>
+							</View>
+							</AppModal>
+							);
+							}
 
-/** Shown once tracked progress really reached the plan's target. */
+					/** Shown once tracked progress really reached the plan's target. */
 function CompletedPlanCard({
 	suggestion,
 	session,
@@ -1017,18 +1012,8 @@ function ShopModal({
 	);
 
 	return (
-		<Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-			<View style={styles.sheetBackdrop}>
-				<Pressable
-					style={StyleSheet.absoluteFill}
-					onPress={onClose}
-				/>
-
-				<View
-					style={[styles.sheet, styles.sheetTall]}
-					onStartShouldSetResponder={() => false}
-					onMoveShouldSetResponder={() => false}
-				>
+	<AppModal visible={visible} onRequestClose={onClose} maxWidth={420}>
+	<View style={styles.sheet}>
 
 					<Row style={[styles.sheetHeader, { justifyContent: 'space-between', width: '100%' }]}>
 						<Badge label="Shop" fg={colors.warn} bg={colors.warnWash} />
@@ -1051,9 +1036,11 @@ function ShopModal({
 						Spend seeds to grow your space
 					</Txt>
 
+						{/* `flexShrink` (not `flex: 1`) so the grid keeps its natural height and
+					    the list only scrolls once the sheet has filled the modal's cap. */}
 					<ScrollView
-						style={{ flex: 1, marginTop: spacing(3) }}
-						contentContainerStyle={{ paddingBottom: spacing(10) }}
+					style={{ flexShrink: 1, marginTop: spacing(3) }}
+					contentContainerStyle={{ paddingBottom: spacing(4) }}
 						showsVerticalScrollIndicator={true}
 						nestedScrollEnabled={true}
 					>
@@ -1124,14 +1111,13 @@ function ShopModal({
 								))
 							)}
 						</View>
-					</ScrollView>
-				</View>
-			</View>
-		</Modal>
-	);
-}
+							</ScrollView>
+						</View>
+						</AppModal>
+						);
+					}
 
-const styles = StyleSheet.create({
+					const styles = StyleSheet.create({
 	scrollContent: { padding: spacing(5), paddingBottom: spacing(10) },
 	center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing(6), gap: spacing(2) },
 
@@ -1360,15 +1346,24 @@ const styles = StyleSheet.create({
 		justifyContent: 'center',
 		alignItems: 'center',
 	},
+	/*
+	 * The sheet card, centred by AppModal.
+	 *
+	 * `width: '100%'` makes it responsive — full width inside the modal's own
+	 * padding on a phone, capped by AppModal's maxWidth on a wide preview — and
+	 * `flexShrink` lets it give height back to the inner scroll region rather than
+	 * overflowing the modal's height cap. No fixed `height`/`maxHeight` here: that
+	 * hard-coded 80% is what made the plan and shop sheets clip their last row.
+	 */
 	sheet: {
-		backgroundColor: colors.cream,
-		borderRadius: radius.lg,
-		padding: spacing(5),
-		maxWidth: '92%',
-		width: 420,
-		maxHeight: '80%',
+	backgroundColor: colors.cream,
+	borderRadius: radius.lg,
+	padding: spacing(5),
+	width: '100%',
+	flexShrink: 1,
 	},
-	sheetTall: { height: '80%', width: '92%' },
+	/* Grows with its content and only scrolls once the sheet hits the height cap. */
+	sheetScroll: { flexGrow: 0, flexShrink: 1 },
 	sheetHandle: {
 		/* No handle needed for centered sheet */
 		display: 'none',

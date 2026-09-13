@@ -165,6 +165,32 @@ export function TimePicker({
   );
 }
 
+/**
+ * Derives a 24h "HH:MM" end time from a start time plus a duration in hours.
+ *
+ * Used by every task editor: when the user changes the duration, the end time has
+ * to move with it, and both the database row and the mirrored device-calendar
+ * event are written from the same value — so the block drawn on the phone's
+ * calendar can never disagree with the number of hours shown in the app.
+ *
+ * Returns `undefined` when there is no start time (an all-day task has no end),
+ * or when the duration is not a usable number.
+ *
+ * Durations are half-hour steps but the end time is snapped to whole minutes, and
+ * the clock wraps within the same day ([start, 23:59]) so a late block cannot
+ * produce an end time that reads as "before" the start.
+ */
+export function endTimeFrom(startTime: string | undefined, durationHours: number | undefined): string | undefined {
+  if (!startTime || !Number.isFinite(durationHours)) return undefined;
+  const [h, m] = startTime.split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return undefined;
+  if (!(durationHours! > 0)) return undefined;
+
+  const startMinutes = h * 60 + m;
+  const endMinutes = Math.min(startMinutes + Math.round(durationHours! * 60), 23 * 60 + 59);
+  return `${String(Math.floor(endMinutes / 60)).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')}`;
+}
+
 /** 12-hour display parts for a stored 24h "HH:MM" (or undefined → 09:00 AM do-now). */
 function timeParts(value?: string): { hour12: number; minute: number; period: 'AM' | 'PM' } {
   if (!value) return { hour12: 9, minute: 0, period: 'AM' };

@@ -1,8 +1,7 @@
-import React, { useState } from 'react';
+﻿﻿import React, { useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Modal,
   Pressable,
   ScrollView,
   StatusBar,
@@ -16,12 +15,11 @@ import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import { useFocusEffect, useRouter } from 'expo-router';
 
-import { NavBar, Screen } from '@/components/base';
-import { DateChipPicker, TimePicker } from '@/components/taskPickers';
+import { AppModal, NavBar, Screen } from '@/components/base';
+import { DateChipPicker, TimePicker, endTimeFrom } from '@/components/taskPickers';
 import type { TaskAnalysis } from '@/data/types';
 import { ITEMS } from '@/features/calibration/questionnaire';
 import { markOnboarded } from '@/lib/bootstrap';
-import { toISODate } from '@/services/dateUtils';
 import { supabase } from '@/lib/supabaseClient';
 import {
   connectCalendar,
@@ -29,6 +27,7 @@ import {
   getCalendarPermissionStatus,
   updateEventOnDeviceCalendar,
 } from '@/services/calendarSync';
+import { toISODate } from '@/services/dateUtils';
 import { BASELINE_MIN_SCANS } from '@/services/ppgService';
 import {
   analyzeCurrentWeekTasks,
@@ -214,8 +213,17 @@ export default function BaselineScreen() {
     }
   };
 
+  // Duration and start time both drive the end time, which handleSaveTaskEdit
+  // then persists to the database and mirrors to the device calendar.
   const handleEditField = (field: keyof TaskAnalysis, value: unknown) => {
-    setEditingTask((prev) => (prev ? { ...prev, [field]: value } : prev));
+    setEditingTask((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, [field]: value } as TaskAnalysis;
+      if (field === 'estimated_duration_hours' || field === 'scheduled_start_time') {
+        next.scheduled_end_time = endTimeFrom(next.scheduled_start_time, next.estimated_duration_hours);
+      }
+      return next;
+    });
   };
 
   const handleSaveTaskEdit = async () => {
@@ -289,27 +297,329 @@ export default function BaselineScreen() {
 
   const stressState = getStressState();
 
+  /*
+   * The AI task review dialog, built here so it can be handed to `Screen`'s
+   * `overlay` slot instead of being rendered among the scrolling children.
+   * See the `overlay` comment on `<Screen>` below for why that placement is what
+   * keeps it centred on the phone rather than on the whole scrolled page.
+   */
+  const reviewModal = (
+    <AppModal
+      visible={showReviewModal}
+      onRequestClose={() => (editingTask ? setEditingTask(null) : setShowReviewModal(false))}
+      maxWidth={420}
+      maxHeightPct={80}
+    >
+      <View style={styles.modalContent}>
+        <View style={styles.modalHeader}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.modalTitle}>
+              {editingTask ? 'Edit Task' : 'AI Workload Review'}
+            </Text>
+            <Text style={styles.modalSubtitle}>
+              {editingTask
+                ? 'Adjust details below and save'
+                : 'Review AI task analysis for this week before entering dashboard'}
+            </Text>
+          </View>
+          {editingTask && (
+            <Pressable
+              onPress={() => setEditingTask(null)}
+              hitSlop={8}
+              style={{ padding: 4 }}
+            >
+              <Ionicons name="close" size={22} color={colors.inkSoft} />
+            </Pressable>
+          )}
+        </View>
+
+        {editingTask ? (
+          /* ── Task Inline Editor ─── */
+          <ScrollView
+            style={styles.modalScroll}
+            contentContainerStyle={styles.modalScrollContent}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            <View style={styles.reviewEditorCard}>
+              {/* Title */}
+              <View style={styles.reviewEditorField}>
+                <Text style={styles.reviewEditorLabel}>Title</Text>
+                <TextInput
+                  style={styles.reviewEditorInput}
+                  value={editingTask.title}
+                  onChangeText={(v) => handleEditField('title', v)}
+                  scrollEnabled={false}
+                />
+              </View>
+
+              {/* Category Pills */}
+              <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Category</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {([
+                    { key: 'academic', label: '📚 Academic' },
+                    { key: 'work', label: '💼 Work' },
+                    { key: 'social', label: '🌱 Social' },
+                    { key: 'physical', label: '🏃 Physical' },
+                    { key: 'mental', label: '🧘 Mental' },
+                    { key: 'errands', label: '🛒 Errands' },
+                    { key: 'other', label: '📌 Other' },
+                  ] as const).map(({ key, label }) => (
+                    <Pressable
+                      key={key}
+                      onPress={() => handleEditField('category', key)}
+                      style={[styles.pickerChip, editingTask.category === key && styles.pickerChipActive]}
+                    >
+                      <Text style={[styles.pickerChipText, editingTask.category === key && styles.pickerChipTextActive]}>
+                        {label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+
+              {/* Priority Pills */}
+              <View style={styles.reviewEditorField}>
+                <Text style={styles.reviewEditorLabel}>Priority</Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  {(['high', 'medium', 'low'] as const).map((p) => (
+                    <Pressable
+                      key={p}
+                      onPress={() => handleEditField('priority', p)}
+                      style={[
+                        styles.reviewPriorityBtn,
+                        editingTask.priority === p && styles.reviewPriorityBtnActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.reviewPriorityBtnText,
+                          editingTask.priority === p && { color: colors.cream },
+                        ]}
+                      >
+                        {p.toUpperCase()}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+
+              {/* Hours Stepper — changing the duration recomputes the end time
+                  via handleEditField, so the saved block on the calendar follows. */}
+              <View style={styles.reviewEditorField}>
+                <Text style={styles.reviewEditorLabel}>Hours</Text>
+                <View style={styles.stepperRow}>
+                  <Pressable
+                    onPress={() => handleEditField('estimated_duration_hours', Math.max(0.5, (editingTask.estimated_duration_hours || 1) - 0.5))}
+                    style={styles.stepperBtn}
+                  >
+                    <Text style={styles.stepperBtnText}>−</Text>
+                  </Pressable>
+                  <Text style={styles.stepperValue}>{editingTask.estimated_duration_hours}h</Text>
+                  <Pressable
+                    onPress={() => handleEditField('estimated_duration_hours', Math.min(12, (editingTask.estimated_duration_hours || 1) + 0.5))}
+                    style={styles.stepperBtn}
+                  >
+                    <Text style={styles.stepperBtnText}>+</Text>
+                  </Pressable>
+                </View>
+              </View>
+
+              {/* Date Chips — current week Mon-Sun */}
+              <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Date</Text>
+                <DateChipPicker
+                  key={`${editingTask.id}-date`}
+                  value={editingTask.scheduled_date}
+                  onChange={(v) => handleEditField('scheduled_date', v)}
+                />
+              </View>
+
+              {/* Time Chips — preset slots + All day */}
+              <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
+                <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
+                <TimePicker
+                  key={`${editingTask.id}-time`}
+                  value={editingTask.scheduled_start_time}
+                  onChange={(v) => handleEditField('scheduled_start_time', v)}
+                />
+              </View>
+
+              {editingTask.ai_reasoning ? (
+                <Text style={styles.reviewEditorReasoning}>
+                  AI: {editingTask.ai_reasoning}
+                </Text>
+              ) : null}
+
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                <Pressable
+                  onPress={() => setEditingTask(null)}
+                  style={styles.reviewCancelBtn}
+                >
+                  <Text style={styles.reviewCancelBtnText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleSaveTaskEdit}
+                  disabled={savingTaskEdit}
+                  style={[styles.reviewSaveBtn, savingTaskEdit && { opacity: 0.7 }]}
+                >
+                  {savingTaskEdit ? (
+                    <ActivityIndicator size="small" color={colors.cream} />
+                  ) : (
+                    <Text style={styles.reviewSaveBtnText}>Save Changes</Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          </ScrollView>
+        ) : (
+          /* ── Task List View ─── */
+          <ScrollView
+            style={styles.modalScroll}
+            contentContainerStyle={styles.modalScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {tasksToReview.map((task) => (
+              <View key={task.id} style={styles.reviewTaskItem}>
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <View style={styles.reviewRankPill}>
+                    <Text style={styles.reviewRankText}>#{task.rank}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <View
+                      style={[
+                        styles.priorityPill,
+                        task.priority === 'high'
+                          ? styles.pillHigh
+                          : task.priority === 'medium'
+                            ? styles.pillMed
+                            : styles.pillLow,
+                      ]}
+                    >
+                      <Text style={styles.pillText}>{task.priority.toUpperCase()}</Text>
+                    </View>
+                    <Pressable
+                      onPress={() => setEditingTask({ ...task })}
+                      style={styles.reviewEditBtn}
+                    >
+                      <Ionicons name="pencil" size={14} color={colors.brown} />
+                      <Text style={styles.reviewEditText}>Edit</Text>
+                    </Pressable>
+                  </View>
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+                  <Text style={{ fontSize: 16, marginRight: 6 }}>
+                    {getCategoryEmoji(task.category)}
+                  </Text>
+                  <Text style={styles.reviewTaskTitle}>{task.title}</Text>
+                </View>
+                <Text style={styles.reviewTaskDetails}>
+                  {task.category} • {task.estimated_duration_hours}h •{' '}
+                  {task.scheduled_date}{' '}
+                  {task.scheduled_start_time || 'All Day'}
+                </Text>
+                {task.stress_score != null && (
+                  <Text style={styles.reviewTaskStress}>
+                    Stress Impact: {task.stress_score}%
+                  </Text>
+                )}
+                {task.ai_reasoning ? (
+                  <Text style={styles.reviewTaskReasoning}>{task.ai_reasoning}</Text>
+                ) : null}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'flex-end',
+                    marginTop: 6,
+                  }}
+                >
+                  <Pressable
+                    onPress={() => handleRejectTask(task.id)}
+                    style={styles.rejectBtn}
+                  >
+                    <Text style={styles.rejectBtnText}>Skip</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ))}
+          </ScrollView>
+        )}
+
+        {!editingTask && (
+          <View style={styles.modalActions}>
+            <Pressable
+              onPress={handleConfirmAndSaveTasks}
+              disabled={confirming}
+              style={[styles.primaryModalBtn, confirming && { opacity: 0.7 }]}
+            >
+              {confirming ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Text style={styles.primaryModalBtnText}>
+                  Confirm & Save ({tasksToReview.length} Tasks) →
+                </Text>
+              )}
+            </Pressable>
+          </View>
+        )}
+      </View>
+    </AppModal>
+  );
+
   return (
     <Screen
+      /*
+       * The footer is withdrawn while the review dialog is up.
+       *
+       * The review is the mandatory last step of onboarding — the user confirms
+       * the AI's reading of their week once — and a live "Continue to Dashboard"
+       * button left sitting under the dialog stayed visible (and tappable) behind
+       * the dimmer, letting the user slip into the dashboard with the review
+       * unconfirmed.
+       */
       footer={
-        <View style={styles.bottomContainer}>
-          <Pressable
-            onPress={handleContinue}
-            disabled={saving || !setupComplete}
-            style={({ pressed }) => [
-              styles.continueButton,
-              pressed && styles.pressed,
-              (saving || !setupComplete) && styles.disabledContinue,
-            ]}
-          >
-            <Text style={styles.continueText}>
-              {saving ? 'Saving…' : 'Continue to Dashboard'}
-            </Text>
-            <Text style={styles.arrow}>→</Text>
-          </Pressable>
-          <View style={styles.homeIndicator} />
-        </View>
+        showReviewModal ? null : (
+          <View style={styles.bottomContainer}>
+            <Pressable
+              onPress={handleContinue}
+              disabled={saving || !setupComplete}
+              style={({ pressed }) => [
+                styles.continueButton,
+                pressed && styles.pressed,
+                (saving || !setupComplete) && styles.disabledContinue,
+              ]}
+            >
+              <Text style={styles.continueText}>
+                {saving ? 'Saving…' : 'Continue to Dashboard'}
+              </Text>
+              <Text style={styles.arrow}>→</Text>
+            </Pressable>
+            <View style={styles.homeIndicator} />
+          </View>
+        )
       }
+      /*
+       * The AI task review dialog lives in the overlay slot, not among the
+       * scrolling children.
+       *
+       * `AppModal` sizes its dimmer with `position: absolute; inset: 0`, which
+       * resolves against its nearest *positioned* ancestor. As a child it sat
+       * inside the ScrollView's content container — a box as tall as the whole
+       * scrolled page — so the dimmer covered the entire page and the dialog was
+       * centred on the document rather than on the phone, which is exactly why it
+       * looked like it was "at the middle, wherever I had scrolled". In this slot
+       * its ancestor is `Screen`'s `SafeAreaView`, which is the glass itself, so
+       * the dimmer matches the phone and the dialog is centred inside it — the
+       * same way Home's modals behave as children of its full-height root.
+       */
+      overlay={reviewModal}
     >
       <NavBar title="SET UP" onBack={handleBackToLogin} />
       <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
@@ -481,268 +791,10 @@ export default function BaselineScreen() {
         )}
       </View>
 
-      {/* ── AI TASK REVIEW MODAL (Triggered on Continue to Dashboard) ──────── */}
-      <Modal visible={showReviewModal} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>
-                  {editingTask ? 'Edit Task' : 'AI Workload Review'}
-                </Text>
-                <Text style={styles.modalSubtitle}>
-                  {editingTask
-                    ? 'Adjust details below and save'
-                    : 'Review AI task analysis for this week before entering dashboard'}
-                </Text>
-              </View>
-              {editingTask && (
-                <Pressable
-                  onPress={() => setEditingTask(null)}
-                  hitSlop={8}
-                  style={{ padding: 4 }}
-                >
-                  <Ionicons name="close" size={22} color={colors.inkSoft} />
-                </Pressable>
-              )}
-            </View>
+      {/* The review dialog is rendered by `Screen`'s `overlay` slot (see
+          `reviewModal` above) — never inline here, or it would be laid out
+          inside this ScrollView's content box instead of over the glass. */}
 
-            {editingTask ? (
-              /* ── Task Inline Editor ─── */
-              <ScrollView
-                style={{ maxHeight: 440 }}
-                showsVerticalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled"
-              >
-                <View style={styles.reviewEditorCard}>
-                  {/* Title */}
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Title</Text>
-                    <TextInput
-                      style={styles.reviewEditorInput}
-                      value={editingTask.title}
-                      onChangeText={(v) => handleEditField('title', v)}
-                      scrollEnabled={false}
-                    />
-                  </View>
-
-                  {/* Category Pills */}
-                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
-                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Category</Text>
-                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-                      {([
-                        { key: 'academic', label: '📚 Academic' },
-                        { key: 'work', label: '💼 Work' },
-                        { key: 'social', label: '🌱 Social' },
-                        { key: 'physical', label: '🏃 Physical' },
-                        { key: 'mental', label: '🧘 Mental' },
-                        { key: 'errands', label: '🛒 Errands' },
-                        { key: 'other', label: '📌 Other' },
-                      ] as const).map(({ key, label }) => (
-                        <Pressable
-                          key={key}
-                          onPress={() => handleEditField('category', key)}
-                          style={[styles.pickerChip, editingTask.category === key && styles.pickerChipActive]}
-                        >
-                          <Text style={[styles.pickerChipText, editingTask.category === key && styles.pickerChipTextActive]}>
-                            {label}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  </View>
-
-                  {/* Priority Pills */}
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Priority</Text>
-                    <View style={{ flexDirection: 'row', gap: 8 }}>
-                      {(['high', 'medium', 'low'] as const).map((p) => (
-                        <Pressable
-                          key={p}
-                          onPress={() => handleEditField('priority', p)}
-                          style={[
-                            styles.reviewPriorityBtn,
-                            editingTask.priority === p && styles.reviewPriorityBtnActive,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.reviewPriorityBtnText,
-                              editingTask.priority === p && { color: colors.cream },
-                            ]}
-                          >
-                            {p.toUpperCase()}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  </View>
-
-                  {/* Hours Stepper */}
-                  <View style={styles.reviewEditorField}>
-                    <Text style={styles.reviewEditorLabel}>Hours</Text>
-                    <View style={styles.stepperRow}>
-                      <Pressable
-                        onPress={() => handleEditField('estimated_duration_hours', Math.max(0.5, (editingTask.estimated_duration_hours || 1) - 0.5))}
-                        style={styles.stepperBtn}
-                      >
-                        <Text style={styles.stepperBtnText}>−</Text>
-                      </Pressable>
-                      <Text style={styles.stepperValue}>{editingTask.estimated_duration_hours}h</Text>
-                      <Pressable
-                        onPress={() => handleEditField('estimated_duration_hours', Math.min(12, (editingTask.estimated_duration_hours || 1) + 0.5))}
-                        style={styles.stepperBtn}
-                      >
-                        <Text style={styles.stepperBtnText}>+</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-
-                  {/* Date Chips — current week Mon-Sun + Other text fallback */}
-                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
-                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Date</Text>
-                    <DateChipPicker
-                      key={`${editingTask.id}-date`}
-                      value={editingTask.scheduled_date}
-                      onChange={(v) => handleEditField('scheduled_date', v)}
-                    />
-                  </View>
-
-                  {/* Time Chips — preset slots + Other text fallback */}
-                  <View style={[styles.reviewEditorField, { flexDirection: 'column', alignItems: 'flex-start' }]}>
-                    <Text style={[styles.reviewEditorLabel, { marginBottom: 8 }]}>Start Time</Text>
-                    <TimePicker
-                      key={`${editingTask.id}-time`}
-                      value={editingTask.scheduled_start_time}
-                      onChange={(v) => handleEditField('scheduled_start_time', v)}
-                    />
-                  </View>
-
-                  {editingTask.ai_reasoning ? (
-                    <Text style={styles.reviewEditorReasoning}>
-                      AI: {editingTask.ai_reasoning}
-                    </Text>
-                  ) : null}
-
-                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
-                    <Pressable
-                      onPress={() => setEditingTask(null)}
-                      style={styles.reviewCancelBtn}
-                    >
-                      <Text style={styles.reviewCancelBtnText}>Cancel</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={handleSaveTaskEdit}
-                      disabled={savingTaskEdit}
-                      style={[styles.reviewSaveBtn, savingTaskEdit && { opacity: 0.7 }]}
-                    >
-                      {savingTaskEdit ? (
-                        <ActivityIndicator size="small" color={colors.cream} />
-                      ) : (
-                        <Text style={styles.reviewSaveBtnText}>Save Changes</Text>
-                      )}
-                    </Pressable>
-                  </View>
-                </View>
-              </ScrollView>
-            ) : (
-              /* ── Task List View ─── */
-              <ScrollView
-                style={{ maxHeight: 440 }}
-                showsVerticalScrollIndicator={false}
-              >
-                {tasksToReview.map((task) => (
-                  <View key={task.id} style={styles.reviewTaskItem}>
-                    <View
-                      style={{
-                        flexDirection: 'row',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                      }}
-                    >
-                      <View style={styles.reviewRankPill}>
-                        <Text style={styles.reviewRankText}>#{task.rank}</Text>
-                      </View>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <View
-                          style={[
-                            styles.priorityPill,
-                            task.priority === 'high'
-                              ? styles.pillHigh
-                              : task.priority === 'medium'
-                                ? styles.pillMed
-                                : styles.pillLow,
-                          ]}
-                        >
-                          <Text style={styles.pillText}>{task.priority.toUpperCase()}</Text>
-                        </View>
-                        <Pressable
-                          onPress={() => setEditingTask({ ...task })}
-                          style={styles.reviewEditBtn}
-                        >
-                          <Ionicons name="pencil" size={14} color={colors.brown} />
-                          <Text style={styles.reviewEditText}>Edit</Text>
-                        </Pressable>
-                      </View>
-                    </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-                      <Text style={{ fontSize: 16, marginRight: 6 }}>
-                        {getCategoryEmoji(task.category)}
-                      </Text>
-                      <Text style={styles.reviewTaskTitle}>{task.title}</Text>
-                    </View>
-                    <Text style={styles.reviewTaskDetails}>
-                      {task.category} • {task.estimated_duration_hours}h •{' '}
-                      {task.scheduled_date}{' '}
-                      {task.scheduled_start_time || 'All Day'}
-                    </Text>
-                    {task.stress_score != null && (
-                      <Text style={styles.reviewTaskStress}>
-                        Stress Impact: {task.stress_score}%
-                      </Text>
-                    )}
-                    {task.ai_reasoning ? (
-                      <Text style={styles.reviewTaskReasoning}>{task.ai_reasoning}</Text>
-                    ) : null}
-                    <View
-                      style={{
-                        flexDirection: 'row',
-                        justifyContent: 'flex-end',
-                        marginTop: 6,
-                      }}
-                    >
-                      <Pressable
-                        onPress={() => handleRejectTask(task.id)}
-                        style={styles.rejectBtn}
-                      >
-                        <Text style={styles.rejectBtnText}>Skip</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                ))}
-              </ScrollView>
-            )}
-
-            {!editingTask && (
-              <View style={styles.modalActions}>
-                <Pressable
-                  onPress={handleConfirmAndSaveTasks}
-                  disabled={confirming}
-                  style={[styles.primaryModalBtn, confirming && { opacity: 0.7 }]}
-                >
-                  {confirming ? (
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                  ) : (
-                    <Text style={styles.primaryModalBtnText}>
-                      Confirm & Save ({tasksToReview.length} Tasks) →
-                    </Text>
-                  )}
-                </Pressable>
-              </View>
-            )}
-          </View>
-        </View>
-      </Modal>
     </Screen>
   );
 }
@@ -821,7 +873,24 @@ const styles = StyleSheet.create({
   disabledContinue: { backgroundColor: '#A89F91' },
   /* Modal Styles — centered on screen with internal scroll for long content */
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
-  modalContent: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, maxHeight: '85%', maxWidth: '92%', width: 420 },
+  /* AppModal owns the centring and the height cap; this is just the card, so it
+     fills the modal box and shrinks to its content. The card stays centred on the
+     phone — only its inner scroll region grows with a long task list. */
+  modalContent: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 20,
+    width: '100%',
+    maxHeight: '100%',
+    /* Gives height back to the scroll region rather than overflowing the cap and
+       pushing the dialog's own header off-screen. */
+    flexShrink: 1,
+  },
+  /* The scroll region inside the dialog: it grows with its content and only
+     starts scrolling once the card has reached AppModal's maxHeight, so many task
+     cards scroll inside the card instead of stretching over the whole page. */
+  modalScroll: { flexGrow: 0, flexShrink: 1, minHeight: 0 },
+  modalScrollContent: { paddingBottom: 4 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
   modalTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text },
   modalSubtitle: { fontSize: 12, color: '#6B7280', marginTop: 2 },

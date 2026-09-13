@@ -45,12 +45,24 @@ export function AppModal({
   onRequestClose,
   children,
   maxWidth = 420,
+  maxHeightPct = 92,
 }: {
   visible: boolean;
   onRequestClose?: () => void;
   children: React.ReactNode;
   /** The widest the dialog itself may be, inside the frame. */
   maxWidth?: number;
+  /**
+   * The tallest the dialog may grow, as a percentage of the app window.
+   *
+   * Defaults to 92 rather than something tighter because these dialogs are the
+   * app's whole editing surface: the quick task logger, the review editor and the
+   * recovery plan sheets all hold a form plus a Save row, and at 85% the tail of
+   * that form was cut off — the user had to scroll a two-field change. The value
+   * is a *maximum*, not a height: a short dialog still shrinks to its content and
+   * stays centred, because the box below sizes to its children.
+   */
+  maxHeightPct?: number;
 }) {
   // Unmounting when hidden (rather than passing `visible={false}`) is what lets
   // the host view be skipped entirely, so a closed modal costs no layout at all.
@@ -65,8 +77,13 @@ export function AppModal({
         style={styles.modalOpaqueOverlay}
       />
       <View style={styles.modalFill} pointerEvents="box-none">
-        <View style={[styles.modalCenter, { maxWidth }]} pointerEvents="box-none">
-          {children}
+        <View
+          style={[styles.modalCenter, { maxWidth, maxHeight: `${maxHeightPct}%` }]}
+          pointerEvents="box-none"
+        >
+          <View style={styles.modalBox}>
+            {children}
+          </View>
         </View>
       </View>
     </View>
@@ -110,6 +127,7 @@ export function Screen({
   padded = true,
   header,
   footer,
+  overlay,
 }: {
   children: React.ReactNode;
   scroll?: boolean;
@@ -125,6 +143,25 @@ export function Screen({
   header?: React.ReactNode;
   /** Pinned below the scroll area — where the shared tab bar goes. */
   footer?: React.ReactNode;
+  /**
+   * Where dialogs go. Sits outside the ScrollView, on top of everything.
+   *
+   * ── Why this slot has to exist ───────────────────────
+   * `AppModal` positions its overlay `absolute; inset: 0`, so it fills whatever
+   * its nearest *positioned* ancestor is. Passing a modal through `children` put
+   * it inside the ScrollView's content container, which is a box as tall as the
+   * whole scrolled page — so the dimmer covered the entire page, the dialog was
+   * centred on the document rather than on the glass (which is why it appeared
+   * "at the middle, wherever I scrolled"), and the footer button behind it stayed
+   * reachable. Rendering dialogs here instead makes `SafeAreaView` (`flex: 1`) the
+   * positioned ancestor, so the overlay matches the phone exactly and the dialog
+   * is centred inside it — the same thing that already worked on Home, which
+   * renders its modals as direct children of its own full-height root.
+   *
+   * This layer is `pointerEvents="box-none"` and absolutely positioned, so it
+   * costs no layout and never blocks the page while no dialog is mounted.
+   */
+  overlay?: React.ReactNode;
 }) {
   const bg = dark ? colors.night : colors.cream;
   const inner = padded ? { padding: spacing(5), paddingBottom: spacing(12) } : undefined;
@@ -143,6 +180,11 @@ export function Screen({
         <View style={[{ flex: 1 }, inner]}>{children}</View>
       )}
       {footer}
+      {overlay ? (
+        <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+          {overlay}
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -453,11 +495,25 @@ backIcon: {
     alignItems: 'center',
     justifyContent: 'center',
   },
-  /** The dialog's own box — no flex, so it shrinks to its content and stays
-   *  centred by the parent rather than stretching to any edge. */
+  /**
+   * The dialog's own box — no flex, so it shrinks to its content and stays
+   * centred by the parent rather than stretching to any edge.
+   *
+   * `width: '100%'` with a `maxWidth` is what makes it responsive: on a phone it
+   * uses the full padded width, and on a wide preview it stops at the dialog
+   * width instead of stretching across the glass. The height cap comes in from
+   * the `maxHeightPct` prop so individual dialogs can ask for more room without
+   * each of them restating the layout rules.
+   */
   modalCenter: {
     width: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
     paddingHorizontal: spacing(4),
+  },
+  modalBox: {
+    width: '100%',
+    maxHeight: '100%',
+    flexShrink: 1,
   },
 });

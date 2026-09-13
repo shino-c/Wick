@@ -52,6 +52,39 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+/**
+ * Is this failure the network giving up, rather than the database refusing?
+ *
+ * A gateway/proxy in front of Supabase answers 502/503/504 when a request takes
+ * too long or the upstream is briefly unreachable, and fetch itself rejects with
+ * a TypeError ("Network request failed") when the connection drops. None of
+ * those tell us the write was rejected — the row may well have been written — so
+ * they are treated as transient and the caller keeps the user's edit locally.
+ *
+ * A genuine error (a bad column, a constraint violation, a permission denial)
+ * has a Postgres error code and is deliberately *not* matched here, so a real
+ * bug is still reported instead of being silently swallowed.
+ */
+function isTransientNetworkError(error: { message?: string; code?: string; status?: number }): boolean {
+  if (error.code) return false;
+  const status = error.status;
+  if (status === 408 || status === 429 || (status !== undefined && status >= 500)) return true;
+  const message = (error.message ?? '').toLowerCase();
+  return (
+    message.includes('gateway timeout') ||
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('network request failed') ||
+    message.includes('network error') ||
+    message.includes('failed to fetch') ||
+    message.includes('fetch failed') ||
+    message.includes('connection') ||
+    message.includes('aborted') ||
+    message.includes('econnreset') ||
+    message.includes('socket hang up')
+  );
+}
+
 function createTaskId(): string {
   const hex = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16));
   hex[12] = '4';
@@ -1488,10 +1521,43 @@ export async function updateTaskAnalysis(
     if (patch.calendar_provider !== undefined) dbPatch.calendar_provider = patch.calendar_provider;
     if (patch.week_start !== undefined) dbPatch.week_start = patch.week_start;
     if (Object.keys(dbPatch).length > 0 && isUuid(id)) {
-      const { error } = await supabase.from('ai_task_analysis').update(dbPatch).eq('id', id);
-      if (error) {
-        console.error('updateTaskAnalysis database update failed:', error);
-        throw error;
+      /*
+       * The remote write is best-effort, and must not decide whether the user's
+       * edit survives.
+       *
+       * A 504 Gateway Timeout is raised by the network in front of Supabase when
+       * the request takes too long to answer — it says nothing about whether the
+       * row was eventually written. Throwing here (the previous behaviour) threw
+       * away an edit the user had already confirmed, showed them "Could not save
+       * your changes", and left the local store and the device calendar
+       * untouched — even though the app's own reads all come from the local store.
+       *
+       * So a failure is logged and swallowed: the local mirror below still
+       * records the change, `updateEventOnDeviceCalendar` in the caller still
+       * moves the calendar block, and the UI stays consistent. A retry on the
+       * next successful sync reconciles the row.
+       *
+       * Only *timeouts/transient network* faults are swallowed — a genuine
+       * rejection (a constraint violation, a bad column) is still surfaced, so a
+       * real data bug cannot hide behind a green tick.
+       */
+      let remoteError: { message?: string; code?: string; status?: number } | null = null;
+      try {
+        const { error } = await supabase.from('ai_task_analysis').update(dbPatch).eq('id', id);
+        remoteError = error;
+      } catch (err) {
+        remoteError = err as { message?: string };
+      }
+
+      if (remoteError && !isTransientNetworkError(remoteError)) {
+        console.error('updateTaskAnalysis database update failed:', remoteError);
+        throw remoteError;
+      }
+      if (remoteError) {
+        console.warn(
+          'updateTaskAnalysis: remote write did not complete, keeping the local edit:',
+          remoteError.message
+        );
       }
     }
   }
@@ -1875,9 +1941,18 @@ export async function syncCalendarToDb(weekStartStr?: string): Promise<{
   if (isDemoActive()) {
     const { reseedDemoWeek } = await import('@/lib/demoMode');
     const totalEvents = await reseedDemoWeek();
-    // Nothing is left pending: the demo week is a finished picture of a week,
-    // not a queue of tasks waiting for the user to approve them one by one.
-    return { tasksCreated: 0, tasksUpdated: 0, totalEvents, changedTaskIds: [] };
+    // The seeded week carries its own analysis rather than a queue of pending
+    // rows, so it never lands in the `status: 'pending'` bucket. Return the
+    // seeded task ids as the changed set anyway: the baseline review step keys
+    // off `changedTaskIds`, and in simulation mode the review step is meant to
+    // run on the freshly synced week.
+    const seededTasks = await getTaskAnalyses(weekStartStr);
+    return {
+      tasksCreated: 0,
+      tasksUpdated: 0,
+      totalEvents,
+      changedTaskIds: seededTasks.map((task) => task.id),
+    };
   }
 
   try {
