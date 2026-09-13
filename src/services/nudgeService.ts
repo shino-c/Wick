@@ -122,6 +122,26 @@ function daysUntil(isoDate: string, now = new Date()): number {
   return Math.round((target.getTime() - base.getTime()) / 86_400_000);
 }
 
+/**
+ * Has today's event already finished?
+ *
+ * daysUntil() works at date granularity, so an 8am exam and an 8pm one both
+ * read as "today" — and urgency of 1/max(1, 0) hands the 8am one the maximum
+ * score at 3pm, hours after it was sat. Suggesting someone prepare for
+ * something already behind them is the fastest way to teach them that these
+ * suggestions are not worth reading.
+ *
+ * An all-day event, or one with no time at all ("report due today"), stays
+ * eligible: there is nothing to compare against and the work may genuinely
+ * still be ahead.
+ */
+function hasPassed(task: TaskAnalysis, now: Date): boolean {
+  if (task.allDay) return false;
+  if (daysUntil(task.scheduled_date, now) !== 0) return false;
+  const ended = toMinutes(task.scheduled_end_time) ?? toMinutes(task.scheduled_start_time);
+  return ended !== null && ended <= minutesOfDay(now);
+}
+
 function dayLabel(isoDate: string, now = new Date()): string {
   const diff = daysUntil(isoDate, now);
   if (diff === 0) return 'today';
@@ -457,6 +477,7 @@ function deskCandidate(ctx: NudgeContext): DeskCandidate | null {
   for (const task of ctx.tasks) {
     if (!FOCUSABLE.has(effectiveCategory(task, ctx.overrides))) continue;
     if (ctx.recurring.has(normaliseTitle(task.title))) continue;
+    if (hasPassed(task, ctx.now)) continue;
 
     const days = daysUntil(task.scheduled_date, ctx.now);
     // Six days, not seven: at exactly a week out dayLabel() would say the same
