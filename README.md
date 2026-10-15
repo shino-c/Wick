@@ -4,6 +4,7 @@
 
 **Problem Statement:** Stress & Workload Manager
 
+**App Prototype:** [ https://goodquestion-wick.expo.app ]
 **Video Presentation:** https://youtu.be/I2ZqSnP1XYU  
 **Presentation Slides:** [https://canva.link/igx68dvzlpzs5me](https://canva.link/igx68dvzlpzs5me)   
 **Readme docs:** https://docs.google.com/document/d/1cWOPC8SYzWQ8XfaWpm0CMP66rhuChU3gbKqTRK_lPAE/edit?usp=sharing
